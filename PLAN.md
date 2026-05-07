@@ -14,7 +14,7 @@ One sentence: **be the only voice the bug reporter hears, and keep the GH issue 
 - Ask one targeted clarifying question when info is insufficient (max 2 rounds).
 - Create GitHub issues with the labels described in [Issue labels](#issue-labels). Embed `<!-- LARK_META -->`.
 - Watch the same Lark thread for follow-up replies; sync substantive replies into the GH issue as comments tagged `<!-- LARK_SYNC -->`.
-- Watch GH for issue lifecycle changes (triage, PR opened, PR merged) on issues we created; mirror them back to the Lark thread.
+- Watch GH for issue lifecycle changes (triage done, issue closed) on issues we created; mirror them back to the Lark thread.
 - Mirror new human comments on GH back to the Lark thread (so the reporter sees engineer questions).
 - Respond when the reporter asks "修了吗 / 修了没"-style questions by reading the GH state, not by re-asking.
 
@@ -63,36 +63,47 @@ class BotIdentity(BaseModel):
 
 ## Issue labels
 
-Every issue bugpatrol creates carries the `bugpatrol` label, in addition to the type/priority labels. This is the **single, authoritative marker** that an issue belongs to the new pipeline (bugpatrol + bugtriage), not the legacy `/larkbug` + `/ghissue triage` skill flow. Coexistence is the point — both pipelines may run on the same repo during cutover, and label-scoping prevents double-handling.
+Kept deliberately small. Every issue bugpatrol creates carries `bugpatrol` plus a type and (for bugs) a priority. State is derived from observable artifacts (issue open/closed, presence of TRIAGE_V1, etc.), not from labels.
 
 | Label | Set by | Meaning |
 |---|---|---|
-| `bugpatrol` | bugpatrol at create | "this issue is owned by the bugpatrol/bugtriage pipeline" |
-| `bug` or `enhancement` | bugpatrol at create | category from classifier |
-| `lark-reported` | bugpatrol at create | source channel was Lark (future: `email-reported`) |
+| `bugpatrol` | bugpatrol at create | "this issue is owned by the bugpatrol/bugtriage pipeline" — cutover gate, never removed |
+| `bug` or `enhancement` | bugpatrol at create | category from classifier (mutually exclusive) |
 | `P0-critical` … `P3-low` | bugpatrol at create | priority from classifier (bugs only) |
 | `needs-confirmation` | bugpatrol at create when `ask_count >= 2` | reporter never produced enough info; created defensively |
-| `triaged` | bugtriage after analysis | observability only — not used in detection |
-| `lark/needs-fix-agent` | bugtriage when verdict=`confirmed_bug` | downstream consumer (fived) spawns fix |
-| `lark/state:*` | bugpatrol mirror loop | reflects derived state for human observers |
 
-bugpatrol **never** removes the `bugpatrol` label. It is the cutover gate; if it goes missing, treat as data loss and refuse to mirror or modify the issue.
+bugpatrol **never** removes the `bugpatrol` label. If it goes missing, treat as data loss and refuse to mirror or modify the issue.
 
-## Conversation state machine (per Lark thread)
+No `lark-reported`, `triaged`, `lark/needs-fix-agent`, or `lark/state:*` labels. Source channel is encoded inside `LARK_META`. Triage status is encoded as the presence of a `<!-- TRIAGE_V1 -->` comment. Fix dispatch is out of scope.
 
-Stored entirely on GH (issue state, labels, comments) and Lark (reactions). No SQLite.
+## Conversation state machines
 
-```
-NEW              → has thread root, no GH issue yet
-INSUFFICIENT     → issue not created, asked once, waiting
-ISSUE_OPEN       → GH issue exists, label:bug or :enhancement, no triaged
-TRIAGED          → issue has TRIAGE_V1 comment + label:triaged
-PR_OPEN          → linked PR exists, not merged
-FIXED            → linked PR merged + issue closed
-REJECTED         → triage verdict was "Works as designed" / "Spec gap" → labeled accordingly
-```
+Two independent state machines, both **derived** every loop tick from observable storage. No persisted enum.
 
-State is **derived**, not stored. Each loop tick re-derives state from GH + Lark API responses.
+### Lark topic states (4)
+
+Per Lark thread (root message + replies):
+
+| State | Predicate | Meaning |
+|---|---|---|
+| `NEW` | no `:eyes:` reaction by self on root | not yet seen |
+| `IGNORED` | self reacted `:eyes:`, no GH issue created, no clarifying question asked | bot looked, decided no action (not-actionable / prd-level / off-topic) |
+| `WAITING` | self asked a clarifying question, no reply yet | needs reporter follow-up; `ask_count` tracked via self-reaction count |
+| `LINKED` | a GH issue exists with `LARK_META.root_id == thread.root_id` | issue created; further updates flow through mirror loop |
+
+Transitions: `NEW → IGNORED` (terminal until new reply), `NEW → WAITING`, `NEW → LINKED`, `WAITING → LINKED`, `WAITING → IGNORED`, `LINKED → LINKED` (sync follow-up replies into the issue). Any new non-self reply on an `IGNORED` thread bumps it back to `NEW` for re-evaluation.
+
+### GH issue states (3)
+
+Per GH issue carrying `LARK_META`:
+
+| State | Predicate | Meaning |
+|---|---|---|
+| `REPORTED` | issue is open, no `<!-- TRIAGE_V1 -->` comment yet | bug filed, awaiting bugtriage |
+| `TRIAGED` | issue is open, has at least one `<!-- TRIAGE_V1 -->` comment | bugtriage has spoken (any verdict) |
+| `CLOSED` | issue is closed (regardless of triage) | nothing more to mirror until reopened |
+
+Mirror loop emits one `LARK_LIFECYCLE` notification per state transition (`reported`, `triaged`, `closed`), recorded in the `LARK_STATE_V1` pinned comment for idempotency.
 
 ## Detection rules
 
@@ -112,9 +123,9 @@ Reactions act as a per-message "I've seen this" watermark, scoped to the bot's o
 
 ### When to mirror an issue back to Lark
 
-Every poll tick (default 5 min), for each open issue carrying `LARK_META`:
+Every poll tick (default 5 min), for each issue carrying `LARK_META` (open OR recently closed):
 
-1. **Lifecycle delta**: derive current state from GH labels + closing PRs. Compare against `LARK_STATE_V1` comment (parsed). For each missing notification stage, post to Lark thread + record in state comment.
+1. **Lifecycle delta**: derive current GH issue state — `REPORTED` (open, no TRIAGE_V1), `TRIAGED` (open, has TRIAGE_V1), or `CLOSED` (closed). Compare against `LARK_STATE_V1` comment (parsed). For each stage not yet announced (`reported` / `triaged` / `closed`), post to Lark thread + record in state comment.
 2. **Comment delta**: for each issue comment created after the last `LARK_LIFECYCLE` mirror message in the thread, classify by marker:
    - `LARK_SYNC` → skip (we wrote it)
    - `LARK_LIFECYCLE` / `LARK_STATE_V1` → skip
@@ -165,7 +176,7 @@ bugpatrol/
       images.py               # download + sips shrink, embed via lark-issue-assets branch
       video.py                # Gemini provider (optional)
     state/
-      derive.py               # GH state → enum (REPORTED/TRIAGED/FIXING/FIXED/...)
+      derive.py               # GH state → enum (REPORTED/TRIAGED/CLOSED); Lark thread → enum (NEW/IGNORED/WAITING/LINKED)
       reconcile.py            # port of scripts/issue_state.py reconcile-all
       meta.py                 # LARK_META / LARK_STATE_V1 / LARK_SYNC parsers + writers
       dedup.py                # port of scripts/larkbug_dedup.py
@@ -199,9 +210,10 @@ All commands accept `--config /path/to/bugpatrol.toml` for non-default identity 
 | Concern | Where |
 |---|---|
 | "this Lark message processed?" | `:eyes:` reaction by self on the message |
+| "asked a clarifying question already?" | `:question:` reaction by self on the message (count = `ask_count`) |
 | "this issue belongs to which Lark thread?" | `LARK_META` HTML comment in issue body |
-| "what notifications were sent for this issue?" | `LARK_STATE_V1` JSON in pinned bot comment |
-| "is there an open PR for this thread?" | live query via `larkbug_dedup` (search by `LARK_META.root_id`) |
+| "what lifecycle notifications were sent for this issue?" | `LARK_STATE_V1` JSON in pinned bot comment (`reported` / `triaged` / `closed`) |
+| "does a GH issue already exist for this thread?" | live `gh issue list` filtered by `LARK_META.root_id` |
 | "last human reply we mirrored?" | newest `LARK_LIFECYCLE: stage=mirror_comment` in thread |
 
 Restart → re-derive everything from GH + Lark.
