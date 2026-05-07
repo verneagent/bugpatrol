@@ -12,7 +12,7 @@ One sentence: **be the only voice the bug reporter hears, and keep the GH issue 
 - Classify each new top-level message as: `bug` / `enhancement` / `prd-level` / `insufficient-info` / `not-actionable`.
 - Read screenshots (Claude SDK multimodal) and video clips (Gemini, optional).
 - Ask one targeted clarifying question when info is insufficient (max 2 rounds).
-- Create GitHub issues with `bug` or `enhancement` label. Embed `<!-- LARK_META -->`.
+- Create GitHub issues with the labels described in [Issue labels](#issue-labels). Embed `<!-- LARK_META -->`.
 - Watch the same Lark thread for follow-up replies; sync substantive replies into the GH issue as comments tagged `<!-- LARK_SYNC -->`.
 - Watch GH for issue lifecycle changes (triage, PR opened, PR merged) on issues we created; mirror them back to the Lark thread.
 - Mirror new human comments on GH back to the Lark thread (so the reporter sees engineer questions).
@@ -60,6 +60,23 @@ class BotIdentity(BaseModel):
 | `<!-- LARK_LIFECYCLE: stage=... -->` | bugpatrol on issue comment | bot housekeeping; ignore |
 | `<!-- LARK_STATE_V1 -->` | bugpatrol on issue comment | state-machine record (port of `scripts/issue_state.py`); ignore |
 | `<!-- TRIAGE_V1: ts=... -->` | bugtriage on issue comment | triage analysis; bugpatrol summarizes back to Lark |
+
+## Issue labels
+
+Every issue bugpatrol creates carries the `bugpatrol` label, in addition to the type/priority labels. This is the **single, authoritative marker** that an issue belongs to the new pipeline (bugpatrol + bugtriage), not the legacy `/larkbug` + `/ghissue triage` skill flow. Coexistence is the point — both pipelines may run on the same repo during cutover, and label-scoping prevents double-handling.
+
+| Label | Set by | Meaning |
+|---|---|---|
+| `bugpatrol` | bugpatrol at create | "this issue is owned by the bugpatrol/bugtriage pipeline" |
+| `bug` or `enhancement` | bugpatrol at create | category from classifier |
+| `lark-reported` | bugpatrol at create | source channel was Lark (future: `email-reported`) |
+| `P0-critical` … `P3-low` | bugpatrol at create | priority from classifier (bugs only) |
+| `needs-confirmation` | bugpatrol at create when `ask_count >= 2` | reporter never produced enough info; created defensively |
+| `triaged` | bugtriage after analysis | observability only — not used in detection |
+| `lark/needs-fix-agent` | bugtriage when verdict=`confirmed_bug` | downstream consumer (fived) spawns fix |
+| `lark/state:*` | bugpatrol mirror loop | reflects derived state for human observers |
+
+bugpatrol **never** removes the `bugpatrol` label. It is the cutover gate; if it goes missing, treat as data loss and refuse to mirror or modify the issue.
 
 ## Conversation state machine (per Lark thread)
 
