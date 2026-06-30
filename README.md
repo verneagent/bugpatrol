@@ -128,4 +128,7 @@ python -m bugpatrol watch-lark projects/todo-sandbox.toml --interval 30 --limit 
 
 # Resolve owners from CODEOWNERS.
 python -m bugpatrol resolve-owner ../bugpatrol-todo-sandbox src/todo/list.ts
+
+# Search local PRD markdown cache.
+python -m bugpatrol search-prd ../bugpatrol-todo-sandbox/docs/prd "todo empty state"
 ```

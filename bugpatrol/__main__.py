@@ -18,6 +18,7 @@ from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lark import LarkOpenApiMessengerClient
 from bugpatrol.ownership import load_codeowners, resolve_owners
+from bugpatrol.prd import load_prd_documents, search_prd_documents
 from bugpatrol.watcher import run_polling_watcher
 
 
@@ -57,6 +58,11 @@ def main(argv: list[str] | None = None) -> int:
     owner = sub.add_parser("resolve-owner", help="resolve owners for paths using CODEOWNERS")
     owner.add_argument("repo_path", type=Path)
     owner.add_argument("paths", nargs="+")
+
+    prd = sub.add_parser("search-prd", help="search local PRD markdown docs")
+    prd.add_argument("root", type=Path)
+    prd.add_argument("query")
+    prd.add_argument("--limit", type=int, default=5)
 
     args = parser.parse_args(argv)
 
@@ -178,6 +184,12 @@ def main(argv: list[str] | None = None) -> int:
                 ensure_ascii=False,
             )
         )
+        return 0
+
+    if args.command == "search-prd":
+        docs = load_prd_documents(args.root)
+        hits = search_prd_documents(args.query, docs, limit=args.limit)
+        print(json.dumps([hit.__dict__ for hit in hits], ensure_ascii=False))
         return 0
 
     parser.print_help(file=sys.stderr)

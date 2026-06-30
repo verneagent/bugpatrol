@@ -67,6 +67,7 @@ Implemented:
   Lark history checks.
 - Polling `watch-lark` CLI with `--once` and `--dry-run`.
 - CODEOWNERS parser/resolver and `resolve-owner` CLI.
+- Local PRD markdown loader/searcher and `search-prd` CLI.
 
 Not implemented:
 
@@ -245,6 +246,7 @@ The runner user should have:
 - [x] Add opt-in live e2e fixture for a real human Lark message id.
 - [x] Implement long-running polling watcher.
 - [x] Implement CODEOWNERS owner resolver.
+- [x] Implement local PRD search for triage context.
 - [ ] Implement WebSocket event receiver.
 - [ ] Support non-text attachment/resource normalization.
 
@@ -293,6 +295,8 @@ The runner user should have:
 - Added CODEOWNERS owner resolver. Sandbox checks:
   `src/todo/list.ts -> @garlanddiego`,
   `src/notifications/reminders.ts -> @verneagent`.
+- Added PRD search. Sandbox query `todo empty state` returns
+  `todo-list.md` as the top hit.
 - Added `TheCloverLab/bugpatrol-todo-sandbox` issue triage smoke workflow. It
   installs bugpatrol and runs `doctor` on the self-hosted label
   `bugpatrol-sandbox-triage`. Workflow registration and manual dispatch were
