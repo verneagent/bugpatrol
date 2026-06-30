@@ -314,6 +314,9 @@ The runner user should have:
   - triage comment
   - fields including `Triage verdict=代码 Bug`, `Triage status=Done`,
     `Priority=High`, `Owner reason=CODEOWNERS`
+- Added opt-in live e2e for triage result application. It creates a temporary
+  org sandbox issue, applies type/fields/comment/assignee, asserts readback, and
+  closes the issue.
 - Added `run-triage` dry-run CLI and wired sandbox workflow to run doctor plus
   triage context preparation on the self-hosted runner label.
 - Added `TheCloverLab/bugpatrol-todo-sandbox` issue triage smoke workflow. It
