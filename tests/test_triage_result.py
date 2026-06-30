@@ -4,13 +4,16 @@ import unittest
 from pathlib import Path
 
 from bugpatrol.config import load_project_config
-from bugpatrol.clients import GitHubIssueComment
+from bugpatrol.clients import GitHubIssue, GitHubIssueComment
+from bugpatrol.intake import IntakeRecord, parse_intake_metadata, render_issue_body
+from bugpatrol.testing.fakes import FakeLarkMessengerClient
 from bugpatrol.triage_result import (
     TriageResult,
     append_triage_metadata,
     apply_triage_result,
     parse_triage_metadata,
     parse_triage_result,
+    render_needs_info_lark_message,
     triage_result_fingerprint,
 )
 
@@ -37,6 +40,7 @@ class FakeGithub:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
         self.comments: list[str] = []
+        self.issue_body = ""
 
     def set_issue_type(self, **kwargs: object) -> None:
         self.calls.append(("set_issue_type", kwargs))
@@ -53,6 +57,15 @@ class FakeGithub:
         return tuple(
             GitHubIssueComment(id=str(index + 1), body=body)
             for index, body in enumerate(self.comments)
+        )
+
+    def get_issue(self, **kwargs: object) -> GitHubIssue:
+        self.calls.append(("get_issue", kwargs))
+        return GitHubIssue(
+            number=int(kwargs["issue_number"]),
+            url=f"https://github.test/o/r/issues/{kwargs['issue_number']}",
+            title="issue",
+            body=self.issue_body,
         )
 
 
@@ -77,6 +90,13 @@ class TriageResultTest(unittest.TestCase):
         data["triage_verdict"] = "Not a verdict"
 
         with self.assertRaisesRegex(ValueError, "invalid value"):
+            parse_triage_result(data)
+
+    def test_parse_triage_result_requires_questions_for_needs_info(self) -> None:
+        data = dict(VALID)
+        data["triage_status"] = "Needs info"
+
+        with self.assertRaisesRegex(ValueError, "follow_up_questions"):
             parse_triage_result(data)
 
     def test_apply_triage_result_writes_type_fields_comment_and_assignee(self) -> None:
@@ -148,6 +168,86 @@ class TriageResultTest(unittest.TestCase):
         self.assertTrue(second.duplicate_comment_skipped)
         self.assertEqual(len(github.comments), 1)
         self.assertEqual(second.result_fingerprint, triage_result_fingerprint(result))
+
+    def test_intake_metadata_round_trips_for_lark_follow_up(self) -> None:
+        body = render_issue_body(
+            IntakeRecord(
+                reporter_name="Reporter",
+                reporter_open_id="ou_1",
+                created_at="2026-07-01T00:00:00Z",
+                chat_id="oc_1",
+                root_id="om_root",
+                message_id="om_1",
+                original_text="bug",
+            ),
+            language="zh-CN",
+        )
+
+        metadata = parse_intake_metadata(body)
+
+        self.assertIsNotNone(metadata)
+        assert metadata is not None
+        self.assertEqual(metadata["chat_id"], "oc_1")
+        self.assertEqual(metadata["message_id"], "om_1")
+
+    def test_apply_needs_info_sends_lark_follow_up_once(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.issue_body = render_issue_body(
+            IntakeRecord(
+                reporter_name="Reporter",
+                reporter_open_id="ou_1",
+                created_at="2026-07-01T00:00:00Z",
+                chat_id=config.lark.chat_id,
+                root_id="om_root",
+                message_id="om_1",
+                original_text="bug",
+            ),
+            language=config.intake.language,
+        )
+        issue_fields = FakeIssueFields()
+        lark = FakeLarkMessengerClient()
+        data = dict(VALID)
+        data["triage_status"] = "Needs info"
+        data["follow_up_questions"] = ["请补充复现账号", "请补充发生时间"]
+        result = parse_triage_result(data)
+
+        first = apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+            lark=lark,
+        )
+        second = apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+            lark=lark,
+        )
+
+        self.assertTrue(first.comment_added)
+        self.assertFalse(second.comment_added)
+        self.assertEqual(len(lark.replies), 1)
+        self.assertEqual(lark.replies[0].chat_id, config.lark.chat_id)
+        self.assertEqual(lark.replies[0].message_id, "om_1")
+        self.assertIn("请补充复现账号", lark.replies[0].text)
+
+    def test_render_needs_info_lark_message_lists_questions(self) -> None:
+        message = render_needs_info_lark_message(
+            issue_number=7,
+            issue_url="https://github.test/o/r/issues/7",
+            questions=("问题一", "问题二"),
+        )
+
+        self.assertIn("#7", message)
+        self.assertIn("1. 问题一", message)
+        self.assertIn("2. 问题二", message)
 
 
 if __name__ == "__main__":

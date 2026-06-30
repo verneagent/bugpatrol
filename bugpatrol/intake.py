@@ -101,6 +101,21 @@ def render_issue_body(record: IntakeRecord, *, language: str = "en-US") -> str:
     )
 
 
+def parse_intake_metadata(body: str) -> dict[str, Any] | None:
+    marker = f"<!-- {INTAKE_META_MARKER}:"
+    start = body.find(marker)
+    if start == -1:
+        return None
+    json_start = start + len(marker)
+    end = body.find(" -->", json_start)
+    if end == -1:
+        return None
+    data = json.loads(body[json_start:end])
+    if not isinstance(data, dict):
+        raise ValueError("intake metadata must be a JSON object")
+    return data
+
+
 def _required_str(data: dict[str, Any], key: str) -> str:
     value = data.get(key)
     if not isinstance(value, str) or not value:

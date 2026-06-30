@@ -14,6 +14,7 @@ class CreatedIssue:
     issue_type: str
     fields: dict[str, str]
     comments: list[str] = field(default_factory=list)
+    assignees: list[str] = field(default_factory=list)
 
 
 class FakeGitHubIssuesClient:
@@ -56,6 +57,12 @@ class FakeGitHubIssuesClient:
                 return
         raise ValueError(f"issue not found: {repo}#{issue_number}")
 
+    def get_issue(self, *, repo: str, issue_number: int) -> GitHubIssue:
+        for item in self.created:
+            if item.repo == repo and item.issue.number == issue_number:
+                return item.issue
+        raise ValueError(f"issue not found: {repo}#{issue_number}")
+
     def list_issue_comments(self, *, repo: str, issue_number: int) -> tuple[GitHubIssueComment, ...]:
         for item in self.created:
             if item.repo == repo and item.issue.number == issue_number:
@@ -63,6 +70,21 @@ class FakeGitHubIssuesClient:
                     GitHubIssueComment(id=str(index + 1), body=body)
                     for index, body in enumerate(item.comments)
                 )
+        raise ValueError(f"issue not found: {repo}#{issue_number}")
+
+    def set_issue_type(self, *, repo: str, issue_number: int, issue_type: str) -> None:
+        for item in self.created:
+            if item.repo == repo and item.issue.number == issue_number:
+                item.issue_type = issue_type
+                return
+        raise ValueError(f"issue not found: {repo}#{issue_number}")
+
+    def add_assignee(self, *, repo: str, issue_number: int, assignee: str) -> None:
+        for item in self.created:
+            if item.repo == repo and item.issue.number == issue_number:
+                if assignee not in item.assignees:
+                    item.assignees.append(assignee)
+                return
         raise ValueError(f"issue not found: {repo}#{issue_number}")
 
 

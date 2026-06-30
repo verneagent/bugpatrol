@@ -8,10 +8,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from bugpatrol.clients import LarkMessengerClient
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import NATIVE_ISSUE_TYPES, default_field_specs, validate_field_value
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
+from bugpatrol.intake import parse_intake_metadata
 
 
 @dataclass(frozen=True)
@@ -20,6 +22,7 @@ class TriageResult:
     fields: dict[str, str]
     assignee: str
     comment_markdown: str
+    follow_up_questions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,9 @@ def parse_triage_result(data: dict[str, Any]) -> TriageResult:
     }
     for field, value in fields.items():
         validate_field_value(field, value, default_field_specs())
+    follow_up_questions = _optional_str_tuple(data, "follow_up_questions")
+    if fields["Triage status"] == "Needs info" and not follow_up_questions:
+        raise ValueError("Needs info triage requires follow_up_questions")
     assignee = _required_str(data, "assignee").lstrip("@")
     comment = _required_str(data, "comment_markdown")
     return TriageResult(
@@ -66,6 +72,7 @@ def parse_triage_result(data: dict[str, Any]) -> TriageResult:
         fields=fields,
         assignee=assignee,
         comment_markdown=comment,
+        follow_up_questions=follow_up_questions,
     )
 
 
@@ -77,6 +84,7 @@ def apply_triage_result(
     result: TriageResult,
     github: GitHubCliIssuesClient,
     issue_fields: GitHubIssueFieldsClient,
+    lark: LarkMessengerClient | None = None,
 ) -> TriageApplySummary:
     fingerprint = triage_result_fingerprint(result)
     github.set_issue_type(repo=repo, issue_number=issue_number, issue_type=result.issue_type)
@@ -93,6 +101,14 @@ def apply_triage_result(
         fingerprint=fingerprint,
     )
     if not duplicate:
+        if lark is not None and result.fields["Triage status"] == "Needs info":
+            _send_lark_follow_up(
+                repo=repo,
+                issue_number=issue_number,
+                result=result,
+                github=github,
+                lark=lark,
+            )
         github.add_issue_comment(
             repo=repo,
             issue_number=issue_number,
@@ -122,6 +138,7 @@ def triage_result_fingerprint(result: TriageResult) -> str:
         "fields": result.fields,
         "assignee": result.assignee,
         "comment_markdown": result.comment_markdown,
+        "follow_up_questions": result.follow_up_questions,
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -160,8 +177,63 @@ def _has_applied_triage_fingerprint(
     return False
 
 
+def _send_lark_follow_up(
+    *,
+    repo: str,
+    issue_number: int,
+    result: TriageResult,
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient,
+) -> None:
+    issue = github.get_issue(repo=repo, issue_number=issue_number)
+    metadata = parse_intake_metadata(issue.body or "")
+    if metadata is None:
+        return
+    chat_id = _metadata_str(metadata, "chat_id")
+    message_id = _metadata_str(metadata, "message_id")
+    if not chat_id or not message_id:
+        return
+    lark.reply_to_message(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=render_needs_info_lark_message(
+            issue_number=issue_number,
+            issue_url=issue.url,
+            questions=result.follow_up_questions,
+        ),
+    )
+
+
+def render_needs_info_lark_message(
+    *,
+    issue_number: int,
+    issue_url: str,
+    questions: tuple[str, ...],
+) -> str:
+    lines = [
+        f"需要补充信息，GitHub issue #{issue_number}: {issue_url}",
+        "",
+    ]
+    lines.extend(f"{index}. {question}" for index, question in enumerate(questions, start=1))
+    return "\n".join(lines)
+
+
 def _required_str(data: dict[str, Any], key: str) -> str:
     value = data.get(key)
     if not isinstance(value, str) or not value:
         raise ValueError(f"missing string field: {key}")
     return value
+
+
+def _optional_str_tuple(data: dict[str, Any], key: str) -> tuple[str, ...]:
+    value = data.get(key)
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise ValueError(f"{key} must be a string array")
+    return tuple(value)
+
+
+def _metadata_str(data: dict[str, Any], key: str) -> str:
+    value = data.get(key)
+    return value if isinstance(value, str) else ""
