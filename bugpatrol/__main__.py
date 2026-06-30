@@ -20,6 +20,7 @@ from bugpatrol.lark import LarkOpenApiMessengerClient
 from bugpatrol.ownership import load_codeowners, resolve_owners
 from bugpatrol.prd import load_prd_documents, search_prd_documents
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
+from bugpatrol.triage_result import apply_triage_result, parse_triage_result
 from bugpatrol.watcher import run_polling_watcher
 
 
@@ -70,6 +71,11 @@ def main(argv: list[str] | None = None) -> int:
     context.add_argument("--issue", type=int, required=True)
     context.add_argument("--repo-path", type=Path, required=True)
     context.add_argument("--output", type=Path)
+
+    apply_result = sub.add_parser("apply-triage-result", help="validate and apply triage JSON")
+    apply_result.add_argument("project_config", type=Path)
+    apply_result.add_argument("--issue", type=int, required=True)
+    apply_result.add_argument("--input", type=Path, required=True)
 
     args = parser.parse_args(argv)
 
@@ -209,6 +215,21 @@ def main(argv: list[str] | None = None) -> int:
             args.output.write_text(markdown)
         else:
             print(markdown)
+        return 0
+
+    if args.command == "apply-triage-result":
+        config = load_project_config(args.project_config)
+        data = json.loads(args.input.read_text())
+        result = parse_triage_result(data)
+        apply_triage_result(
+            repo=config.github_repo,
+            issue_number=args.issue,
+            config=config,
+            result=result,
+            github=GitHubCliIssuesClient(),
+            issue_fields=GitHubIssueFieldsClient(),
+        )
+        print(json.dumps({"ok": True, "issue": args.issue}, ensure_ascii=False))
         return 0
 
     parser.print_help(file=sys.stderr)

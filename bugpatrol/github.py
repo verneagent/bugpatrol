@@ -174,6 +174,19 @@ class GitHubCliIssuesClient:
             ]
         )
 
+    def add_assignee(self, *, repo: str, issue_number: int, assignee: str) -> None:
+        self._run(
+            [
+                "issue",
+                "edit",
+                str(issue_number),
+                "--repo",
+                repo,
+                "--add-assignee",
+                assignee,
+            ]
+        )
+
     def _run(self, args: Sequence[str], *, stdin: str | None = None) -> CommandResult:
         completed = subprocess.run(
             [self._gh, *args],

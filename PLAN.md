@@ -69,6 +69,8 @@ Implemented:
 - CODEOWNERS parser/resolver and `resolve-owner` CLI.
 - Local PRD markdown loader/searcher and `search-prd` CLI.
 - Triage context builder that combines GitHub issue body with local PRD hits.
+- Triage result validator/applier for native Issue Type, Issue Fields, comment,
+  and assignee.
 
 Not implemented:
 
@@ -249,6 +251,7 @@ The runner user should have:
 - [x] Implement CODEOWNERS owner resolver.
 - [x] Implement local PRD search for triage context.
 - [x] Implement deterministic triage context markdown builder.
+- [x] Implement validated triage JSON ingestion.
 - [ ] Implement WebSocket event receiver.
 - [ ] Support non-text attachment/resource normalization.
 
@@ -301,6 +304,13 @@ The runner user should have:
   `todo-list.md` as the top hit.
 - Added `issue-context` CLI. Live smoke against org sandbox issue #3 generated
   context with issue body plus PRD hits headed by `todo-list.md`.
+- Added `apply-triage-result` CLI. Live smoke against org sandbox issue #4
+  verified:
+  - native Issue Type `Bug`
+  - assignee `garlanddiego`
+  - triage comment
+  - fields including `Triage verdict=代码 Bug`, `Triage status=Done`,
+    `Priority=High`, `Owner reason=CODEOWNERS`
 - Added `TheCloverLab/bugpatrol-todo-sandbox` issue triage smoke workflow. It
   installs bugpatrol and runs `doctor` on the self-hosted label
   `bugpatrol-sandbox-triage`. Workflow registration and manual dispatch were

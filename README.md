@@ -137,4 +137,9 @@ python -m bugpatrol issue-context projects/todo-sandbox.toml \
   --issue 3 \
   --repo-path ../bugpatrol-todo-sandbox \
   --output triage-context.md
+
+# Validate and apply a triage JSON result.
+python -m bugpatrol apply-triage-result projects/todo-sandbox.toml \
+  --issue 4 \
+  --input triage-output.json
 ```
