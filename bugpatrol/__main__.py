@@ -19,6 +19,7 @@ from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lark import LarkOpenApiMessengerClient
 from bugpatrol.ownership import load_codeowners, resolve_owners
 from bugpatrol.prd import load_prd_documents, search_prd_documents
+from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
 from bugpatrol.watcher import run_polling_watcher
 
 
@@ -63,6 +64,12 @@ def main(argv: list[str] | None = None) -> int:
     prd.add_argument("root", type=Path)
     prd.add_argument("query")
     prd.add_argument("--limit", type=int, default=5)
+
+    context = sub.add_parser("issue-context", help="build triage context markdown for an issue")
+    context.add_argument("project_config", type=Path)
+    context.add_argument("--issue", type=int, required=True)
+    context.add_argument("--repo-path", type=Path, required=True)
+    context.add_argument("--output", type=Path)
 
     args = parser.parse_args(argv)
 
@@ -190,6 +197,18 @@ def main(argv: list[str] | None = None) -> int:
         docs = load_prd_documents(args.root)
         hits = search_prd_documents(args.query, docs, limit=args.limit)
         print(json.dumps([hit.__dict__ for hit in hits], ensure_ascii=False))
+        return 0
+
+    if args.command == "issue-context":
+        config = load_project_config(args.project_config)
+        issue = GitHubCliIssuesClient().get_issue(repo=config.github_repo, issue_number=args.issue)
+        prd_root = args.repo_path / config.prd.cache_path
+        context = build_triage_context(issue=issue, prd_root=prd_root)
+        markdown = render_triage_context_markdown(context)
+        if args.output:
+            args.output.write_text(markdown)
+        else:
+            print(markdown)
         return 0
 
     parser.print_help(file=sys.stderr)

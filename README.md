@@ -131,4 +131,10 @@ python -m bugpatrol resolve-owner ../bugpatrol-todo-sandbox src/todo/list.ts
 
 # Search local PRD markdown cache.
 python -m bugpatrol search-prd ../bugpatrol-todo-sandbox/docs/prd "todo empty state"
+
+# Build deterministic triage context for an issue.
+python -m bugpatrol issue-context projects/todo-sandbox.toml \
+  --issue 3 \
+  --repo-path ../bugpatrol-todo-sandbox \
+  --output triage-context.md
 ```

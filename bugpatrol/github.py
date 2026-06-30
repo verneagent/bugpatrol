@@ -135,6 +135,23 @@ class GitHubCliIssuesClient:
             raise GitHubCliError(f"unexpected repository response: {data!r}")
         return data
 
+    def get_issue(self, *, repo: str, issue_number: int) -> GitHubIssue:
+        result = self._run(
+            [
+                "api",
+                "-H",
+                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                f"/repos/{repo}/issues/{issue_number}",
+            ]
+        )
+        data = json.loads(result.stdout)
+        return GitHubIssue(
+            number=int(data["number"]),
+            url=str(data["html_url"]),
+            title=str(data["title"]),
+            body=str(data.get("body") or ""),
+        )
+
     def list_issue_types(self, *, repo: str) -> tuple[str, ...]:
         result = self._run(
             ["api", "-H", f"X-GitHub-Api-Version: {GITHUB_API_VERSION}", f"/repos/{repo}/issue-types"]

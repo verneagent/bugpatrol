@@ -68,6 +68,7 @@ Implemented:
 - Polling `watch-lark` CLI with `--once` and `--dry-run`.
 - CODEOWNERS parser/resolver and `resolve-owner` CLI.
 - Local PRD markdown loader/searcher and `search-prd` CLI.
+- Triage context builder that combines GitHub issue body with local PRD hits.
 
 Not implemented:
 
@@ -247,6 +248,7 @@ The runner user should have:
 - [x] Implement long-running polling watcher.
 - [x] Implement CODEOWNERS owner resolver.
 - [x] Implement local PRD search for triage context.
+- [x] Implement deterministic triage context markdown builder.
 - [ ] Implement WebSocket event receiver.
 - [ ] Support non-text attachment/resource normalization.
 
@@ -297,6 +299,8 @@ The runner user should have:
   `src/notifications/reminders.ts -> @verneagent`.
 - Added PRD search. Sandbox query `todo empty state` returns
   `todo-list.md` as the top hit.
+- Added `issue-context` CLI. Live smoke against org sandbox issue #3 generated
+  context with issue body plus PRD hits headed by `todo-list.md`.
 - Added `TheCloverLab/bugpatrol-todo-sandbox` issue triage smoke workflow. It
   installs bugpatrol and runs `doctor` on the self-hosted label
   `bugpatrol-sandbox-triage`. Workflow registration and manual dispatch were
