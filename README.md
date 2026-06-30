@@ -142,4 +142,10 @@ python -m bugpatrol issue-context projects/todo-sandbox.toml \
 python -m bugpatrol apply-triage-result projects/todo-sandbox.toml \
   --issue 4 \
   --input triage-output.json
+
+# Prepare triage context/schema/agent command without executing the agent.
+python -m bugpatrol run-triage projects/todo-sandbox.toml \
+  --issue 3 \
+  --repo-path ../bugpatrol-todo-sandbox \
+  --output-dir .bugpatrol/triage-3
 ```

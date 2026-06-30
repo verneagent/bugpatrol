@@ -21,6 +21,7 @@ from bugpatrol.ownership import load_codeowners, resolve_owners
 from bugpatrol.prd import load_prd_documents, search_prd_documents
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
 from bugpatrol.triage_result import apply_triage_result, parse_triage_result
+from bugpatrol.triage_runner import execute_triage_run, prepare_triage_run
 from bugpatrol.watcher import run_polling_watcher
 
 
@@ -40,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
     agent.add_argument("--prompt", type=Path, default=Path("prompts/triage.zh.md"))
     agent.add_argument("--schema", type=Path, default=Path("triage.schema.json"))
     agent.add_argument("--output", type=Path, default=Path("triage-output.json"))
+    agent.add_argument("--context", type=Path)
 
     backfill = sub.add_parser("backfill-lark", help="backfill recent Lark messages into GitHub")
     backfill.add_argument("project_config", type=Path)
@@ -77,6 +79,13 @@ def main(argv: list[str] | None = None) -> int:
     apply_result.add_argument("--issue", type=int, required=True)
     apply_result.add_argument("--input", type=Path, required=True)
 
+    run_triage = sub.add_parser("run-triage", help="prepare and optionally execute triage")
+    run_triage.add_argument("project_config", type=Path)
+    run_triage.add_argument("--issue", type=int, required=True)
+    run_triage.add_argument("--repo-path", type=Path, required=True)
+    run_triage.add_argument("--output-dir", type=Path, default=Path(".bugpatrol/triage-run"))
+    run_triage.add_argument("--execute", action="store_true")
+
     args = parser.parse_args(argv)
 
     if args.command == "validate-config":
@@ -100,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
             prompt_path=args.prompt,
             schema_path=args.schema,
             output_path=args.output,
+            context_path=args.context,
         )
         print(json.dumps({"provider": invocation.provider, "command": invocation.command}, ensure_ascii=False))
         return 0
@@ -230,6 +240,40 @@ def main(argv: list[str] | None = None) -> int:
             issue_fields=GitHubIssueFieldsClient(),
         )
         print(json.dumps({"ok": True, "issue": args.issue}, ensure_ascii=False))
+        return 0
+
+    if args.command == "run-triage":
+        config = load_project_config(args.project_config)
+        github = GitHubCliIssuesClient()
+        issue_fields = GitHubIssueFieldsClient()
+        plan = prepare_triage_run(
+            config=config,
+            issue_number=args.issue,
+            repo_path=args.repo_path,
+            output_dir=args.output_dir,
+            github=github,
+        )
+        if args.execute:
+            execute_triage_run(
+                config=config,
+                issue_number=args.issue,
+                plan=plan,
+                github=github,
+                issue_fields=issue_fields,
+            )
+        print(
+            json.dumps(
+                {
+                    "execute": args.execute,
+                    "context": str(plan.context_path),
+                    "schema": str(plan.schema_path),
+                    "output": str(plan.output_path),
+                    "provider": plan.invocation.provider,
+                    "command": plan.invocation.command,
+                },
+                ensure_ascii=False,
+            )
+        )
         return 0
 
     parser.print_help(file=sys.stderr)

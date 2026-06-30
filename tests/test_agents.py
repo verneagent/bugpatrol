@@ -16,6 +16,7 @@ class AgentsTest(unittest.TestCase):
             prompt_path=Path("prompts/triage.zh.md"),
             schema_path=Path("triage.schema.json"),
             output_path=Path("triage-output.json"),
+            context_path=Path("triage-context.md"),
         )
 
         self.assertEqual(invocation.provider, "codex")
@@ -23,6 +24,7 @@ class AgentsTest(unittest.TestCase):
         self.assertIn("--output-schema", invocation.command)
         self.assertNotIn("OPENAI_API_KEY", " ".join(invocation.command))
         self.assertIn("Issue: #123", invocation.command[-1])
+        self.assertIn("triage-context.md", invocation.command[-1])
 
     def test_supports_claude_provider_boundary(self) -> None:
         config = load_project_config(Path("projects/fived.toml"))
@@ -51,6 +53,7 @@ class AgentsTest(unittest.TestCase):
             prompt_path=Path("prompts/triage.zh.md"),
             schema_path=Path("triage.schema.json"),
             output_path=Path("triage-output.json"),
+            context_path=None,
         )
 
         self.assertEqual(invocation.provider, "claude")

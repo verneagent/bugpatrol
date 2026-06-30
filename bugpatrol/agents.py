@@ -21,6 +21,7 @@ def build_triage_agent_invocation(
     prompt_path: Path,
     schema_path: Path,
     output_path: Path,
+    context_path: Path | None = None,
 ) -> AgentInvocation:
     provider = config.triage_agent.provider
     if provider == "codex":
@@ -30,6 +31,7 @@ def build_triage_agent_invocation(
             prompt_path=prompt_path,
             schema_path=schema_path,
             output_path=output_path,
+            context_path=context_path,
         )
     elif provider == "claude":
         command = _build_claude_command(
@@ -38,22 +40,30 @@ def build_triage_agent_invocation(
             prompt_path=prompt_path,
             schema_path=schema_path,
             output_path=output_path,
+            context_path=context_path,
         )
     else:
         raise ValueError(f"unsupported triage agent provider: {provider}")
     return AgentInvocation(provider=provider, command=command)
 
 
-def _common_prompt(config: ProjectConfig, *, issue_number: int, prompt_path: Path) -> str:
-    return "\n".join(
-        [
-            f"Use prompt file: {prompt_path}",
-            f"Project: {config.project}",
-            f"Repository: {config.github_repo}",
-            f"Issue: #{issue_number}",
-            "Return only JSON matching the provided schema.",
-        ]
-    )
+def _common_prompt(
+    config: ProjectConfig,
+    *,
+    issue_number: int,
+    prompt_path: Path,
+    context_path: Path | None,
+) -> str:
+    lines = [
+        f"Use prompt file: {prompt_path}",
+        f"Project: {config.project}",
+        f"Repository: {config.github_repo}",
+        f"Issue: #{issue_number}",
+    ]
+    if context_path is not None:
+        lines.append(f"Use triage context file: {context_path}")
+    lines.append("Return only JSON matching the provided schema.")
+    return "\n".join(lines)
 
 
 def _build_codex_command(
@@ -63,6 +73,7 @@ def _build_codex_command(
     prompt_path: Path,
     schema_path: Path,
     output_path: Path,
+    context_path: Path | None,
 ) -> list[str]:
     command = [
         "codex",
@@ -76,7 +87,14 @@ def _build_codex_command(
         command.extend(["--model", config.triage_agent.model])
     if config.triage_agent.effort:
         command.extend(["--effort", config.triage_agent.effort])
-    command.append(_common_prompt(config, issue_number=issue_number, prompt_path=prompt_path))
+    command.append(
+        _common_prompt(
+            config,
+            issue_number=issue_number,
+            prompt_path=prompt_path,
+            context_path=context_path,
+        )
+    )
     return command
 
 
@@ -87,10 +105,16 @@ def _build_claude_command(
     prompt_path: Path,
     schema_path: Path,
     output_path: Path,
+    context_path: Path | None,
 ) -> list[str]:
     prompt = "\n".join(
         [
-            _common_prompt(config, issue_number=issue_number, prompt_path=prompt_path),
+            _common_prompt(
+                config,
+                issue_number=issue_number,
+                prompt_path=prompt_path,
+                context_path=context_path,
+            ),
             f"Schema file: {schema_path}",
             f"Write final JSON to: {output_path}",
         ]

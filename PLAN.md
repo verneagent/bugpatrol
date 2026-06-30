@@ -71,6 +71,8 @@ Implemented:
 - Triage context builder that combines GitHub issue body with local PRD hits.
 - Triage result validator/applier for native Issue Type, Issue Fields, comment,
   and assignee.
+- Triage runner preparation command that writes context/schema and prints the
+  provider command without executing by default.
 
 Not implemented:
 
@@ -252,6 +254,7 @@ The runner user should have:
 - [x] Implement local PRD search for triage context.
 - [x] Implement deterministic triage context markdown builder.
 - [x] Implement validated triage JSON ingestion.
+- [x] Implement triage dry-run preparation.
 - [ ] Implement WebSocket event receiver.
 - [ ] Support non-text attachment/resource normalization.
 
@@ -311,6 +314,8 @@ The runner user should have:
   - triage comment
   - fields including `Triage verdict=代码 Bug`, `Triage status=Done`,
     `Priority=High`, `Owner reason=CODEOWNERS`
+- Added `run-triage` dry-run CLI and wired sandbox workflow to run doctor plus
+  triage context preparation on the self-hosted runner label.
 - Added `TheCloverLab/bugpatrol-todo-sandbox` issue triage smoke workflow. It
   installs bugpatrol and runs `doctor` on the self-hosted label
   `bugpatrol-sandbox-triage`. Workflow registration and manual dispatch were
