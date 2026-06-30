@@ -1,0 +1,27 @@
+[
+  {
+    "reporter_name": "QA",
+    "reporter_open_id": "ou_qa",
+    "created_at": "2026-06-30T11:00:00Z",
+    "chat_id": "oc_d371f022f168b567a141ced142691894",
+    "root_id": "om_topic_1",
+    "message_id": "om_topic_1",
+    "original_text": "Todo 列表删除最后一项后，空状态没有出现",
+    "lark_topic_url": "https://lark.example/topic/om_topic_1",
+    "attachments": [
+      {
+        "kind": "screenshot",
+        "url": "https://assets.example/empty.png"
+      }
+    ]
+  },
+  {
+    "reporter_name": "QA",
+    "reporter_open_id": "ou_qa",
+    "created_at": "2026-06-30T11:03:00Z",
+    "chat_id": "oc_d371f022f168b567a141ced142691894",
+    "root_id": "om_topic_1",
+    "message_id": "om_topic_2",
+    "original_text": "补充：Web 必现，iOS 未验证"
+  }
+]

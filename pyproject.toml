@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bugpatrol"
+version = "0.1.0"
+description = "Project-neutral Lark-to-GitHub bug intake and Codex triage orchestration."
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "Verne"}]
+keywords = ["lark", "github", "codex", "triage", "bugops"]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.6",
+  "mypy>=1.11",
+]
+
+[project.scripts]
+bugpatrol = "bugpatrol.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["bugpatrol*"]
+
+[tool.setuptools.package-data]
+bugpatrol = ["py.typed"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["bugpatrol"]
+

@@ -1,0 +1,35 @@
+github_repo = "verneagent/bugpatrol-todo-sandbox"
+
+[lark]
+chat_id = "oc_d371f022f168b567a141ced142691894"
+app_id = "cli_aac97d050d385ee9"
+app_secret_env = "BUGPATROL_TODO_LARK_APP_SECRET"
+bot_open_id = "ou_cef931fa2df05ca6f8ae80cb2f3e6094"
+
+[triage_agent]
+provider = "codex"
+runner_labels = ["self-hosted", "bugpatrol-sandbox-triage"]
+model = ""
+effort = ""
+
+[prd]
+root_wiki_node = "LOCAL_PRD_DOCS"
+cache_path = "docs/prd"
+
+[intake]
+language = "zh-CN"
+
+[issue_field_names]
+Priority = "Priority"
+"Triage status" = "Triage status"
+Source = "Source"
+"Intake version" = "Intake version"
+"Triage verdict" = "Triage verdict"
+Platform = "Platform"
+Reproducibility = "Reproducibility"
+"Other platforms" = "Other platforms"
+Capability = "Capability"
+Evidence = "Evidence"
+"PRD status" = "PRD status"
+"Triage confidence" = "Triage confidence"
+"Owner reason" = "Owner reason"

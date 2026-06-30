@@ -1,0 +1,35 @@
+github_repo = "TheCloverLab/fived"
+
+[lark]
+chat_id = "oc_91575ce4fdfa88ae0e110f04f61bc53a"
+app_id = "cli_a9518095a9b8ded3"
+app_secret_env = "FIVED_LARK_BUG_APP_SECRET"
+bot_open_id = "ou_649aebe71fec53e3c0cafc10fd20ea76"
+
+[triage_agent]
+provider = "codex"
+runner_labels = ["self-hosted", "fived-triage"]
+model = ""
+effort = ""
+
+[prd]
+root_wiki_node = "U4wvw2k0SildCUkdClOlAXWFgde"
+cache_path = ".bugpatrol/prd-cache"
+
+[intake]
+language = "zh-CN"
+
+[issue_field_names]
+Priority = "Priority"
+"Triage status" = "Triage status"
+Source = "Source"
+"Intake version" = "Intake version"
+"Triage verdict" = "Triage verdict"
+Platform = "Platform"
+Reproducibility = "Reproducibility"
+"Other platforms" = "Other platforms"
+Capability = "Capability"
+Evidence = "Evidence"
+"PRD status" = "PRD status"
+"Triage confidence" = "Triage confidence"
+"Owner reason" = "Owner reason"

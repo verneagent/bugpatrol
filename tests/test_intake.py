@@ -1,0 +1,88 @@
+from __future__ import annotations
+
+import unittest
+
+from bugpatrol.intake import Attachment, IntakeRecord, intake_record_from_dict, render_issue_body
+
+
+class IntakeTest(unittest.TestCase):
+    def test_render_issue_body_records_facts_without_triage(self) -> None:
+        body = render_issue_body(
+            IntakeRecord(
+                reporter_name="Diego",
+                reporter_open_id="ou_123",
+                created_at="2026-06-30T10:00:00Z",
+                chat_id="oc_123",
+                root_id="om_root",
+                message_id="om_msg",
+                original_text="发完图片后卡在 thinking",
+                lark_topic_url="https://example.test/topic",
+                attachments=(
+                    Attachment(
+                        kind="screenshot",
+                        url="https://assets.example/s1.png",
+                        description="generated: buddy chat screen",
+                    ),
+                ),
+            )
+        )
+
+        self.assertIn("## Lark Intake", body)
+        self.assertIn("发完图片后卡在 thinking", body)
+        self.assertIn("BUGPATROL_INTAKE_META", body)
+        self.assertIn('"schema_version":1', body)
+        self.assertIn('"source":"lark"', body)
+        self.assertNotIn("Triage verdict", body)
+        self.assertNotIn("代码 Bug", body)
+
+    def test_render_issue_body_can_use_chinese_copy(self) -> None:
+        body = render_issue_body(
+            IntakeRecord(
+                reporter_name="QA",
+                reporter_open_id="ou_qa",
+                created_at="2026-06-30T10:00:00Z",
+                chat_id="oc_123",
+                root_id="om_root",
+                message_id="om_msg",
+                original_text="删除最后一项后空状态没出现",
+                attachments=(
+                    Attachment(
+                        kind="screenshot",
+                        url="https://assets.example/s1.png",
+                        description="todo 空列表页面",
+                    ),
+                ),
+            ),
+            language="zh-CN",
+        )
+
+        self.assertIn("## Lark 上报", body)
+        self.assertIn("- 上报人: QA (ou_qa)", body)
+        self.assertIn("## 原始消息", body)
+        self.assertIn("## 附件", body)
+        self.assertIn("生成描述: todo 空列表页面", body)
+
+    def test_intake_record_from_dict_parses_attachments(self) -> None:
+        record = intake_record_from_dict(
+            {
+                "reporter_name": "QA",
+                "reporter_open_id": "ou_qa",
+                "created_at": "2026-06-30T10:00:00Z",
+                "chat_id": "oc_123",
+                "root_id": "om_root",
+                "message_id": "om_msg",
+                "original_text": "todo 删除失败",
+                "attachments": [{"kind": "screenshot", "url": "https://assets/s.png"}],
+            }
+        )
+
+        self.assertEqual(record.attachments[0].kind, "screenshot")
+        self.assertEqual(record.attachments[0].url, "https://assets/s.png")
+
+    def test_intake_record_from_dict_rejects_missing_required_fields(self) -> None:
+        with self.assertRaisesRegex(ValueError, "reporter_name"):
+            intake_record_from_dict({})
+
+
+if __name__ == "__main__":
+    unittest.main()
