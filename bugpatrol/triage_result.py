@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +20,24 @@ class TriageResult:
     fields: dict[str, str]
     assignee: str
     comment_markdown: str
+
+
+@dataclass(frozen=True)
+class TriageApplySummary:
+    issue_type_written: bool
+    fields_written: bool
+    assignee_written: bool
+    comment_added: bool
+    duplicate_comment_skipped: bool
+    result_fingerprint: str
+
+
+TRIAGE_META_START = "<!-- BUGPATROL_TRIAGE_META"
+TRIAGE_META_END = "BUGPATROL_TRIAGE_META -->"
+TRIAGE_META_RE = re.compile(
+    rf"{re.escape(TRIAGE_META_START)}\s*(.*?)\s*{re.escape(TRIAGE_META_END)}",
+    re.DOTALL,
+)
 
 
 def parse_triage_result(data: dict[str, Any]) -> TriageResult:
@@ -56,7 +77,8 @@ def apply_triage_result(
     result: TriageResult,
     github: GitHubCliIssuesClient,
     issue_fields: GitHubIssueFieldsClient,
-) -> None:
+) -> TriageApplySummary:
+    fingerprint = triage_result_fingerprint(result)
     github.set_issue_type(repo=repo, issue_number=issue_number, issue_type=result.issue_type)
     issue_fields.add_issue_field_values(
         repo=repo,
@@ -64,8 +86,78 @@ def apply_triage_result(
         values=result.fields,
         config=config,
     )
-    github.add_issue_comment(repo=repo, issue_number=issue_number, body=result.comment_markdown)
+    duplicate = _has_applied_triage_fingerprint(
+        github=github,
+        repo=repo,
+        issue_number=issue_number,
+        fingerprint=fingerprint,
+    )
+    if not duplicate:
+        github.add_issue_comment(
+            repo=repo,
+            issue_number=issue_number,
+            body=append_triage_metadata(
+                result.comment_markdown,
+                {
+                    "version": 1,
+                    "issue": issue_number,
+                    "result_fingerprint": fingerprint,
+                },
+            ),
+        )
     github.add_assignee(repo=repo, issue_number=issue_number, assignee=result.assignee)
+    return TriageApplySummary(
+        issue_type_written=True,
+        fields_written=True,
+        assignee_written=True,
+        comment_added=not duplicate,
+        duplicate_comment_skipped=duplicate,
+        result_fingerprint=fingerprint,
+    )
+
+
+def triage_result_fingerprint(result: TriageResult) -> str:
+    payload = {
+        "issue_type": result.issue_type,
+        "fields": result.fields,
+        "assignee": result.assignee,
+        "comment_markdown": result.comment_markdown,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def append_triage_metadata(comment_markdown: str, metadata: dict[str, Any]) -> str:
+    return (
+        f"{comment_markdown.rstrip()}\n\n"
+        f"{TRIAGE_META_START}\n"
+        f"{json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2)}\n"
+        f"{TRIAGE_META_END}"
+    )
+
+
+def parse_triage_metadata(comment_body: str) -> dict[str, Any] | None:
+    match = TRIAGE_META_RE.search(comment_body)
+    if not match:
+        return None
+    data = json.loads(match.group(1))
+    if not isinstance(data, dict):
+        raise ValueError("triage metadata must be a JSON object")
+    return data
+
+
+def _has_applied_triage_fingerprint(
+    *,
+    github: GitHubCliIssuesClient,
+    repo: str,
+    issue_number: int,
+    fingerprint: str,
+) -> bool:
+    for comment in github.list_issue_comments(repo=repo, issue_number=issue_number):
+        metadata = parse_triage_metadata(comment.body)
+        if metadata is not None and metadata.get("result_fingerprint") == fingerprint:
+            return True
+    return False
 
 
 def _required_str(data: dict[str, Any], key: str) -> str:

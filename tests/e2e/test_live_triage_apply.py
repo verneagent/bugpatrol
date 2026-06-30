@@ -42,7 +42,15 @@ class LiveTriageApplyE2ETest(unittest.TestCase):
                     "comment_markdown": "## Triage Analysis\n\nLive e2e triage apply.",
                 }
             )
-            apply_triage_result(
+            first = apply_triage_result(
+                repo=config.github_repo,
+                issue_number=issue.number,
+                config=config,
+                result=result,
+                github=github,
+                issue_fields=issue_fields,
+            )
+            second = apply_triage_result(
                 repo=config.github_repo,
                 issue_number=issue.number,
                 config=config,
@@ -55,6 +63,13 @@ class LiveTriageApplyE2ETest(unittest.TestCase):
             self.assertEqual(values["Triage verdict"], "代码 Bug")
             self.assertEqual(values["Triage status"], "Done")
             self.assertEqual(values["Priority"], "High")
+            comments = github.list_issue_comments(repo=config.github_repo, issue_number=issue.number)
+            triage_comments = [
+                comment for comment in comments if "BUGPATROL_TRIAGE_META" in comment.body
+            ]
+            self.assertTrue(first.comment_added)
+            self.assertFalse(second.comment_added)
+            self.assertEqual(len(triage_comments), 1)
             updated = github.get_issue(repo=config.github_repo, issue_number=issue.number)
             self.assertIn("live triage apply e2e", updated.title)
         finally:
@@ -63,4 +78,3 @@ class LiveTriageApplyE2ETest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from bugpatrol.clients import GitHubIssue
+from bugpatrol.clients import GitHubIssue, GitHubIssueComment
 from bugpatrol.github_fields import GITHUB_API_VERSION, GitHubIssueFieldsClient
 
 if TYPE_CHECKING:
@@ -97,6 +97,21 @@ class GitHubCliIssuesClient:
         self._run(
             ["issue", "comment", str(issue_number), "--repo", repo, "--body-file", "-"],
             stdin=body,
+        )
+
+    def list_issue_comments(self, *, repo: str, issue_number: int) -> tuple[GitHubIssueComment, ...]:
+        result = self._run(
+            [
+                "api",
+                "-H",
+                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                f"/repos/{repo}/issues/{issue_number}/comments",
+            ]
+        )
+        data = json.loads(result.stdout)
+        return tuple(
+            GitHubIssueComment(id=str(item["id"]), body=str(item.get("body") or ""))
+            for item in data
         )
 
     def set_issue_type(self, *, repo: str, issue_number: int, issue_type: str) -> None:

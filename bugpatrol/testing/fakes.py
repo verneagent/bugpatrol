@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from bugpatrol.clients import GitHubIssue
+from bugpatrol.clients import GitHubIssue, GitHubIssueComment
 
 
 @dataclass
@@ -54,6 +54,15 @@ class FakeGitHubIssuesClient:
             if item.repo == repo and item.issue.number == issue_number:
                 item.comments.append(body)
                 return
+        raise ValueError(f"issue not found: {repo}#{issue_number}")
+
+    def list_issue_comments(self, *, repo: str, issue_number: int) -> tuple[GitHubIssueComment, ...]:
+        for item in self.created:
+            if item.repo == repo and item.issue.number == issue_number:
+                return tuple(
+                    GitHubIssueComment(id=str(index + 1), body=body)
+                    for index, body in enumerate(item.comments)
+                )
         raise ValueError(f"issue not found: {repo}#{issue_number}")
 
 

@@ -93,6 +93,23 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["input"], "comment")
         self.assertIn("comment", run.call_args.args[0])
 
+    def test_list_issue_comments_reads_rest_comments(self) -> None:
+        client = GitHubCliIssuesClient()
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(
+                ["gh"],
+                0,
+                json.dumps([{"id": 123, "body": "hello"}]),
+                "",
+            )
+            comments = client.list_issue_comments(repo="o/r", issue_number=42)
+
+        self.assertEqual(len(comments), 1)
+        self.assertEqual(comments[0].id, "123")
+        self.assertEqual(comments[0].body, "hello")
+        self.assertIn("/repos/o/r/issues/42/comments", run.call_args.args[0])
+
     def test_get_issue_type_reads_rest_issue_type(self) -> None:
         client = GitHubCliIssuesClient()
 

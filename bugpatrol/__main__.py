@@ -236,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
         config = load_project_config(args.project_config)
         data = json.loads(args.input.read_text())
         result = parse_triage_result(data)
-        apply_triage_result(
+        summary = apply_triage_result(
             repo=config.github_repo,
             issue_number=args.issue,
             config=config,
@@ -244,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
             github=GitHubCliIssuesClient(),
             issue_fields=GitHubIssueFieldsClient(),
         )
-        print(json.dumps({"ok": True, "issue": args.issue}, ensure_ascii=False))
+        print(json.dumps({"ok": True, "issue": args.issue, "summary": summary.__dict__}, ensure_ascii=False))
         return 0
 
     if args.command == "run-triage":

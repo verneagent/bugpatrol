@@ -4,7 +4,15 @@ import unittest
 from pathlib import Path
 
 from bugpatrol.config import load_project_config
-from bugpatrol.triage_result import TriageResult, apply_triage_result, parse_triage_result
+from bugpatrol.clients import GitHubIssueComment
+from bugpatrol.triage_result import (
+    TriageResult,
+    append_triage_metadata,
+    apply_triage_result,
+    parse_triage_metadata,
+    parse_triage_result,
+    triage_result_fingerprint,
+)
 
 
 VALID = {
@@ -28,15 +36,24 @@ VALID = {
 class FakeGithub:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
+        self.comments: list[str] = []
 
     def set_issue_type(self, **kwargs: object) -> None:
         self.calls.append(("set_issue_type", kwargs))
 
     def add_issue_comment(self, **kwargs: object) -> None:
         self.calls.append(("add_issue_comment", kwargs))
+        self.comments.append(str(kwargs["body"]))
 
     def add_assignee(self, **kwargs: object) -> None:
         self.calls.append(("add_assignee", kwargs))
+
+    def list_issue_comments(self, **kwargs: object) -> tuple[GitHubIssueComment, ...]:
+        self.calls.append(("list_issue_comments", kwargs))
+        return tuple(
+            GitHubIssueComment(id=str(index + 1), body=body)
+            for index, body in enumerate(self.comments)
+        )
 
 
 class FakeIssueFields:
@@ -73,7 +90,7 @@ class TriageResultTest(unittest.TestCase):
             comment_markdown="done",
         )
 
-        apply_triage_result(
+        summary = apply_triage_result(
             repo=config.github_repo,
             issue_number=1,
             config=config,
@@ -82,8 +99,55 @@ class TriageResultTest(unittest.TestCase):
             issue_fields=issue_fields,  # type: ignore[arg-type]
         )
 
-        self.assertEqual([name for name, _ in github.calls], ["set_issue_type", "add_issue_comment", "add_assignee"])
+        self.assertEqual(
+            [name for name, _ in github.calls],
+            ["set_issue_type", "list_issue_comments", "add_issue_comment", "add_assignee"],
+        )
         self.assertEqual(issue_fields.calls[0][0], "add_issue_field_values")
+        self.assertTrue(summary.comment_added)
+        self.assertFalse(summary.duplicate_comment_skipped)
+        self.assertIn("BUGPATROL_TRIAGE_META", github.comments[0])
+
+    def test_triage_metadata_round_trips(self) -> None:
+        body = append_triage_metadata(
+            "## Triage Analysis\n\nDone.",
+            {"version": 1, "issue": 1, "result_fingerprint": "abc"},
+        )
+
+        self.assertEqual(
+            parse_triage_metadata(body),
+            {"version": 1, "issue": 1, "result_fingerprint": "abc"},
+        )
+
+    def test_apply_triage_result_skips_duplicate_comment_for_same_fingerprint(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        result = parse_triage_result(dict(VALID))
+
+        first = apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+        )
+        second = apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+        )
+
+        self.assertTrue(first.comment_added)
+        self.assertFalse(first.duplicate_comment_skipped)
+        self.assertFalse(second.comment_added)
+        self.assertTrue(second.duplicate_comment_skipped)
+        self.assertEqual(len(github.comments), 1)
+        self.assertEqual(second.result_fingerprint, triage_result_fingerprint(result))
 
 
 if __name__ == "__main__":
