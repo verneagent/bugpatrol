@@ -1,0 +1,44 @@
+name: BugPatrol Fix Notifications
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, closed]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  notify-fix:
+    if: github.event.action != 'closed' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BUGPATROL_PROJECT_CONFIG: projects/todo-sandbox.toml
+      BUGPATROL_WRITE_FIX_NOTIFICATIONS: "0"
+      BUGPATROL_TODO_LARK_APP_SECRET: ${{ secrets.BUGPATROL_TODO_LARK_APP_SECRET }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run fix notification
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          event="pr_opened"
+          if [[ "${{ github.event.action }}" == "closed" ]]; then
+            event="pr_merged"
+          fi
+
+          write_args=()
+          if [[ "${BUGPATROL_WRITE_FIX_NOTIFICATIONS}" == "1" ]]; then
+            write_args+=(--write)
+          fi
+
+          python -m bugpatrol notify-fix "${BUGPATROL_PROJECT_CONFIG}" \
+            --event "${event}" \
+            --pr "${{ github.event.pull_request.number }}" \
+            "${write_args[@]}"

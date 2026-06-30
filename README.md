@@ -148,4 +148,23 @@ python -m bugpatrol run-triage projects/todo-sandbox.toml \
   --issue 3 \
   --repo-path ../bugpatrol-todo-sandbox \
   --output-dir .bugpatrol/triage-3
+
+# Dry-run a fix notification for a PR that references exactly one issue.
+python -m bugpatrol notify-fix projects/todo-sandbox.toml \
+  --event pr_opened \
+  --pr 12
+
+# Write the fix notification to Lark and record BUGPATROL_FIX_META.
+BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
+python -m bugpatrol notify-fix projects/todo-sandbox.toml \
+  --event pr_merged \
+  --pr 12 \
+  --write
 ```
+
+`notify-fix` can infer `--issue` for `pr_opened` and `pr_merged` when the PR
+references exactly one issue through GitHub closing references, `#123`, or
+`owner/repo#123`. Pass `--issue` explicitly when a PR references zero or
+multiple issues. A reusable GitHub Actions template is available at
+`examples/github-actions/fix-notify.yml`; it defaults to dry-run until
+`BUGPATROL_WRITE_FIX_NOTIFICATIONS` is set to `1`.
