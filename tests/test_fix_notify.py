@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+
+from bugpatrol.config import load_project_config
+from bugpatrol.fix_notify import (
+    apply_fix_notification,
+    fix_notification_key,
+    notified_fix_keys,
+    parse_fix_metadata,
+    render_fix_metadata_comment,
+)
+from bugpatrol.intake import IntakeRecord
+from bugpatrol.intake_workflow import IntakeWorkflow
+from bugpatrol.testing.fakes import FakeGitHubIssuesClient, FakeLarkMessengerClient
+
+
+class FixNotifyTest(unittest.TestCase):
+    def test_fix_notification_key_uses_stable_event_keys(self) -> None:
+        self.assertEqual(
+            fix_notification_key(repo="o/r", issue_number=1, event="pr_opened", pr="#2"),
+            "pr_opened:o/r#2",
+        )
+        self.assertEqual(
+            fix_notification_key(repo="o/r", issue_number=1, event="commit_linked", commit="abc"),
+            "commit:o/r@abc",
+        )
+        self.assertEqual(
+            fix_notification_key(repo="o/r", issue_number=1, event="issue_fixed"),
+            "issue_fixed:o/r#1",
+        )
+
+    def test_fix_metadata_round_trips(self) -> None:
+        body = render_fix_metadata_comment({"version": 1, "key": "pr_merged:o/r#2"})
+
+        self.assertEqual(parse_fix_metadata(body), {"version": 1, "key": "pr_merged:o/r#2"})
+
+    def test_notify_fix_write_sends_once_and_records_metadata(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        issue = workflow.process(
+            IntakeRecord(
+                reporter_name="Reporter",
+                reporter_open_id="ou_1",
+                created_at="2026-07-01T00:00:00Z",
+                chat_id=config.lark.chat_id,
+                root_id="om_root",
+                message_id="om_1",
+                original_text="bug",
+            )
+        ).issue
+
+        first = apply_fix_notification(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            event="pr_merged",
+            pr="123",
+            dry_run=False,
+            github=github,  # type: ignore[arg-type]
+            lark=lark,
+        )
+        second = apply_fix_notification(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            event="pr_merged",
+            pr="123",
+            dry_run=False,
+            github=github,  # type: ignore[arg-type]
+            lark=lark,
+        )
+
+        self.assertTrue(first.lark_sent)
+        self.assertFalse(first.duplicate_skipped)
+        self.assertFalse(second.lark_sent)
+        self.assertTrue(second.duplicate_skipped)
+        self.assertEqual(len(lark.replies), 2)
+        self.assertIn("已创建 GitHub issue", lark.replies[0].text)
+        self.assertIn("修复 PR 已合并", lark.replies[1].text)
+        self.assertEqual(len(github.created[0].comments), 1)
+        self.assertEqual(notified_fix_keys(github.list_issue_comments(repo=config.github_repo, issue_number=1)), {first.key})
+
+    def test_notify_fix_dry_run_does_not_send_or_write(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        issue = workflow.process(
+            IntakeRecord(
+                reporter_name="Reporter",
+                reporter_open_id="ou_1",
+                created_at="2026-07-01T00:00:00Z",
+                chat_id=config.lark.chat_id,
+                root_id="om_root",
+                message_id="om_1",
+                original_text="bug",
+            )
+        ).issue
+
+        summary = apply_fix_notification(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            event="issue_fixed",
+            dry_run=True,
+            github=github,  # type: ignore[arg-type]
+            lark=lark,
+        )
+
+        self.assertTrue(summary.dry_run)
+        self.assertFalse(summary.lark_sent)
+        self.assertEqual(len(lark.replies), 1)
+        self.assertEqual(github.created[0].comments, [])
+
+
+if __name__ == "__main__":
+    unittest.main()
