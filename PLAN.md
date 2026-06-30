@@ -288,6 +288,11 @@ The runner user should have:
   config, GitHub repo, Issue Types, Issue Fields, Lark history.
 - Added `watch-lark` polling CLI. Live dry-run with `--once --limit 5`
   scanned 5, processed 0, skipped 5.
+- Added `TheCloverLab/bugpatrol-todo-sandbox` issue triage smoke workflow. It
+  installs bugpatrol and runs `doctor` on the self-hosted label
+  `bugpatrol-sandbox-triage`. Workflow registration and manual dispatch were
+  verified; runs stayed pending because no matching self-hosted runner was
+  online, then queued runs were cancelled/force-cancelled.
 
 - Create/read Lark sandbox group config.
 - Watch or scan test group.
