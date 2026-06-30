@@ -89,13 +89,15 @@ Reusable tests:
 Opt-in live sandbox e2e:
 
 ```bash
-gh auth switch --hostname github.com --user verneagent
 BUGPATROL_LIVE_E2E=1 \
 BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
 python -m unittest tests.e2e.test_live_intake_loop
-gh auth switch --hostname github.com --user garlanddiego
 ```
 
-The live e2e uses only `verneagent/bugpatrol-todo-sandbox` and
+The live e2e uses only `TheCloverLab/bugpatrol-todo-sandbox` and
 `Bugpatrol Todo Sandbox`. It creates a test issue, posts Lark backlinks, appends
-a follow-up comment, and closes the test issue in cleanup.
+a follow-up comment, writes native Issue Type + initial Issue Fields, asserts
+them, and closes the test issue in cleanup.
+
+The sandbox repository lives under `TheCloverLab` because GitHub Issue Fields
+are organization-scoped and are unavailable on user-owned repositories.

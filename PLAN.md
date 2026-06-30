@@ -59,12 +59,13 @@ Implemented:
 - Real GitHub CLI issue client.
 - Real Lark OpenAPI messenger client.
 - Opt-in live e2e against the sandbox repo/group.
+- GitHub Issue Fields reader/writer with unit tests.
+- Native GitHub Issue Type setter via REST.
+- Live e2e asserts `type = Bug` and initial Issue Fields.
 
 Not implemented:
 
 - GitHub App authentication and GitHub API client.
-- GitHub native Issue Type writer.
-- GitHub Issue Fields reader/writer.
 - Lark watcher and backfill scanner.
 - Lark attachment download and asset storage.
 - Lark @mention reply service.
@@ -73,8 +74,9 @@ Not implemented:
 - CODEOWNERS parser and owner resolver.
 - GitHub Actions triage workflow.
 - Actual Codex/Claude execution and result ingestion.
-- Deep live e2e assertions for native Issue Type and Issue Fields; blocked on
-  the dedicated field writer.
+- sobit-bot installation management for newly created sandbox repos. The bot can
+  now read `TheCloverLab/bugpatrol-todo-sandbox`, but repo installation changes
+  still need to be managed through GitHub App installation/admin flow.
 
 ## Target architecture
 
@@ -99,10 +101,14 @@ mechanics without touching real work.
 
 Created repository:
 
-- Owner: `verneagent` unless otherwise specified
+- Owner: `TheCloverLab`
 - Name: `bugpatrol-todo-sandbox`
 - Visibility: private
 - Purpose: realistic but small ToDo app used to test bugpatrol intake and triage
+- Note: the previous user-owned sandbox `verneagent/bugpatrol-todo-sandbox` was
+  superseded because GitHub Issue Fields only work for organization-owned repos.
+  Deleting it requires the `delete_repo` OAuth scope on the `verneagent` gh
+  account.
 
 The sandbox should contain:
 
@@ -183,25 +189,27 @@ The runner user should have:
 
 - `codex login` completed if provider is `codex`;
 - Claude login/config completed if provider is `claude`;
-- access to clone `verneagent/bugpatrol-todo-sandbox`;
+- access to clone `TheCloverLab/bugpatrol-todo-sandbox`;
 - no production fived credentials by default.
 
 ## Milestones
 
 ### M1: Sandbox repo and config
 
-- Create private `verneagent/bugpatrol-todo-sandbox`.
+- Create private `TheCloverLab/bugpatrol-todo-sandbox`.
 - Add ToDo app skeleton, PRD docs, CODEOWNERS, and fixture issues.
 - Add `projects/todo-sandbox.toml`.
 - Add config validation for the sandbox.
 
 ### M2: GitHub field client
 
-- Read org/repo Issue Fields and options.
-- Validate live field options against `default_field_specs()`.
-- Write native Issue Type.
-- Write Issue Fields by field name and option name.
-- Unit-test with fake GitHub responses.
+- [x] Read org Issue Fields and options.
+- [x] Write native Issue Type with REST `type=...`.
+- [x] Write Issue Fields by field name and option name.
+- [x] Read back Issue Fields for verification.
+- [x] Unit-test with fake GitHub responses.
+- [x] Live-test against `TheCloverLab/bugpatrol-todo-sandbox`.
+- [ ] Add a CLI command for live Issue Fields validation.
 
 ### M3: Intake writer
 
@@ -234,7 +242,7 @@ The runner user should have:
 - Ran local unit tests: 23 passed.
 - Ran local e2e tests: 1 passed, 1 live test skipped by default.
 - Ran live sandbox e2e with `BUGPATROL_LIVE_E2E=1`: passed.
-- Created real GitHub issue:
+- Created real GitHub issue before org migration:
   `https://github.com/verneagent/bugpatrol-todo-sandbox/issues/1`
 - Issue was automatically closed by cleanup.
 - Verified GitHub issue body contained `BUGPATROL_INTAKE_META`.
@@ -243,12 +251,25 @@ The runner user should have:
   - `已创建 GitHub issue #1: https://github.com/verneagent/bugpatrol-todo-sandbox/issues/1`
   - `已追加到 GitHub issue #1: https://github.com/verneagent/bugpatrol-todo-sandbox/issues/1`
 - Re-ran live e2e after adding intake language config.
-- Created and cleaned up issue:
+- Created and cleaned up issue before org migration:
   `https://github.com/verneagent/bugpatrol-todo-sandbox/issues/2`
 - Verified issue #2 body uses Chinese headings:
   `## Lark 上报`, `## 原始消息`, `## 附件`.
 - Verified issue #2 follow-up comment uses Chinese headings:
   `## Lark 话题更新`, `## 消息`, `## 附件`.
+- Migrated sandbox repo to `TheCloverLab/bugpatrol-todo-sandbox`.
+- Created missing org Issue Fields:
+  `Triage status`, `Source`, `Intake version`, `Owner reason`.
+- Verified native Issue Types are enabled: `Bug`, `Feature`, `Task`.
+- Ran live e2e against org sandbox after field writer integration.
+- Created and cleaned up:
+  `https://github.com/TheCloverLab/bugpatrol-todo-sandbox/issues/3`
+- Verified issue #3:
+  - native Issue Type: `Bug`
+  - `Source = Lark`
+  - `Intake version = v2`
+  - `Triage status = Pending`
+  - `Evidence = 文字描述`
 
 - Create/read Lark sandbox group config.
 - Watch or scan test group.

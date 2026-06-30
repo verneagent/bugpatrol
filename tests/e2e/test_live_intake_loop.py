@@ -7,6 +7,7 @@ from pathlib import Path
 
 from bugpatrol.config import load_project_config
 from bugpatrol.github import GitHubCliIssuesClient
+from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake import IntakeRecord
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lark import LarkOpenApiMessengerClient
@@ -17,7 +18,11 @@ class LiveIntakeLoopE2ETest(unittest.TestCase):
     def test_live_sandbox_lark_to_github_issue_loop(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         app_secret = os.environ[config.lark.app_secret_env]
-        github = GitHubCliIssuesClient()
+        issue_fields = GitHubIssueFieldsClient()
+        github = GitHubCliIssuesClient(
+            issue_fields=issue_fields,
+            project_config=config,
+        )
         lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
         workflow = IntakeWorkflow(config=config, github=github, lark=lark)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -67,6 +72,18 @@ class LiveIntakeLoopE2ETest(unittest.TestCase):
             self.assertEqual(second.action, "updated")
             self.assertIsNotNone(found)
             self.assertEqual(found.number, first.issue.number)
+            self.assertEqual(
+                github.get_issue_type(repo=config.github_repo, issue_number=first.issue.number),
+                "Bug",
+            )
+            field_values = issue_fields.get_issue_field_values(
+                repo=config.github_repo,
+                issue_number=first.issue.number,
+            )
+            self.assertEqual(field_values["Source"], "Lark")
+            self.assertEqual(field_values["Intake version"], "v2")
+            self.assertEqual(field_values["Triage status"], "Pending")
+            self.assertEqual(field_values["Evidence"], "文字描述")
         finally:
             if created_issue_number is not None:
                 github.close_issue(repo=config.github_repo, issue_number=created_issue_number)
@@ -74,4 +91,3 @@ class LiveIntakeLoopE2ETest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

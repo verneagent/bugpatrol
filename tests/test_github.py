@@ -36,9 +36,10 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
         client = GitHubCliIssuesClient()
 
         with patch("subprocess.run") as run:
-            run.return_value = subprocess.CompletedProcess(
-                ["gh"], 0, "https://github.com/o/r/issues/42\n", ""
-            )
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh"], 0, "https://github.com/o/r/issues/42\n", ""),
+                subprocess.CompletedProcess(["gh"], 0, "{}", ""),
+            ]
             issue = client.create_issue(
                 repo="o/r",
                 title="title",
@@ -49,8 +50,38 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
 
         self.assertEqual(issue.number, 42)
         self.assertEqual(issue.url, "https://github.com/o/r/issues/42")
-        self.assertEqual(run.call_args.kwargs["input"], "body")
-        self.assertIn("--body-file", run.call_args.args[0])
+        self.assertEqual(run.call_args_list[0].kwargs["input"], "body")
+        self.assertIn("--body-file", run.call_args_list[0].args[0])
+        self.assertIn("type=Bug", run.call_args_list[1].args[0])
+
+    def test_create_issue_writes_fields_when_configured(self) -> None:
+        from pathlib import Path
+
+        from bugpatrol.config import load_project_config
+
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        field_writer = unittest.mock.Mock()
+        client = GitHubCliIssuesClient(issue_fields=field_writer, project_config=config)
+
+        with patch("subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh"], 0, "https://github.com/o/r/issues/42\n", ""),
+                subprocess.CompletedProcess(["gh"], 0, "{}", ""),
+            ]
+            client.create_issue(
+                repo="o/r",
+                title="title",
+                body="body",
+                issue_type="Bug",
+                fields={"Source": "Lark"},
+            )
+
+        field_writer.add_issue_field_values.assert_called_once_with(
+            repo="o/r",
+            issue_number=42,
+            values={"Source": "Lark"},
+            config=config,
+        )
 
     def test_add_issue_comment_uses_body_file_stdin(self) -> None:
         client = GitHubCliIssuesClient()
@@ -61,6 +92,18 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
 
         self.assertEqual(run.call_args.kwargs["input"], "comment")
         self.assertIn("comment", run.call_args.args[0])
+
+    def test_get_issue_type_reads_rest_issue_type(self) -> None:
+        client = GitHubCliIssuesClient()
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(
+                ["gh"], 0, json.dumps({"type": {"name": "Bug"}}), ""
+            )
+            issue_type = client.get_issue_type(repo="o/r", issue_number=42)
+
+        self.assertEqual(issue_type, "Bug")
+        self.assertIn("/repos/o/r/issues/42", run.call_args.args[0])
 
     def test_raises_on_gh_failure(self) -> None:
         client = GitHubCliIssuesClient()

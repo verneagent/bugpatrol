@@ -7,8 +7,13 @@ import re
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from bugpatrol.clients import GitHubIssue
+from bugpatrol.github_fields import GITHUB_API_VERSION, GitHubIssueFieldsClient
+
+if TYPE_CHECKING:
+    from bugpatrol.config import ProjectConfig
 
 
 @dataclass(frozen=True)
@@ -22,9 +27,18 @@ class GitHubCliError(RuntimeError):
 
 
 class GitHubCliIssuesClient:
-    def __init__(self, *, gh: str = "gh", search_limit: int = 200) -> None:
+    def __init__(
+        self,
+        *,
+        gh: str = "gh",
+        search_limit: int = 200,
+        issue_fields: GitHubIssueFieldsClient | None = None,
+        project_config: "ProjectConfig | None" = None,
+    ) -> None:
         self._gh = gh
         self._search_limit = search_limit
+        self._issue_fields = issue_fields
+        self._project_config = project_config
 
     def find_issue_by_intake_root(self, *, repo: str, chat_id: str, root_id: str) -> GitHubIssue | None:
         result = self._run(
@@ -61,15 +75,22 @@ class GitHubCliIssuesClient:
         issue_type: str,
         fields: dict[str, str],
     ) -> GitHubIssue:
-        # Current gh on this host does not expose native Issue Type or Issue
-        # Fields flags. Those are handled by the future GitHub field writer.
-        del issue_type, fields
         result = self._run(
             ["issue", "create", "--repo", repo, "--title", title, "--body-file", "-"],
             stdin=body,
         )
         url = result.stdout.strip().splitlines()[-1].strip()
         number = _issue_number_from_url(url)
+        self.set_issue_type(repo=repo, issue_number=number, issue_type=issue_type)
+        if self._issue_fields is not None:
+            if self._project_config is None:
+                raise GitHubCliError("project_config is required when issue_fields is configured")
+            self._issue_fields.add_issue_field_values(
+                repo=repo,
+                issue_number=number,
+                values=fields,
+                config=self._project_config,
+            )
         return GitHubIssue(number=number, url=url, title=title, body=body)
 
     def add_issue_comment(self, *, repo: str, issue_number: int, body: str) -> None:
@@ -77,6 +98,35 @@ class GitHubCliIssuesClient:
             ["issue", "comment", str(issue_number), "--repo", repo, "--body-file", "-"],
             stdin=body,
         )
+
+    def set_issue_type(self, *, repo: str, issue_number: int, issue_type: str) -> None:
+        self._run(
+            [
+                "api",
+                "-X",
+                "PATCH",
+                "-H",
+                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                f"/repos/{repo}/issues/{issue_number}",
+                "-f",
+                f"type={issue_type}",
+            ]
+        )
+
+    def get_issue_type(self, *, repo: str, issue_number: int) -> str:
+        result = self._run(
+            [
+                "api",
+                "-H",
+                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                f"/repos/{repo}/issues/{issue_number}",
+            ]
+        )
+        data = json.loads(result.stdout)
+        issue_type = data.get("type")
+        if not isinstance(issue_type, dict) or not isinstance(issue_type.get("name"), str):
+            return ""
+        return str(issue_type["name"])
 
     def close_issue(self, *, repo: str, issue_number: int, reason: str = "not planned") -> None:
         self._run(
@@ -113,4 +163,3 @@ def _issue_number_from_url(url: str) -> int:
     if not match:
         raise GitHubCliError(f"cannot parse issue number from URL: {url}")
     return int(match.group(1))
-

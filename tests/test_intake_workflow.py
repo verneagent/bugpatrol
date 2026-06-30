@@ -73,7 +73,7 @@ class IntakeWorkflowTest(unittest.TestCase):
 
         self.assertEqual(outcome.action, "created")
         self.assertEqual(outcome.issue.number, 1)
-        self.assertEqual(github.created[0].repo, "verneagent/bugpatrol-todo-sandbox")
+        self.assertEqual(github.created[0].repo, "TheCloverLab/bugpatrol-todo-sandbox")
         self.assertEqual(github.created[0].issue_type, "Bug")
         self.assertEqual(github.created[0].fields["Triage status"], "Pending")
         self.assertIn("BUGPATROL_INTAKE_META", github.created[0].issue.body)

@@ -1,0 +1,168 @@
+"""GitHub Issue Fields support."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any
+
+from bugpatrol.config import ProjectConfig
+
+GITHUB_API_VERSION = "2026-03-10"
+
+
+class GitHubIssueFieldsError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class IssueField:
+    id: int
+    name: str
+    data_type: str
+    options: tuple[str, ...] = ()
+
+
+class GitHubIssueFieldsClient:
+    def __init__(self, *, gh: str = "gh") -> None:
+        self._gh = gh
+
+    def list_org_fields(self, *, org: str) -> dict[str, IssueField]:
+        data = json.loads(
+            self._run_api(
+                ["-H", f"X-GitHub-Api-Version: {GITHUB_API_VERSION}", f"/orgs/{org}/issue-fields"]
+            )
+        )
+        fields: dict[str, IssueField] = {}
+        for item in data:
+            options = tuple(str(option["name"]) for option in item.get("options", ()))
+            field = IssueField(
+                id=int(item["id"]),
+                name=str(item["name"]),
+                data_type=str(item["data_type"]),
+                options=options,
+            )
+            fields[field.name] = field
+        return fields
+
+    def add_issue_field_values(
+        self,
+        *,
+        repo: str,
+        issue_number: int,
+        values: dict[str, str | int | float | list[str]],
+        config: ProjectConfig,
+    ) -> None:
+        owner, name = split_repo(repo)
+        fields = self.list_org_fields(org=owner)
+        payload = {
+            "issue_field_values": build_issue_field_values_payload(
+                config=config,
+                live_fields=fields,
+                logical_values=values,
+            )
+        }
+        self._run_api(
+            [
+                "-X",
+                "POST",
+                "-H",
+                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                f"/repos/{owner}/{name}/issues/{issue_number}/issue-field-values",
+                "--input",
+                "-",
+            ],
+            stdin=json.dumps(payload, ensure_ascii=False),
+        )
+
+    def get_issue_field_values(self, *, repo: str, issue_number: int) -> dict[str, str]:
+        owner, name = split_repo(repo)
+        data = json.loads(
+            self._run_api(
+                [
+                    "-H",
+                    f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                    f"/repos/{owner}/{name}/issues/{issue_number}/issue-field-values",
+                ]
+            )
+        )
+        values: dict[str, str] = {}
+        for item in data:
+            field_name = str(item["issue_field_name"])
+            option = item.get("single_select_option")
+            if isinstance(option, dict) and isinstance(option.get("name"), str):
+                values[field_name] = str(option["name"])
+            elif item.get("value") is not None:
+                values[field_name] = str(item["value"])
+        return values
+
+    def _run_api(self, args: Sequence[str], *, stdin: str | None = None) -> str:
+        completed = subprocess.run(
+            [self._gh, "api", *args],
+            input=stdin,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            stderr = completed.stderr.strip()
+            if "Not Found" in stderr and "/issue-fields" in " ".join(args):
+                raise GitHubIssueFieldsError(
+                    "GitHub Issue Fields are only available for organization-owned repositories "
+                    "with Issue Fields enabled."
+                )
+            raise GitHubIssueFieldsError(
+                f"gh api {' '.join(args)} failed with exit {completed.returncode}: {stderr}"
+            )
+        return completed.stdout
+
+
+def build_issue_field_values_payload(
+    *,
+    config: ProjectConfig,
+    live_fields: dict[str, IssueField],
+    logical_values: dict[str, str | int | float | list[str]],
+) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for logical_name, value in logical_values.items():
+        github_name = config.issue_field_names.get(logical_name)
+        if not github_name:
+            raise GitHubIssueFieldsError(f"missing field mapping for {logical_name!r}")
+        field = live_fields.get(github_name)
+        if field is None:
+            raise GitHubIssueFieldsError(f"GitHub issue field not found: {github_name!r}")
+        if field.data_type == "single_select":
+            if not isinstance(value, str):
+                raise GitHubIssueFieldsError(f"{github_name!r} expects a string option")
+            if field.options and value not in field.options:
+                raise GitHubIssueFieldsError(
+                    f"{github_name!r} option {value!r} is not one of {sorted(field.options)}"
+                )
+        elif field.data_type == "multi_select":
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise GitHubIssueFieldsError(f"{github_name!r} expects a string array")
+            missing = sorted(set(value) - set(field.options))
+            if field.options and missing:
+                raise GitHubIssueFieldsError(f"{github_name!r} unknown options: {missing}")
+        elif field.data_type == "text":
+            if not isinstance(value, str):
+                raise GitHubIssueFieldsError(f"{github_name!r} expects text")
+        elif field.data_type == "number":
+            if not isinstance(value, (int, float)):
+                raise GitHubIssueFieldsError(f"{github_name!r} expects a number")
+        elif field.data_type == "date":
+            if not isinstance(value, str):
+                raise GitHubIssueFieldsError(f"{github_name!r} expects an ISO date string")
+        else:
+            raise GitHubIssueFieldsError(f"unsupported issue field data type: {field.data_type}")
+        payload.append({"field_id": field.id, "value": value})
+    return payload
+
+
+def split_repo(repo: str) -> tuple[str, str]:
+    parts = repo.split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise GitHubIssueFieldsError(f"invalid repo: {repo!r}")
+    return parts[0], parts[1]
