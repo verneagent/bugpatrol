@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from pathlib import Path
 
 from bugpatrol.ownership import load_codeowners, parse_codeowners, resolve_first_owner, resolve_owners
@@ -46,7 +47,17 @@ class OwnershipTest(unittest.TestCase):
         self.assertEqual(resolve_first_owner("docs/prd/notifications.md", rules), "notify-owner")
 
     def test_loads_sandbox_codeowners(self) -> None:
-        rules = load_codeowners(Path("../bugpatrol-todo-sandbox"))
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / ".github").mkdir()
+            (repo / ".github" / "CODEOWNERS").write_text(
+                """
+                * @verneagent
+                /src/todo/ @garlanddiego
+                /src/notifications/ @verneagent
+                """
+            )
+            rules = load_codeowners(repo)
 
         self.assertEqual(resolve_first_owner("src/todo/list.ts", rules), "garlanddiego")
         self.assertEqual(resolve_first_owner("src/notifications/reminders.ts", rules), "verneagent")
@@ -54,4 +65,3 @@ class OwnershipTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

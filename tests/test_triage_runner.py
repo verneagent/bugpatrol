@@ -23,11 +23,17 @@ class TriageRunnerTest(unittest.TestCase):
     def test_prepare_triage_run_writes_context_schema_and_command(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         with tempfile.TemporaryDirectory() as tmp:
-            output_dir = Path(tmp) / "run"
+            root = Path(tmp)
+            prd_root = root / config.prd.cache_path
+            prd_root.mkdir(parents=True)
+            (prd_root / "todo-list.md").write_text(
+                "# Todo List PRD\n\nEmpty state appears after deleting all todos."
+            )
+            output_dir = root / "run"
             plan = prepare_triage_run(
                 config=config,
                 issue_number=7,
-                repo_path=Path("../bugpatrol-todo-sandbox"),
+                repo_path=root,
                 output_dir=output_dir,
                 github=FakeGithub(),  # type: ignore[arg-type]
             )

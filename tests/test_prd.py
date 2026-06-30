@@ -20,7 +20,15 @@ class PrdTest(unittest.TestCase):
         self.assertEqual(docs[0].title, "Todo List")
 
     def test_search_scores_and_excerpts(self) -> None:
-        docs = load_prd_documents(Path("../bugpatrol-todo-sandbox/docs/prd"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "todo-list.md").write_text(
+                "# Todo List PRD\n\nEmpty state text appears when there are no todo items."
+            )
+            (root / "notifications.md").write_text(
+                "# Reminder Notifications PRD\n\nNotifications can be scheduled from a todo due date."
+            )
+            docs = load_prd_documents(root)
 
         hits = search_prd_documents("todo empty state", docs)
 
