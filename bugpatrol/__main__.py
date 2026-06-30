@@ -17,6 +17,7 @@ from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lark import LarkOpenApiMessengerClient
+from bugpatrol.watcher import run_polling_watcher
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -44,6 +45,13 @@ def main(argv: list[str] | None = None) -> int:
     doctor = sub.add_parser("doctor", help="check project integration dependencies")
     doctor.add_argument("project_config", type=Path)
     doctor.add_argument("--with-lark", action="store_true")
+
+    watch = sub.add_parser("watch-lark", help="poll Lark and mirror messages into GitHub")
+    watch.add_argument("project_config", type=Path)
+    watch.add_argument("--limit", type=int, default=20)
+    watch.add_argument("--interval", type=float, default=30)
+    watch.add_argument("--once", action="store_true")
+    watch.add_argument("--dry-run", action="store_true", help="scan without GitHub writes")
 
     args = parser.parse_args(argv)
 
@@ -129,6 +137,30 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps([check.__dict__ for check in checks], ensure_ascii=False))
         return 0 if all(check.ok for check in checks) else 1
+
+    if args.command == "watch-lark":
+        config = load_project_config(args.project_config)
+        app_secret = os.environ.get(config.lark.app_secret_env)
+        if not app_secret:
+            print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
+            return 2
+        lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
+        github = GitHubCliIssuesClient(
+            issue_fields=GitHubIssueFieldsClient(),
+            project_config=config,
+        )
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        result = run_polling_watcher(
+            config=config,
+            lark=lark,
+            workflow=workflow,
+            limit=args.limit,
+            interval_seconds=args.interval,
+            once=args.once,
+            dry_run=args.dry_run,
+        )
+        print(json.dumps(result.__dict__, ensure_ascii=False))
+        return 0
 
     parser.print_help(file=sys.stderr)
     return 2

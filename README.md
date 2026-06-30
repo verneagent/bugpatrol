@@ -117,4 +117,12 @@ python -m bugpatrol backfill-lark projects/todo-sandbox.toml --limit 20
 # Explicit write mode.
 BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
 python -m bugpatrol backfill-lark projects/todo-sandbox.toml --limit 20 --write
+
+# Poll once, useful for smoke tests and cron/systemd wrappers.
+BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
+python -m bugpatrol watch-lark projects/todo-sandbox.toml --once --dry-run --limit 20
+
+# Long-running polling watcher. Use --dry-run until doctor passes.
+BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
+python -m bugpatrol watch-lark projects/todo-sandbox.toml --interval 30 --limit 20
 ```

@@ -65,6 +65,7 @@ Implemented:
 - Lark history reader, message normalizer, and dry-run-first backfill CLI.
 - `doctor` CLI for config, GitHub repo, Issue Types, Issue Fields, and optional
   Lark history checks.
+- Polling `watch-lark` CLI with `--once` and `--dry-run`.
 
 Not implemented:
 
@@ -241,7 +242,8 @@ The runner user should have:
 - [x] Add doctor checks for GitHub/Lark integration health.
 - [x] Add opt-in live e2e for backfill dry-run.
 - [x] Add opt-in live e2e fixture for a real human Lark message id.
-- [ ] Implement long-running watcher/event receiver.
+- [x] Implement long-running polling watcher.
+- [ ] Implement WebSocket event receiver.
 - [ ] Support non-text attachment/resource normalization.
 
 ### Live verification log
@@ -284,6 +286,8 @@ The runner user should have:
   messages.
 - Added `doctor` CLI. Live doctor with Lark returned all checks OK:
   config, GitHub repo, Issue Types, Issue Fields, Lark history.
+- Added `watch-lark` polling CLI. Live dry-run with `--once --limit 5`
+  scanned 5, processed 0, skipped 5.
 
 - Create/read Lark sandbox group config.
 - Watch or scan test group.
