@@ -71,6 +71,13 @@ def execute_triage_run(
 ) -> None:
     completed = subprocess.run(plan.invocation.command, check=False)
     if completed.returncode != 0:
+        mark_triage_failed(
+            config=config,
+            issue_number=issue_number,
+            exit_code=completed.returncode,
+            github=github,
+            issue_fields=issue_fields,
+        )
         raise RuntimeError(f"triage agent failed with exit {completed.returncode}")
     result = parse_triage_result(json.loads(plan.output_path.read_text()))
     apply_triage_result(
@@ -80,4 +87,36 @@ def execute_triage_run(
         result=result,
         github=github,
         issue_fields=issue_fields,
+    )
+
+
+def mark_triage_failed(
+    *,
+    config: ProjectConfig,
+    issue_number: int,
+    exit_code: int,
+    github: GitHubCliIssuesClient,
+    issue_fields: GitHubIssueFieldsClient,
+) -> None:
+    issue_fields.add_issue_field_values(
+        repo=config.github_repo,
+        issue_number=issue_number,
+        values={"Triage status": "Failed"},
+        config=config,
+    )
+    github.add_issue_comment(
+        repo=config.github_repo,
+        issue_number=issue_number,
+        body=render_triage_failed_comment(exit_code=exit_code),
+    )
+
+
+def render_triage_failed_comment(*, exit_code: int) -> str:
+    return "\n".join(
+        [
+            "## BugPatrol triage failed",
+            "",
+            f"The triage agent exited with code `{exit_code}`.",
+            "Check the runner logs, credentials, prompt/schema files, and repository checkout.",
+        ]
     )
