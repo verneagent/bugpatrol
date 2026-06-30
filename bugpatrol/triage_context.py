@@ -19,9 +19,10 @@ def build_triage_context(
     *,
     issue: GitHubIssue,
     prd_root: Path,
+    prd_include_globs: tuple[str, ...] = ("**/*.md",),
     prd_limit: int = 5,
 ) -> TriageContext:
-    docs = load_prd_documents(prd_root)
+    docs = load_prd_documents(prd_root, include_globs=prd_include_globs)
     query = f"{issue.title}\n{issue.body}"
     hits = search_prd_documents(query, docs, limit=prd_limit)
     return TriageContext(issue=issue, prd_hits=hits)

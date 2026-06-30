@@ -35,7 +35,11 @@ def prepare_triage_run(
 ) -> TriageRunPlan:
     output_dir.mkdir(parents=True, exist_ok=True)
     issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
-    context = build_triage_context(issue=issue, prd_root=repo_path / config.prd.cache_path)
+    context = build_triage_context(
+        issue=issue,
+        prd_root=repo_path / config.prd.cache_path,
+        prd_include_globs=config.prd.include_globs,
+    )
     context_path = output_dir / "triage-context.md"
     schema_path = output_dir / "triage.schema.json"
     output_path = output_dir / "triage-output.json"

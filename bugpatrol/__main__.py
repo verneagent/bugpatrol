@@ -67,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
     prd.add_argument("root", type=Path)
     prd.add_argument("query")
     prd.add_argument("--limit", type=int, default=5)
+    prd.add_argument("--include-glob", action="append", default=None)
 
     context = sub.add_parser("issue-context", help="build triage context markdown for an issue")
     context.add_argument("project_config", type=Path)
@@ -210,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "search-prd":
-        docs = load_prd_documents(args.root)
+        docs = load_prd_documents(args.root, include_globs=tuple(args.include_glob or ("**/*.md",)))
         hits = search_prd_documents(args.query, docs, limit=args.limit)
         print(json.dumps([hit.__dict__ for hit in hits], ensure_ascii=False))
         return 0
@@ -219,7 +220,11 @@ def main(argv: list[str] | None = None) -> int:
         config = load_project_config(args.project_config)
         issue = GitHubCliIssuesClient().get_issue(repo=config.github_repo, issue_number=args.issue)
         prd_root = args.repo_path / config.prd.cache_path
-        context = build_triage_context(issue=issue, prd_root=prd_root)
+        context = build_triage_context(
+            issue=issue,
+            prd_root=prd_root,
+            prd_include_globs=config.prd.include_globs,
+        )
         markdown = render_triage_context_markdown(context)
         if args.output:
             args.output.write_text(markdown)

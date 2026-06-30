@@ -31,6 +31,7 @@ class TriageAgentConfig:
 class PrdConfig:
     root_wiki_node: str
     cache_path: str = ""
+    include_globs: tuple[str, ...] = ("**/*.md",)
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,10 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
     if language not in {"zh-CN", "en-US"}:
         raise ValueError("intake.language must be one of: zh-CN, en-US")
 
+    include_globs = prd.get("include_globs") or ("**/*.md",)
+    if not isinstance(include_globs, (list, tuple)) or not all(isinstance(item, str) for item in include_globs):
+        raise ValueError("prd.include_globs must be a string list")
+
     return ProjectConfig(
         github_repo=_required_str(data, "github_repo"),
         lark=LarkConfig(
@@ -115,6 +120,7 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
         prd=PrdConfig(
             root_wiki_node=_required_str(prd, "root_wiki_node"),
             cache_path=str(prd.get("cache_path") or ""),
+            include_globs=tuple(include_globs),
         ),
         intake=IntakeConfig(language=language),
         issue_field_names={

@@ -22,11 +22,12 @@ class PrdSearchHit:
     excerpt: str
 
 
-def load_prd_documents(root: Path) -> tuple[PrdDocument, ...]:
+def load_prd_documents(root: Path, *, include_globs: tuple[str, ...] = ("**/*.md",)) -> tuple[PrdDocument, ...]:
     docs: list[PrdDocument] = []
     if not root.exists():
         return ()
-    for path in sorted(root.rglob("*.md")):
+    paths = sorted({path for pattern in include_globs for path in root.glob(pattern) if path.is_file()})
+    for path in paths:
         text = path.read_text()
         docs.append(
             PrdDocument(

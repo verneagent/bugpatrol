@@ -14,7 +14,11 @@ effort = ""
 
 [prd]
 root_wiki_node = "U4wvw2k0SildCUkdClOlAXWFgde"
-cache_path = ".bugpatrol/prd-cache"
+cache_path = "openspec"
+include_globs = [
+  "specs/**/spec.md",
+  "changes/**/prd-snapshot.md",
+]
 
 [intake]
 language = "zh-CN"

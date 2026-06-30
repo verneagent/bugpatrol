@@ -19,6 +19,25 @@ class PrdTest(unittest.TestCase):
         self.assertEqual(docs[0].path, "todo.md")
         self.assertEqual(docs[0].title, "Todo List")
 
+    def test_loads_only_included_globs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "specs" / "todo").mkdir(parents=True)
+            (root / "changes" / "todo").mkdir(parents=True)
+            (root / "specs" / "todo" / "spec.md").write_text("# Todo Spec\n\nAccepted behavior.")
+            (root / "changes" / "todo" / "prd-snapshot.md").write_text("# Todo Snapshot\n\nSnapshot behavior.")
+            (root / "changes" / "todo" / "proposal.md").write_text("# Proposal\n\nProcess notes.")
+
+            docs = load_prd_documents(
+                root,
+                include_globs=("specs/**/spec.md", "changes/**/prd-snapshot.md"),
+            )
+
+        self.assertEqual(
+            [doc.path for doc in docs],
+            ["changes/todo/prd-snapshot.md", "specs/todo/spec.md"],
+        )
+
     def test_search_scores_and_excerpts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

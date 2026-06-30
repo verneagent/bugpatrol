@@ -14,6 +14,10 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.project, "fived")
         self.assertEqual(config.github_repo, "TheCloverLab/fived")
         self.assertEqual(config.intake.language, "zh-CN")
+        self.assertEqual(
+            config.prd.include_globs,
+            ("specs/**/spec.md", "changes/**/prd-snapshot.md"),
+        )
         self.assertIn("fived-triage", config.triage_agent.runner_labels)
         config.validate_against(default_field_specs())
 
