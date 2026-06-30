@@ -17,6 +17,7 @@ from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lark import LarkOpenApiMessengerClient
+from bugpatrol.ownership import load_codeowners, resolve_owners
 from bugpatrol.watcher import run_polling_watcher
 
 
@@ -52,6 +53,10 @@ def main(argv: list[str] | None = None) -> int:
     watch.add_argument("--interval", type=float, default=30)
     watch.add_argument("--once", action="store_true")
     watch.add_argument("--dry-run", action="store_true", help="scan without GitHub writes")
+
+    owner = sub.add_parser("resolve-owner", help="resolve owners for paths using CODEOWNERS")
+    owner.add_argument("repo_path", type=Path)
+    owner.add_argument("paths", nargs="+")
 
     args = parser.parse_args(argv)
 
@@ -160,6 +165,19 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
         )
         print(json.dumps(result.__dict__, ensure_ascii=False))
+        return 0
+
+    if args.command == "resolve-owner":
+        rules = load_codeowners(args.repo_path)
+        print(
+            json.dumps(
+                {
+                    path: list(resolve_owners(path, rules))
+                    for path in args.paths
+                },
+                ensure_ascii=False,
+            )
+        )
         return 0
 
     parser.print_help(file=sys.stderr)

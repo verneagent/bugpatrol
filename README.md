@@ -125,4 +125,7 @@ python -m bugpatrol watch-lark projects/todo-sandbox.toml --once --dry-run --lim
 # Long-running polling watcher. Use --dry-run until doctor passes.
 BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
 python -m bugpatrol watch-lark projects/todo-sandbox.toml --interval 30 --limit 20
+
+# Resolve owners from CODEOWNERS.
+python -m bugpatrol resolve-owner ../bugpatrol-todo-sandbox src/todo/list.ts
 ```

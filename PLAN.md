@@ -66,6 +66,7 @@ Implemented:
 - `doctor` CLI for config, GitHub repo, Issue Types, Issue Fields, and optional
   Lark history checks.
 - Polling `watch-lark` CLI with `--once` and `--dry-run`.
+- CODEOWNERS parser/resolver and `resolve-owner` CLI.
 
 Not implemented:
 
@@ -243,6 +244,7 @@ The runner user should have:
 - [x] Add opt-in live e2e for backfill dry-run.
 - [x] Add opt-in live e2e fixture for a real human Lark message id.
 - [x] Implement long-running polling watcher.
+- [x] Implement CODEOWNERS owner resolver.
 - [ ] Implement WebSocket event receiver.
 - [ ] Support non-text attachment/resource normalization.
 
@@ -288,6 +290,9 @@ The runner user should have:
   config, GitHub repo, Issue Types, Issue Fields, Lark history.
 - Added `watch-lark` polling CLI. Live dry-run with `--once --limit 5`
   scanned 5, processed 0, skipped 5.
+- Added CODEOWNERS owner resolver. Sandbox checks:
+  `src/todo/list.ts -> @garlanddiego`,
+  `src/notifications/reminders.ts -> @verneagent`.
 - Added `TheCloverLab/bugpatrol-todo-sandbox` issue triage smoke workflow. It
   installs bugpatrol and runs `doctor` on the self-hosted label
   `bugpatrol-sandbox-triage`. Workflow registration and manual dispatch were
