@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 from bugpatrol.agents import build_triage_agent_invocation
+from bugpatrol.backfill import run_lark_backfill
 from bugpatrol.config import load_project_config
+from bugpatrol.doctor import run_doctor
 from bugpatrol.fields import TRIAGE_OUTPUT_SCHEMA, default_field_specs
+from bugpatrol.github import GitHubCliIssuesClient
+from bugpatrol.github_fields import GitHubIssueFieldsClient
+from bugpatrol.intake_workflow import IntakeWorkflow
+from bugpatrol.lark import LarkOpenApiMessengerClient
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -28,6 +35,15 @@ def main(argv: list[str] | None = None) -> int:
     agent.add_argument("--prompt", type=Path, default=Path("prompts/triage.zh.md"))
     agent.add_argument("--schema", type=Path, default=Path("triage.schema.json"))
     agent.add_argument("--output", type=Path, default=Path("triage-output.json"))
+
+    backfill = sub.add_parser("backfill-lark", help="backfill recent Lark messages into GitHub")
+    backfill.add_argument("project_config", type=Path)
+    backfill.add_argument("--limit", type=int, default=20)
+    backfill.add_argument("--write", action="store_true", help="perform writes; default is dry-run")
+
+    doctor = sub.add_parser("doctor", help="check project integration dependencies")
+    doctor.add_argument("project_config", type=Path)
+    doctor.add_argument("--with-lark", action="store_true")
 
     args = parser.parse_args(argv)
 
@@ -55,6 +71,64 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps({"provider": invocation.provider, "command": invocation.command}, ensure_ascii=False))
         return 0
+
+    if args.command == "backfill-lark":
+        config = load_project_config(args.project_config)
+        app_secret = os.environ.get(config.lark.app_secret_env)
+        if not app_secret:
+            print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
+            return 2
+        lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
+        github = GitHubCliIssuesClient(
+            issue_fields=GitHubIssueFieldsClient(),
+            project_config=config,
+        )
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        result = run_lark_backfill(
+            config=config,
+            lark=lark,
+            workflow=workflow,
+            limit=args.limit,
+            dry_run=not args.write,
+        )
+        print(
+            json.dumps(
+                {
+                    "dry_run": not args.write,
+                    "scanned": result.scanned,
+                    "processed": result.processed,
+                    "skipped": result.skipped,
+                    "issues": [
+                        {
+                            "action": outcome.action,
+                            "number": outcome.issue.number,
+                            "url": outcome.issue.url,
+                        }
+                        for outcome in result.outcomes
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    if args.command == "doctor":
+        config = load_project_config(args.project_config)
+        lark = None
+        if args.with_lark:
+            app_secret = os.environ.get(config.lark.app_secret_env)
+            if not app_secret:
+                print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
+                return 2
+            lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
+        checks = run_doctor(
+            config=config,
+            github=GitHubCliIssuesClient(),
+            issue_fields=GitHubIssueFieldsClient(),
+            lark=lark,
+        )
+        print(json.dumps([check.__dict__ for check in checks], ensure_ascii=False))
+        return 0 if all(check.ok for check in checks) else 1
 
     parser.print_help(file=sys.stderr)
     return 2

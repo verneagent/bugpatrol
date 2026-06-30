@@ -62,6 +62,9 @@ Implemented:
 - GitHub Issue Fields reader/writer with unit tests.
 - Native GitHub Issue Type setter via REST.
 - Live e2e asserts `type = Bug` and initial Issue Fields.
+- Lark history reader, message normalizer, and dry-run-first backfill CLI.
+- `doctor` CLI for config, GitHub repo, Issue Types, Issue Fields, and optional
+  Lark history checks.
 
 Not implemented:
 
@@ -232,8 +235,14 @@ The runner user should have:
 - [x] Add real Lark OpenAPI messenger client.
 - [x] Add opt-in live e2e that sends seed Lark messages and reads back Lark
   backlinks.
-- [ ] Implement long-running watcher/backfill scanner.
-- [ ] Normalize real Lark topic events into `IntakeRecord`.
+- [x] Implement Lark history backfill scanner.
+- [x] Normalize real Lark messages into `IntakeRecord`.
+- [x] Add dry-run default and explicit `--write`.
+- [x] Add doctor checks for GitHub/Lark integration health.
+- [x] Add opt-in live e2e for backfill dry-run.
+- [x] Add opt-in live e2e fixture for a real human Lark message id.
+- [ ] Implement long-running watcher/event receiver.
+- [ ] Support non-text attachment/resource normalization.
 
 ### Live verification log
 
@@ -270,6 +279,11 @@ The runner user should have:
   - `Intake version = v2`
   - `Triage status = Pending`
   - `Evidence = 文字描述`
+- Added `backfill-lark` CLI. Dry-run against the sandbox scanned 8 messages,
+  processed 0, skipped 8 because current recent messages were bot/test/backlink
+  messages.
+- Added `doctor` CLI. Live doctor with Lark returned all checks OK:
+  config, GitHub repo, Issue Types, Issue Fields, Lark history.
 
 - Create/read Lark sandbox group config.
 - Watch or scan test group.

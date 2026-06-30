@@ -128,6 +128,20 @@ class GitHubCliIssuesClient:
             return ""
         return str(issue_type["name"])
 
+    def get_repository(self, *, repo: str) -> dict[str, object]:
+        result = self._run(["api", f"/repos/{repo}"])
+        data = json.loads(result.stdout)
+        if not isinstance(data, dict):
+            raise GitHubCliError(f"unexpected repository response: {data!r}")
+        return data
+
+    def list_issue_types(self, *, repo: str) -> tuple[str, ...]:
+        result = self._run(
+            ["api", "-H", f"X-GitHub-Api-Version: {GITHUB_API_VERSION}", f"/repos/{repo}/issue-types"]
+        )
+        data = json.loads(result.stdout)
+        return tuple(str(item["name"]) for item in data)
+
     def close_issue(self, *, repo: str, issue_number: int, reason: str = "not planned") -> None:
         self._run(
             [

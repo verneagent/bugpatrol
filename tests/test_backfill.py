@@ -1,0 +1,96 @@
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+
+from bugpatrol.backfill import (
+    intake_record_from_lark_message,
+    run_lark_backfill,
+    should_skip_message,
+)
+from bugpatrol.config import load_project_config
+from bugpatrol.intake_workflow import IntakeWorkflow
+from bugpatrol.lark import LarkMessage
+from bugpatrol.testing.fakes import FakeGitHubIssuesClient, FakeLarkMessengerClient
+
+
+def message(**overrides: object) -> LarkMessage:
+    values = {
+        "message_id": "om_1",
+        "chat_id": "oc_d371f022f168b567a141ced142691894",
+        "root_id": "om_root",
+        "sender_open_id": "ou_user",
+        "sender_type": "user",
+        "create_time": "2026-06-30T14:00:00Z",
+        "msg_type": "text",
+        "text": "Todo 删除最后一项后空状态没出现",
+    }
+    values.update(overrides)
+    return LarkMessage(**values)  # type: ignore[arg-type]
+
+
+class FakeLarkHistory(FakeLarkMessengerClient):
+    def __init__(self, messages: list[LarkMessage]) -> None:
+        super().__init__()
+        self._messages = messages
+
+    def list_chat_messages(self, *, chat_id: str, limit: int = 20) -> list[LarkMessage]:
+        return self._messages[:limit]
+
+
+class BackfillTest(unittest.TestCase):
+    def test_should_skip_bot_and_backlink_messages(self) -> None:
+        self.assertTrue(should_skip_message(message(sender_open_id="ou_bot"), bot_open_id="ou_bot"))
+        self.assertTrue(
+            should_skip_message(
+                message(text="已创建 GitHub issue #1: https://github.com/x/y/issues/1"),
+                bot_open_id="ou_bot",
+            )
+        )
+        self.assertTrue(should_skip_message(message(msg_type="image"), bot_open_id="ou_bot"))
+        self.assertFalse(should_skip_message(message(), bot_open_id="ou_bot"))
+
+    def test_intake_record_from_lark_message_maps_topic_root(self) -> None:
+        record = intake_record_from_lark_message(message())
+
+        self.assertEqual(record.root_id, "om_root")
+        self.assertEqual(record.message_id, "om_1")
+        self.assertEqual(record.original_text, "Todo 删除最后一项后空状态没出现")
+
+    def test_run_lark_backfill_processes_non_bot_messages_oldest_first(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkHistory(
+            [
+                message(message_id="om_new", root_id="om_root", text="补充信息"),
+                message(message_id="om_old", root_id="om_root", text="首次上报"),
+                message(message_id="om_bot", sender_open_id=config.lark.bot_open_id, text="bot reply"),
+            ]
+        )
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        result = run_lark_backfill(config=config, lark=lark, workflow=workflow, limit=10)
+
+        self.assertEqual(result.scanned, 3)
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(result.processed, 2)
+        self.assertEqual(result.outcomes[0].action, "created")
+        self.assertEqual(result.outcomes[1].action, "updated")
+        self.assertIn("首次上报", github.created[0].issue.body)
+        self.assertIn("补充信息", github.created[0].comments[0])
+
+    def test_dry_run_does_not_write(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkHistory([message()])
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        result = run_lark_backfill(config=config, lark=lark, workflow=workflow, dry_run=True)
+
+        self.assertEqual(result.processed, 0)
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(github.created, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

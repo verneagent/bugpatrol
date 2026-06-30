@@ -4,7 +4,7 @@ import json
 import unittest
 from unittest.mock import MagicMock, patch
 
-from bugpatrol.lark import LarkOpenApiMessengerClient
+from bugpatrol.lark import LarkOpenApiMessengerClient, parse_lark_message
 
 
 class LarkOpenApiMessengerClientTest(unittest.TestCase):
@@ -48,7 +48,91 @@ class LarkOpenApiMessengerClientTest(unittest.TestCase):
         self.assertIn("/im/v1/messages/om_1/reply", reply_request.full_url)
         self.assertIn("done", reply_request.data.decode())
 
+    def test_list_chat_messages_parses_text_history(self) -> None:
+        client = LarkOpenApiMessengerClient(app_id="app", app_secret="secret")
+
+        with patch("urllib.request.urlopen") as urlopen:
+            token_response = MagicMock()
+            token_response.__enter__.return_value.read.return_value = json.dumps(
+                {"code": 0, "tenant_access_token": "token"}
+            ).encode()
+            history_response = MagicMock()
+            history_response.__enter__.return_value.read.return_value = json.dumps(
+                {
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {
+                                "message_id": "om_1",
+                                "root_id": "",
+                                "chat_id": "oc_1",
+                                "msg_type": "text",
+                                "create_time": "1000",
+                                "sender": {
+                                    "sender_type": "user",
+                                    "id": {"open_id": "ou_1"},
+                                },
+                                "body": {"content": json.dumps({"text": "hello"})},
+                            }
+                        ]
+                    },
+                }
+            ).encode()
+            urlopen.side_effect = [token_response, history_response]
+
+            messages = client.list_chat_messages(chat_id="oc_1", limit=5)
+
+        self.assertEqual(messages[0].message_id, "om_1")
+        self.assertEqual(messages[0].root_id, "om_1")
+        self.assertEqual(messages[0].sender_open_id, "ou_1")
+        self.assertEqual(messages[0].text, "hello")
+        self.assertIn("page_size=5", urlopen.call_args_list[1].args[0].full_url)
+
+    def test_parse_lark_message_falls_back_to_raw_content(self) -> None:
+        parsed = parse_lark_message(
+            {
+                "message_id": "om_1",
+                "msg_type": "text",
+                "body": {"content": "not json"},
+            },
+            default_chat_id="oc_1",
+        )
+
+        self.assertEqual(parsed.text, "not json")
+
+    def test_get_message_parses_single_message_items_shape(self) -> None:
+        client = LarkOpenApiMessengerClient(app_id="app", app_secret="secret")
+
+        with patch("urllib.request.urlopen") as urlopen:
+            token_response = MagicMock()
+            token_response.__enter__.return_value.read.return_value = json.dumps(
+                {"code": 0, "tenant_access_token": "token"}
+            ).encode()
+            message_response = MagicMock()
+            message_response.__enter__.return_value.read.return_value = json.dumps(
+                {
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {
+                                "message_id": "om_1",
+                                "chat_id": "oc_1",
+                                "msg_type": "text",
+                                "sender": {"id": {"open_id": "ou_1"}},
+                                "body": {"content": json.dumps({"text": "hello"})},
+                            }
+                        ]
+                    },
+                }
+            ).encode()
+            urlopen.side_effect = [token_response, message_response]
+
+            parsed = client.get_message(message_id="om_1", default_chat_id="oc_1")
+
+        self.assertEqual(parsed.message_id, "om_1")
+        self.assertEqual(parsed.text, "hello")
+        self.assertIn("/im/v1/messages/om_1", urlopen.call_args_list[1].args[0].full_url)
+
 
 if __name__ == "__main__":
     unittest.main()
-

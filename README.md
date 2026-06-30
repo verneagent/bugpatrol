@@ -101,3 +101,20 @@ them, and closes the test issue in cleanup.
 
 The sandbox repository lives under `TheCloverLab` because GitHub Issue Fields
 are organization-scoped and are unavailable on user-owned repositories.
+
+Backfill recent Lark messages:
+
+```bash
+# Check GitHub Issue Types, Issue Fields, and optional Lark access.
+python -m bugpatrol doctor projects/todo-sandbox.toml
+BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
+python -m bugpatrol doctor projects/todo-sandbox.toml --with-lark
+
+# Dry-run is the default and performs no GitHub writes.
+BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
+python -m bugpatrol backfill-lark projects/todo-sandbox.toml --limit 20
+
+# Explicit write mode.
+BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
+python -m bugpatrol backfill-lark projects/todo-sandbox.toml --limit 20 --write
+```
