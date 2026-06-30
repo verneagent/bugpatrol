@@ -13,7 +13,7 @@ from bugpatrol.backfill import run_lark_backfill
 from bugpatrol.config import load_project_config
 from bugpatrol.doctor import run_doctor
 from bugpatrol.fields import TRIAGE_OUTPUT_SCHEMA, default_field_specs
-from bugpatrol.fix_notify import FIX_EVENTS, apply_fix_notification
+from bugpatrol.fix_notify import FIX_EVENTS, apply_fix_notification, resolve_single_issue_from_pr
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake_workflow import IntakeWorkflow
@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
 
     notify_fix = sub.add_parser("notify-fix", help="notify Lark about explicit fix progress")
     notify_fix.add_argument("project_config", type=Path)
-    notify_fix.add_argument("--issue", type=int, required=True)
+    notify_fix.add_argument("--issue", type=int)
     notify_fix.add_argument("--event", choices=FIX_EVENTS, required=True)
     notify_fix.add_argument("--pr", default="")
     notify_fix.add_argument("--commit", default="")
@@ -292,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "notify-fix":
         config = load_project_config(args.project_config)
+        github = GitHubCliIssuesClient()
         lark = None
         if args.write:
             app_secret = os.environ.get(config.lark.app_secret_env)
@@ -299,14 +300,26 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
                 return 2
             lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
+        issue_number = args.issue
+        if issue_number is None:
+            if args.event not in ("pr_opened", "pr_merged") or not args.pr:
+                print("--issue is required unless --event is pr_opened/pr_merged with --pr", file=sys.stderr)
+                return 2
+            try:
+                issue_number = resolve_single_issue_from_pr(
+                    github.get_pull_request(repo=config.github_repo, pr=args.pr)
+                )
+            except ValueError as error:
+                print(str(error), file=sys.stderr)
+                return 2
         summary = apply_fix_notification(
             repo=config.github_repo,
-            issue_number=args.issue,
+            issue_number=issue_number,
             event=args.event,
             pr=args.pr,
             commit=args.commit,
             dry_run=not args.write,
-            github=GitHubCliIssuesClient(),
+            github=github,
             lark=lark,
         )
         print(json.dumps(summary.__dict__, ensure_ascii=False))

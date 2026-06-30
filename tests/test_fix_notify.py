@@ -4,12 +4,15 @@ import unittest
 from pathlib import Path
 
 from bugpatrol.config import load_project_config
+from bugpatrol.clients import GitHubPullRequest
 from bugpatrol.fix_notify import (
     apply_fix_notification,
+    associated_issue_numbers_from_pr,
     fix_notification_key,
     notified_fix_keys,
     parse_fix_metadata,
     render_fix_metadata_comment,
+    resolve_single_issue_from_pr,
 )
 from bugpatrol.intake import IntakeRecord
 from bugpatrol.intake_workflow import IntakeWorkflow
@@ -35,6 +38,39 @@ class FixNotifyTest(unittest.TestCase):
         body = render_fix_metadata_comment({"version": 1, "key": "pr_merged:o/r#2"})
 
         self.assertEqual(parse_fix_metadata(body), {"version": 1, "key": "pr_merged:o/r#2"})
+
+    def test_associated_issue_numbers_from_pr_uses_closing_refs_title_and_body(self) -> None:
+        pr = GitHubPullRequest(
+            number=9,
+            url="https://github.test/o/r/pull/9",
+            title="Fix #3",
+            body="Closes #2\nRefs o/r#4\nHex abc#123 is not a repo ref.",
+            closing_issue_numbers=(1, 2),
+        )
+
+        self.assertEqual(associated_issue_numbers_from_pr(pr), (1, 2, 3, 4))
+
+    def test_resolve_single_issue_from_pr_requires_exactly_one_issue(self) -> None:
+        self.assertEqual(
+            resolve_single_issue_from_pr(
+                GitHubPullRequest(
+                    number=9,
+                    url="https://github.test/o/r/pull/9",
+                    title="Fix",
+                    body="Closes #2",
+                )
+            ),
+            2,
+        )
+        with self.assertRaisesRegex(ValueError, "exactly one issue"):
+            resolve_single_issue_from_pr(
+                GitHubPullRequest(
+                    number=9,
+                    url="https://github.test/o/r/pull/9",
+                    title="Fix",
+                    body="Closes #2 and #3",
+                )
+            )
 
     def test_notify_fix_write_sends_once_and_records_metadata(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

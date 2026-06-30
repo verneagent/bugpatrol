@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from bugpatrol.clients import GitHubIssue, GitHubIssueComment
+from bugpatrol.clients import GitHubIssue, GitHubIssueComment, GitHubPullRequest
 from bugpatrol.github_fields import GITHUB_API_VERSION, GitHubIssueFieldsClient
 
 if TYPE_CHECKING:
@@ -165,6 +165,33 @@ class GitHubCliIssuesClient:
             url=str(data["html_url"]),
             title=str(data["title"]),
             body=str(data.get("body") or ""),
+        )
+
+    def get_pull_request(self, *, repo: str, pr: str) -> GitHubPullRequest:
+        result = self._run(
+            [
+                "pr",
+                "view",
+                pr,
+                "--repo",
+                repo,
+                "--json",
+                "number,url,title,body,closingIssuesReferences",
+            ]
+        )
+        data = json.loads(result.stdout)
+        closing = data.get("closingIssuesReferences")
+        closing_numbers: list[int] = []
+        if isinstance(closing, list):
+            for item in closing:
+                if isinstance(item, dict) and isinstance(item.get("number"), int):
+                    closing_numbers.append(int(item["number"]))
+        return GitHubPullRequest(
+            number=int(data["number"]),
+            url=str(data["url"]),
+            title=str(data.get("title") or ""),
+            body=str(data.get("body") or ""),
+            closing_issue_numbers=tuple(closing_numbers),
         )
 
     def list_issue_types(self, *, repo: str) -> tuple[str, ...]:

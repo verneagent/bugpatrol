@@ -20,6 +20,15 @@ class GitHubIssueComment:
     body: str
 
 
+@dataclass(frozen=True)
+class GitHubPullRequest:
+    number: int
+    url: str
+    title: str
+    body: str
+    closing_issue_numbers: tuple[int, ...] = ()
+
+
 class GitHubIssuesClient(Protocol):
     def find_issue_by_intake_root(self, *, repo: str, chat_id: str, root_id: str) -> GitHubIssue | None:
         """Return the issue already linked to a Lark topic root, if one exists."""

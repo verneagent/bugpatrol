@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from bugpatrol.clients import GitHubIssue, GitHubIssueComment, LarkMessengerClient
+from bugpatrol.clients import GitHubIssue, GitHubIssueComment, GitHubPullRequest, LarkMessengerClient
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.intake import parse_intake_metadata
 
@@ -18,6 +18,7 @@ FIX_META_RE = re.compile(
     re.DOTALL,
 )
 FIX_EVENTS = ("pr_opened", "pr_merged", "commit_linked", "issue_fixed")
+ISSUE_REF_RE = re.compile(r"(?<![\w/-])(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#([1-9][0-9]*)\b")
 
 
 @dataclass(frozen=True)
@@ -203,6 +204,22 @@ def notified_fix_keys(comments: tuple[GitHubIssueComment, ...]) -> set[str]:
         if metadata is not None and isinstance(metadata.get("key"), str):
             keys.add(str(metadata["key"]))
     return keys
+
+
+def associated_issue_numbers_from_pr(pr: GitHubPullRequest) -> tuple[int, ...]:
+    numbers = set(pr.closing_issue_numbers)
+    for text in (pr.title, pr.body):
+        numbers.update(int(match.group(1)) for match in ISSUE_REF_RE.finditer(text or ""))
+    return tuple(sorted(numbers))
+
+
+def resolve_single_issue_from_pr(pr: GitHubPullRequest) -> int:
+    numbers = associated_issue_numbers_from_pr(pr)
+    if len(numbers) != 1:
+        raise ValueError(
+            f"PR #{pr.number} must reference exactly one issue for automatic notification; found {list(numbers)}"
+        )
+    return numbers[0]
 
 
 def _normalize_pr(pr: str) -> str:
