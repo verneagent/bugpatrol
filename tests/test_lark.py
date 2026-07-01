@@ -134,6 +134,35 @@ class LarkOpenApiMessengerClientTest(unittest.TestCase):
         self.assertEqual(parsed.text, "hello")
         self.assertIn("/im/v1/messages/om_1", urlopen.call_args_list[1].args[0].full_url)
 
+    def test_download_message_resource_reads_binary_response(self) -> None:
+        client = LarkOpenApiMessengerClient(app_id="app", app_secret="secret")
+
+        with patch("urllib.request.urlopen") as urlopen:
+            token_response = MagicMock()
+            token_response.__enter__.return_value.read.return_value = json.dumps(
+                {"code": 0, "tenant_access_token": "token"}
+            ).encode()
+            resource_response = MagicMock()
+            resource_context = resource_response.__enter__.return_value
+            resource_context.read.return_value = b"image-bytes"
+            resource_context.headers = {
+                "Content-Type": "image/png",
+                "Content-Disposition": 'attachment; filename="bug.png"',
+            }
+            urlopen.side_effect = [token_response, resource_response]
+
+            downloaded = client.download_message_resource(
+                message_id="om_1",
+                resource_key="img_v2_abc",
+            )
+
+        self.assertEqual(downloaded.content, b"image-bytes")
+        self.assertEqual(downloaded.content_type, "image/png")
+        self.assertEqual(downloaded.filename, "bug.png")
+        resource_request = urlopen.call_args_list[1].args[0]
+        self.assertIn("/im/v1/messages/om_1/resources/img_v2_abc", resource_request.full_url)
+        self.assertEqual(resource_request.get_header("Authorization"), "Bearer token")
+
 
 if __name__ == "__main__":
     unittest.main()

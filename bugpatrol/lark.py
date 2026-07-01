@@ -31,6 +31,13 @@ class LarkMessage:
     raw_content: str = ""
 
 
+@dataclass(frozen=True)
+class DownloadedLarkResource:
+    content: bytes
+    content_type: str
+    filename: str
+
+
 class LarkOpenApiMessengerClient:
     def __init__(
         self,
@@ -91,6 +98,27 @@ class LarkOpenApiMessengerClient:
         if isinstance(single, dict):
             return parse_lark_message(single, default_chat_id=default_chat_id)
         raise LarkOpenApiError(f"message not found in response: {data}")
+
+    def download_message_resource(self, *, message_id: str, resource_key: str) -> DownloadedLarkResource:
+        request = urllib.request.Request(
+            f"{self._base_url}/im/v1/messages/{message_id}/resources/{resource_key}",
+            method="GET",
+            headers={"Authorization": f"Bearer {self._tenant_token()}"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                content = response.read()
+                headers = response.headers
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode(errors="replace")
+            raise LarkOpenApiError(f"Lark HTTP {error.code}: {detail}") from error
+        except urllib.error.URLError as error:
+            raise LarkOpenApiError(f"Lark request failed: {error}") from error
+        return DownloadedLarkResource(
+            content=content,
+            content_type=headers.get("Content-Type", ""),
+            filename=_filename_from_content_disposition(headers.get("Content-Disposition", "")),
+        )
 
     def _tenant_token(self) -> str:
         if self._tenant_access_token:
@@ -189,3 +217,11 @@ def _extract_text(content: str) -> str:
         if isinstance(text, str):
             return text
     return content
+
+
+def _filename_from_content_disposition(value: str) -> str:
+    for part in value.split(";"):
+        part = part.strip()
+        if part.startswith("filename="):
+            return part.removeprefix("filename=").strip('"')
+    return ""
