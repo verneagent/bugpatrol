@@ -86,6 +86,7 @@ class LarkOpenApiMessengerClientTest(unittest.TestCase):
         self.assertEqual(messages[0].root_id, "om_1")
         self.assertEqual(messages[0].sender_open_id, "ou_1")
         self.assertEqual(messages[0].text, "hello")
+        self.assertEqual(messages[0].raw_content, json.dumps({"text": "hello"}))
         self.assertIn("page_size=5", urlopen.call_args_list[1].args[0].full_url)
 
     def test_parse_lark_message_falls_back_to_raw_content(self) -> None:

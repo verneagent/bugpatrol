@@ -28,6 +28,7 @@ class LarkMessage:
     create_time: str
     msg_type: str
     text: str
+    raw_content: str = ""
 
 
 class LarkOpenApiMessengerClient:
@@ -172,6 +173,7 @@ def parse_lark_message(item: dict[str, object], *, default_chat_id: str) -> Lark
         create_time=str(item.get("create_time") or ""),
         msg_type=str(item.get("msg_type") or ""),
         text=_extract_text(content),
+        raw_content=content,
     )
 
 

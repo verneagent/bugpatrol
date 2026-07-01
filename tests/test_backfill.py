@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 
 from bugpatrol.backfill import (
+    attachments_from_lark_message,
     intake_record_from_lark_message,
     run_lark_backfill,
     should_skip_message,
@@ -47,7 +49,7 @@ class BackfillTest(unittest.TestCase):
                 bot_open_id="ou_bot",
             )
         )
-        self.assertTrue(should_skip_message(message(msg_type="image"), bot_open_id="ou_bot"))
+        self.assertTrue(should_skip_message(message(msg_type="image", text=""), bot_open_id="ou_bot"))
         self.assertFalse(should_skip_message(message(), bot_open_id="ou_bot"))
 
     def test_intake_record_from_lark_message_maps_topic_root(self) -> None:
@@ -56,6 +58,33 @@ class BackfillTest(unittest.TestCase):
         self.assertEqual(record.root_id, "om_root")
         self.assertEqual(record.message_id, "om_1")
         self.assertEqual(record.original_text, "Todo 删除最后一项后空状态没出现")
+
+    def test_image_message_extracts_attachment(self) -> None:
+        msg = message(
+            msg_type="image",
+            text="",
+            raw_content=json.dumps({"image_key": "img_v2_abc"}),
+        )
+
+        attachments = attachments_from_lark_message(msg)
+        record = intake_record_from_lark_message(msg)
+
+        self.assertFalse(should_skip_message(msg, bot_open_id="ou_bot"))
+        self.assertEqual(attachments[0].kind, "image")
+        self.assertEqual(attachments[0].url, "lark://message/om_1/image/img_v2_abc")
+        self.assertEqual(record.attachments, attachments)
+
+    def test_file_message_extracts_name_description(self) -> None:
+        msg = message(
+            msg_type="file",
+            text="",
+            raw_content=json.dumps({"file_key": "file_v2_abc", "file_name": "console.log"}),
+        )
+
+        attachments = attachments_from_lark_message(msg)
+
+        self.assertEqual(attachments[0].kind, "file")
+        self.assertEqual(attachments[0].description, "console.log")
 
     def test_run_lark_backfill_processes_non_bot_messages_oldest_first(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
@@ -78,6 +107,26 @@ class BackfillTest(unittest.TestCase):
         self.assertEqual(result.outcomes[1].action, "updated")
         self.assertIn("首次上报", github.created[0].issue.body)
         self.assertIn("补充信息", github.created[0].comments[0])
+
+    def test_run_lark_backfill_creates_issue_for_image_message(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkHistory(
+            [
+                message(
+                    msg_type="image",
+                    text="",
+                    raw_content=json.dumps({"image_key": "img_v2_abc"}),
+                )
+            ]
+        )
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        result = run_lark_backfill(config=config, lark=lark, workflow=workflow, limit=10)
+
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(github.created[0].fields["Evidence"], "截图")
+        self.assertIn("lark://message/om_1/image/img_v2_abc", github.created[0].issue.body)
 
     def test_dry_run_does_not_write(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
