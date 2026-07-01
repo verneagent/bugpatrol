@@ -118,6 +118,22 @@ python -m bugpatrol backfill-lark projects/todo-sandbox.toml --limit 20
 BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
 python -m bugpatrol backfill-lark projects/todo-sandbox.toml --limit 20 --write
 
+# Download Lark image/file/video resources to a local directory before writing
+# issues. This is for local debugging and leaves local file paths in the issue.
+BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
+python -m bugpatrol backfill-lark projects/todo-sandbox.toml \
+  --limit 20 \
+  --write \
+  --resource-dir .bugpatrol/resources
+
+# Upload resources to the configured durable assets repo before writing issues.
+# FiveD uses TheCloverLab/fived-assets and stores raw GitHub URLs in issues.
+FIVED_LARK_BUG_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_a9518095a9b8ded3.secret)" \
+python -m bugpatrol backfill-lark projects/fived.toml \
+  --limit 20 \
+  --write \
+  --asset-repo
+
 # Poll once, useful for smoke tests and cron/systemd wrappers.
 BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
 python -m bugpatrol watch-lark projects/todo-sandbox.toml --once --dry-run --limit 20

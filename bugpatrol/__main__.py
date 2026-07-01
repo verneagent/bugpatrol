@@ -20,6 +20,7 @@ from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lark import LarkOpenApiMessengerClient
 from bugpatrol.ownership import load_codeowners, resolve_owners
 from bugpatrol.prd import load_prd_documents, search_prd_documents
+from bugpatrol.resources import GitHubAssetRepoStore
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
 from bugpatrol.triage_result import apply_triage_result, parse_triage_result
 from bugpatrol.triage_runner import execute_triage_run, prepare_triage_run
@@ -49,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     backfill.add_argument("--limit", type=int, default=20)
     backfill.add_argument("--write", action="store_true", help="perform writes; default is dry-run")
     backfill.add_argument("--resource-dir", type=Path, help="download Lark resources before writing issues")
+    backfill.add_argument("--asset-repo", action="store_true", help="upload Lark resources to configured assets repo")
 
     doctor = sub.add_parser("doctor", help="check project integration dependencies")
     doctor.add_argument("project_config", type=Path)
@@ -137,6 +139,20 @@ def main(argv: list[str] | None = None) -> int:
             project_config=config,
         )
         workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        if args.resource_dir and args.asset_repo:
+            print("--resource-dir and --asset-repo are mutually exclusive", file=sys.stderr)
+            return 2
+        resource_store = None
+        if args.asset_repo:
+            if not config.assets.github_repo or not config.assets.checkout_path:
+                print("missing [assets] github_repo or checkout_path", file=sys.stderr)
+                return 2
+            resource_store = GitHubAssetRepoStore(
+                repo=config.assets.github_repo,
+                checkout_path=Path(config.assets.checkout_path),
+                base_path=config.assets.base_path,
+                branch=config.assets.branch,
+            )
         result = run_lark_backfill(
             config=config,
             lark=lark,
@@ -144,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             dry_run=not args.write,
             resource_dir=args.resource_dir,
+            resource_store=resource_store,
         )
         print(
             json.dumps(

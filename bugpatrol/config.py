@@ -40,12 +40,21 @@ class IntakeConfig:
 
 
 @dataclass(frozen=True)
+class AssetsConfig:
+    github_repo: str = ""
+    checkout_path: str = ""
+    base_path: str = ".github/issue-assets"
+    branch: str = "main"
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     github_repo: str
     lark: LarkConfig
     triage_agent: TriageAgentConfig
     prd: PrdConfig
     intake: IntakeConfig
+    assets: AssetsConfig
     issue_field_names: dict[str, str]
 
     @property
@@ -94,6 +103,9 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
     triage_agent = _required_table(data, "triage_agent")
     prd = _required_table(data, "prd")
     intake = _required_table(data, "intake")
+    assets = data.get("assets") or {}
+    if not isinstance(assets, dict):
+        raise ValueError("[assets] must be a table")
     field_names = _required_table(data, "issue_field_names")
     language = _required_str(intake, "language")
     if language not in {"zh-CN", "en-US"}:
@@ -123,6 +135,12 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             include_globs=tuple(include_globs),
         ),
         intake=IntakeConfig(language=language),
+        assets=AssetsConfig(
+            github_repo=str(assets.get("github_repo") or ""),
+            checkout_path=str(assets.get("checkout_path") or ""),
+            base_path=str(assets.get("base_path") or ".github/issue-assets"),
+            branch=str(assets.get("branch") or "main"),
+        ),
         issue_field_names={
             str(name): str(value)
             for name, value in field_names.items()

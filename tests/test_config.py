@@ -18,6 +18,10 @@ class ConfigTest(unittest.TestCase):
             config.prd.include_globs,
             ("specs/**/spec.md", "changes/**/prd-snapshot.md"),
         )
+        self.assertEqual(config.assets.github_repo, "TheCloverLab/fived-assets")
+        self.assertEqual(config.assets.checkout_path, "~/clover/fived-assets")
+        self.assertEqual(config.assets.base_path, ".github/issue-assets")
+        self.assertEqual(config.assets.branch, "main")
         self.assertIn("fived-triage", config.triage_agent.runner_labels)
         config.validate_against(default_field_specs())
 
