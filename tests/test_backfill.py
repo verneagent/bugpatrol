@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from bugpatrol.backfill import (
 )
 from bugpatrol.config import load_project_config
 from bugpatrol.intake_workflow import IntakeWorkflow
-from bugpatrol.lark import LarkMessage
+from bugpatrol.lark import DownloadedLarkResource, LarkMessage
 from bugpatrol.testing.fakes import FakeGitHubIssuesClient, FakeLarkMessengerClient
 
 
@@ -35,9 +36,18 @@ class FakeLarkHistory(FakeLarkMessengerClient):
     def __init__(self, messages: list[LarkMessage]) -> None:
         super().__init__()
         self._messages = messages
+        self.downloads: list[tuple[str, str]] = []
 
     def list_chat_messages(self, *, chat_id: str, limit: int = 20) -> list[LarkMessage]:
         return self._messages[:limit]
+
+    def download_message_resource(self, *, message_id: str, resource_key: str) -> DownloadedLarkResource:
+        self.downloads.append((message_id, resource_key))
+        return DownloadedLarkResource(
+            content=b"image-bytes",
+            content_type="image/png",
+            filename="bug.png",
+        )
 
 
 class BackfillTest(unittest.TestCase):
@@ -128,6 +138,35 @@ class BackfillTest(unittest.TestCase):
         self.assertEqual(github.created[0].fields["Evidence"], "截图")
         self.assertIn("lark://message/om_1/image/img_v2_abc", github.created[0].issue.body)
 
+    def test_run_lark_backfill_materializes_resources_when_configured(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkHistory(
+            [
+                message(
+                    msg_type="image",
+                    text="",
+                    raw_content=json.dumps({"image_key": "img_v2_abc"}),
+                )
+            ]
+        )
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_lark_backfill(
+                config=config,
+                lark=lark,
+                workflow=workflow,
+                limit=10,
+                resource_dir=Path(tmp),
+            )
+            resource_path = Path(tmp) / "om_1" / "bug.png"
+            self.assertTrue(resource_path.exists())
+            self.assertIn(str(resource_path), github.created[0].issue.body)
+
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(lark.downloads, [("om_1", "img_v2_abc")])
+
     def test_dry_run_does_not_write(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGitHubIssuesClient()
@@ -139,6 +178,32 @@ class BackfillTest(unittest.TestCase):
         self.assertEqual(result.processed, 0)
         self.assertEqual(result.skipped, 1)
         self.assertEqual(github.created, [])
+
+    def test_dry_run_does_not_materialize_resources(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkHistory(
+            [
+                message(
+                    msg_type="image",
+                    text="",
+                    raw_content=json.dumps({"image_key": "img_v2_abc"}),
+                )
+            ]
+        )
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_lark_backfill(
+                config=config,
+                lark=lark,
+                workflow=workflow,
+                dry_run=True,
+                resource_dir=Path(tmp),
+            )
+
+        self.assertEqual(result.processed, 0)
+        self.assertEqual(lark.downloads, [])
 
 
 if __name__ == "__main__":

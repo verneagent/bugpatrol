@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 
 from bugpatrol.config import ProjectConfig
 from bugpatrol.intake import Attachment, IntakeRecord
 from bugpatrol.intake_workflow import IntakeOutcome, IntakeWorkflow
 from bugpatrol.lark import LarkMessage, LarkOpenApiMessengerClient
+from bugpatrol.resources import LocalResourceStore, materialize_lark_attachments
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,7 @@ def run_lark_backfill(
     workflow: IntakeWorkflow,
     limit: int = 20,
     dry_run: bool = False,
+    resource_dir: Path | None = None,
 ) -> BackfillResult:
     messages = lark.list_chat_messages(chat_id=config.lark.chat_id, limit=limit)
     outcomes: list[IntakeOutcome] = []
@@ -38,6 +41,12 @@ def run_lark_backfill(
         if dry_run:
             skipped += 1
             continue
+        if resource_dir is not None:
+            record = materialize_lark_attachments(
+                record=record,
+                lark=lark,
+                store=LocalResourceStore(resource_dir),
+            )
         outcomes.append(workflow.process(record))
     return BackfillResult(
         scanned=len(messages),

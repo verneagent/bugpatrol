@@ -48,6 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     backfill.add_argument("project_config", type=Path)
     backfill.add_argument("--limit", type=int, default=20)
     backfill.add_argument("--write", action="store_true", help="perform writes; default is dry-run")
+    backfill.add_argument("--resource-dir", type=Path, help="download Lark resources before writing issues")
 
     doctor = sub.add_parser("doctor", help="check project integration dependencies")
     doctor.add_argument("project_config", type=Path)
@@ -142,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
             workflow=workflow,
             limit=args.limit,
             dry_run=not args.write,
+            resource_dir=args.resource_dir,
         )
         print(
             json.dumps(
