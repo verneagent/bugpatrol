@@ -54,12 +54,31 @@ class LarkOpenApiMessengerClient:
 
     def reply_to_message(self, *, chat_id: str, message_id: str, text: str) -> None:
         del chat_id
-        self._request(
+        self._reply_to_message(
+            message_id=message_id,
+            msg_type="text",
+            content={"text": text},
+        )
+
+    def reply_image_to_message(self, *, chat_id: str, message_id: str, image_key: str) -> SentLarkMessage:
+        del chat_id
+        data = self._reply_to_message(
+            message_id=message_id,
+            msg_type="image",
+            content={"image_key": image_key},
+        )
+        reply_message_id = data.get("data", {}).get("message_id")
+        if not isinstance(reply_message_id, str) or not reply_message_id:
+            raise LarkOpenApiError(f"missing message_id in reply response: {data}")
+        return SentLarkMessage(message_id=reply_message_id)
+
+    def _reply_to_message(self, *, message_id: str, msg_type: str, content: dict[str, object]) -> dict[str, object]:
+        return self._request(
             "POST",
             f"/im/v1/messages/{message_id}/reply",
             {
-                "msg_type": "text",
-                "content": json.dumps({"text": text}, ensure_ascii=False),
+                "msg_type": msg_type,
+                "content": json.dumps(content, ensure_ascii=False),
             },
         )
 

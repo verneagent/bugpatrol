@@ -247,10 +247,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "issue-context":
         config = load_project_config(args.project_config)
-        issue = GitHubCliIssuesClient().get_issue(repo=config.github_repo, issue_number=args.issue)
+        github = GitHubCliIssuesClient()
+        issue = github.get_issue(repo=config.github_repo, issue_number=args.issue)
+        comments = github.list_issue_comments(repo=config.github_repo, issue_number=args.issue)
         prd_root = args.repo_path / config.prd.cache_path
         context = build_triage_context(
             issue=issue,
+            comments=comments,
             prd_root=prd_root,
             prd_include_globs=config.prd.include_globs,
         )

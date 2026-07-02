@@ -35,8 +35,10 @@ def prepare_triage_run(
 ) -> TriageRunPlan:
     output_dir.mkdir(parents=True, exist_ok=True)
     issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
+    comments = github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)
     context = build_triage_context(
         issue=issue,
+        comments=comments,
         prd_root=repo_path / config.prd.cache_path,
         prd_include_globs=config.prd.include_globs,
     )

@@ -48,6 +48,29 @@ class LarkOpenApiMessengerClientTest(unittest.TestCase):
         self.assertIn("/im/v1/messages/om_1/reply", reply_request.full_url)
         self.assertIn("done", reply_request.data.decode())
 
+    def test_reply_image_to_message_posts_image_reply(self) -> None:
+        client = LarkOpenApiMessengerClient(app_id="app", app_secret="secret")
+
+        with patch("urllib.request.urlopen") as urlopen:
+            token_response = MagicMock()
+            token_response.__enter__.return_value.read.return_value = json.dumps(
+                {"code": 0, "tenant_access_token": "token"}
+            ).encode()
+            reply_response = MagicMock()
+            reply_response.__enter__.return_value.read.return_value = json.dumps(
+                {"code": 0, "data": {"message_id": "om_reply"}}
+            ).encode()
+            urlopen.side_effect = [token_response, reply_response]
+
+            sent = client.reply_image_to_message(chat_id="oc_1", message_id="om_1", image_key="img_v2_abc")
+
+        self.assertEqual(sent.message_id, "om_reply")
+        reply_request = urlopen.call_args_list[1].args[0]
+        self.assertIn("/im/v1/messages/om_1/reply", reply_request.full_url)
+        payload = json.loads(reply_request.data.decode())
+        self.assertEqual(payload["msg_type"], "image")
+        self.assertEqual(json.loads(payload["content"]), {"image_key": "img_v2_abc"})
+
     def test_upload_image_posts_multipart_form(self) -> None:
         client = LarkOpenApiMessengerClient(app_id="app", app_secret="secret")
 

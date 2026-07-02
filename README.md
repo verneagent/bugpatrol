@@ -195,7 +195,13 @@ BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.sec
 python -m unittest tests.e2e.test_live_asset_resource_loop
 ```
 
-This sends a real test image to the sandbox Lark group, downloads the Lark
-resource, pushes it to `TheCloverLab/fived-assets`, reads it back through the
-GitHub contents API, creates and closes a sandbox issue, and removes the test
-asset file from the assets repo.
+This creates a sandbox issue from a text seed, replies with a real test image in
+the Lark topic, downloads the Lark resource, pushes it to
+`TheCloverLab/fived-assets`, reads it back through the GitHub contents API,
+appends the asset URL to the issue comment, closes the sandbox issue, and
+removes the test asset file from the assets repo.
+
+Triage context includes the issue body, issue comments, and a `Media Evidence`
+section extracted from image/video attachment lines and generated descriptions.
+Video follow-up intake is covered by local e2e; live video upload still requires
+adding a Lark file/video upload sender.

@@ -4,12 +4,14 @@ import base64
 import os
 import subprocess
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 
 from bugpatrol.backfill import intake_record_from_lark_message
 from bugpatrol.config import load_project_config
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
+from bugpatrol.intake import IntakeRecord
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lark import LarkOpenApiMessengerClient
 from bugpatrol.resources import GitHubAssetRepoStore, materialize_lark_attachments
@@ -23,7 +25,7 @@ PNG_1X1 = base64.b64decode(
 @unittest.skipUnless(os.environ.get("BUGPATROL_LIVE_E2E") == "1", "live e2e is opt-in")
 @unittest.skipUnless(os.environ.get("BUGPATROL_LIVE_ASSET_E2E") == "1", "asset repo write e2e is opt-in")
 class LiveAssetResourceLoopE2ETest(unittest.TestCase):
-    def test_live_lark_image_resource_uploads_to_asset_repo_and_creates_issue(self) -> None:
+    def test_live_lark_image_reply_uploads_to_asset_repo_and_updates_issue(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         app_secret = os.environ[config.lark.app_secret_env]
         lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
@@ -41,8 +43,30 @@ class LiveAssetResourceLoopE2ETest(unittest.TestCase):
         asset_url = ""
 
         try:
+            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+            seed = lark.send_chat_message(
+                chat_id=config.lark.chat_id,
+                text=f"BugPatrol live asset seed {stamp}.",
+            )
+            created = workflow.process(
+                IntakeRecord(
+                    reporter_name="BugPatrol Live E2E",
+                    reporter_open_id=config.lark.bot_open_id,
+                    created_at=datetime.now(UTC).isoformat(),
+                    chat_id=config.lark.chat_id,
+                    root_id=seed.message_id,
+                    message_id=seed.message_id,
+                    original_text=f"[test] live asset reply {stamp}",
+                )
+            )
+            created_issue_number = created.issue.number
+
             image_key = lark.upload_image(filename="bugpatrol-live-asset.png", content=PNG_1X1)
-            sent = lark.send_chat_image(chat_id=config.lark.chat_id, image_key=image_key)
+            sent = lark.reply_image_to_message(
+                chat_id=config.lark.chat_id,
+                message_id=seed.message_id,
+                image_key=image_key,
+            )
             message = lark.get_message(message_id=sent.message_id, default_chat_id=config.lark.chat_id)
             record = materialize_lark_attachments(
                 record=intake_record_from_lark_message(message),
@@ -54,16 +78,16 @@ class LiveAssetResourceLoopE2ETest(unittest.TestCase):
             self.assertIn("https://github.com/TheCloverLab/fived-assets/raw/main/", asset_url)
 
             outcome = workflow.process(record)
-            created_issue_number = outcome.issue.number
-            issue = github.get_issue(repo=config.github_repo, issue_number=outcome.issue.number)
-            self.assertIn(asset_url, issue.body)
-            self.assertNotIn("lark://message/", issue.body)
+            self.assertEqual(outcome.action, "updated")
+            comments = github.list_issue_comments(repo=config.github_repo, issue_number=created.issue.number)
+            self.assertTrue(any(asset_url in comment.body for comment in comments))
+            self.assertTrue(all("lark://message/" not in comment.body for comment in comments))
             self.assertEqual(
                 issue_fields.get_issue_field_values(
                     repo=config.github_repo,
-                    issue_number=outcome.issue.number,
+                    issue_number=created.issue.number,
                 )["Evidence"],
-                "截图",
+                "文字描述",
             )
             _assert_asset_exists_in_remote(asset_url)
         finally:

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bugpatrol.agents import AgentInvocation
-from bugpatrol.clients import GitHubIssue
+from bugpatrol.clients import GitHubIssue, GitHubIssueComment
 from bugpatrol.config import load_project_config
 from bugpatrol.triage_runner import TriageRunPlan, execute_triage_run, prepare_triage_run, render_triage_failed_comment
 
@@ -26,6 +26,9 @@ class FakeGithub:
 
     def add_issue_comment(self, *, repo: str, issue_number: int, body: str) -> None:
         self.comments.append(body)
+
+    def list_issue_comments(self, *, repo: str, issue_number: int) -> tuple[GitHubIssueComment, ...]:
+        return (GitHubIssueComment(id="1", body="Follow-up comment"),)
 
 
 class FakeIssueFields:
@@ -59,6 +62,7 @@ class TriageRunnerTest(unittest.TestCase):
             self.assertTrue(plan.schema_path.exists())
             self.assertEqual(plan.output_path, output_dir / "triage-output.json")
             self.assertIn("Todo empty state missing", plan.context_path.read_text())
+            self.assertIn("Follow-up comment", plan.context_path.read_text())
             self.assertIn("triage-context.md", plan.invocation.command[-1])
 
     def test_execute_triage_run_marks_failed_when_agent_exits_nonzero(self) -> None:
