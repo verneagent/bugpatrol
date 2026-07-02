@@ -152,6 +152,7 @@ def main(argv: list[str] | None = None) -> int:
                 checkout_path=Path(config.assets.checkout_path),
                 base_path=config.assets.base_path,
                 branch=config.assets.branch,
+                remote_url=config.assets.remote_url,
             )
         result = run_lark_backfill(
             config=config,

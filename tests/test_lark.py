@@ -48,6 +48,55 @@ class LarkOpenApiMessengerClientTest(unittest.TestCase):
         self.assertIn("/im/v1/messages/om_1/reply", reply_request.full_url)
         self.assertIn("done", reply_request.data.decode())
 
+    def test_upload_image_posts_multipart_form(self) -> None:
+        client = LarkOpenApiMessengerClient(app_id="app", app_secret="secret")
+
+        with patch("urllib.request.urlopen") as urlopen:
+            token_response = MagicMock()
+            token_response.__enter__.return_value.read.return_value = json.dumps(
+                {"code": 0, "tenant_access_token": "token"}
+            ).encode()
+            upload_response = MagicMock()
+            upload_response.__enter__.return_value.read.return_value = json.dumps(
+                {"code": 0, "data": {"image_key": "img_v2_abc"}}
+            ).encode()
+            urlopen.side_effect = [token_response, upload_response]
+
+            image_key = client.upload_image(filename="bug.png", content=b"png-bytes")
+
+        self.assertEqual(image_key, "img_v2_abc")
+        upload_request = urlopen.call_args_list[1].args[0]
+        self.assertIn("/im/v1/images", upload_request.full_url)
+        self.assertEqual(upload_request.get_header("Authorization"), "Bearer token")
+        self.assertIn("multipart/form-data", upload_request.get_header("Content-type"))
+        self.assertIn(b'name="image_type"', upload_request.data)
+        self.assertIn(b"message", upload_request.data)
+        self.assertIn(b'name="image"; filename="bug.png"', upload_request.data)
+        self.assertIn(b"png-bytes", upload_request.data)
+
+    def test_send_chat_image_posts_image_message(self) -> None:
+        client = LarkOpenApiMessengerClient(app_id="app", app_secret="secret")
+
+        with patch("urllib.request.urlopen") as urlopen:
+            token_response = MagicMock()
+            token_response.__enter__.return_value.read.return_value = json.dumps(
+                {"code": 0, "tenant_access_token": "token"}
+            ).encode()
+            send_response = MagicMock()
+            send_response.__enter__.return_value.read.return_value = json.dumps(
+                {"code": 0, "data": {"message_id": "om_1"}}
+            ).encode()
+            urlopen.side_effect = [token_response, send_response]
+
+            sent = client.send_chat_image(chat_id="oc_1", image_key="img_v2_abc")
+
+        self.assertEqual(sent.message_id, "om_1")
+        send_request = urlopen.call_args_list[1].args[0]
+        self.assertIn("/im/v1/messages?receive_id_type=chat_id", send_request.full_url)
+        payload = json.loads(send_request.data.decode())
+        self.assertEqual(payload["msg_type"], "image")
+        self.assertEqual(json.loads(payload["content"]), {"image_key": "img_v2_abc"})
+
     def test_list_chat_messages_parses_text_history(self) -> None:
         client = LarkOpenApiMessengerClient(app_id="app", app_secret="secret")
 
@@ -162,6 +211,29 @@ class LarkOpenApiMessengerClientTest(unittest.TestCase):
         resource_request = urlopen.call_args_list[1].args[0]
         self.assertIn("/im/v1/messages/om_1/resources/img_v2_abc", resource_request.full_url)
         self.assertEqual(resource_request.get_header("Authorization"), "Bearer token")
+
+    def test_download_message_resource_can_include_resource_type(self) -> None:
+        client = LarkOpenApiMessengerClient(app_id="app", app_secret="secret")
+
+        with patch("urllib.request.urlopen") as urlopen:
+            token_response = MagicMock()
+            token_response.__enter__.return_value.read.return_value = json.dumps(
+                {"code": 0, "tenant_access_token": "token"}
+            ).encode()
+            resource_response = MagicMock()
+            resource_context = resource_response.__enter__.return_value
+            resource_context.read.return_value = b"image-bytes"
+            resource_context.headers = {}
+            urlopen.side_effect = [token_response, resource_response]
+
+            client.download_message_resource(
+                message_id="om_1",
+                resource_key="img_v2_abc",
+                resource_type="image",
+            )
+
+        resource_request = urlopen.call_args_list[1].args[0]
+        self.assertIn("/im/v1/messages/om_1/resources/img_v2_abc?type=image", resource_request.full_url)
 
 
 if __name__ == "__main__":

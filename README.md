@@ -128,6 +128,7 @@ python -m bugpatrol backfill-lark projects/todo-sandbox.toml \
 
 # Upload resources to the configured durable assets repo before writing issues.
 # FiveD uses TheCloverLab/fived-assets and stores raw GitHub URLs in issues.
+# The sandbox config also uses TheCloverLab/fived-assets for attachment smoke tests.
 FIVED_LARK_BUG_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_a9518095a9b8ded3.secret)" \
 python -m bugpatrol backfill-lark projects/fived.toml \
   --limit 20 \
@@ -184,3 +185,17 @@ references exactly one issue through GitHub closing references, `#123`, or
 multiple issues. A reusable GitHub Actions template is available at
 `examples/github-actions/fix-notify.yml`; it defaults to dry-run until
 `BUGPATROL_WRITE_FIX_NOTIFICATIONS` is set to `1`.
+
+Opt-in live asset e2e:
+
+```bash
+BUGPATROL_LIVE_E2E=1 \
+BUGPATROL_LIVE_ASSET_E2E=1 \
+BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
+python -m unittest tests.e2e.test_live_asset_resource_loop
+```
+
+This sends a real test image to the sandbox Lark group, downloads the Lark
+resource, pushes it to `TheCloverLab/fived-assets`, reads it back through the
+GitHub contents API, creates and closes a sandbox issue, and removes the test
+asset file from the assets repo.

@@ -19,6 +19,13 @@ cache_path = "docs/prd"
 [intake]
 language = "zh-CN"
 
+[assets]
+github_repo = "TheCloverLab/fived-assets"
+checkout_path = "~/clover/fived-assets"
+base_path = ".github/issue-assets"
+branch = "main"
+remote_url = "https://github.com/TheCloverLab/fived-assets.git"
+
 [issue_field_names]
 Priority = "Priority"
 "Triage status" = "Triage status"

@@ -45,6 +45,7 @@ class AssetsConfig:
     checkout_path: str = ""
     base_path: str = ".github/issue-assets"
     branch: str = "main"
+    remote_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,7 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             checkout_path=str(assets.get("checkout_path") or ""),
             base_path=str(assets.get("base_path") or ".github/issue-assets"),
             branch=str(assets.get("branch") or "main"),
+            remote_url=str(assets.get("remote_url") or ""),
         ),
         issue_field_names={
             str(name): str(value)

@@ -7,6 +7,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from urllib.parse import urlencode
+from uuid import uuid4
 
 
 class LarkOpenApiError(RuntimeError):
@@ -63,13 +64,54 @@ class LarkOpenApiMessengerClient:
         )
 
     def send_chat_message(self, *, chat_id: str, text: str) -> SentLarkMessage:
+        return self._send_chat_message(
+            chat_id=chat_id,
+            msg_type="text",
+            content={"text": text},
+        )
+
+    def upload_image(self, *, filename: str, content: bytes) -> str:
+        boundary = f"----bugpatrol-{uuid4().hex}"
+        body = _multipart_form_data(
+            boundary=boundary,
+            fields={"image_type": "message"},
+            files={
+                "image": (
+                    filename,
+                    content,
+                    "image/png",
+                )
+            },
+        )
+        data = self._request_raw(
+            "POST",
+            "/im/v1/images",
+            body,
+            headers={
+                "Authorization": f"Bearer {self._tenant_token()}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+        )
+        image_key = data.get("data", {}).get("image_key")
+        if not isinstance(image_key, str) or not image_key:
+            raise LarkOpenApiError(f"missing image_key in upload response: {data}")
+        return image_key
+
+    def send_chat_image(self, *, chat_id: str, image_key: str) -> SentLarkMessage:
+        return self._send_chat_message(
+            chat_id=chat_id,
+            msg_type="image",
+            content={"image_key": image_key},
+        )
+
+    def _send_chat_message(self, *, chat_id: str, msg_type: str, content: dict[str, object]) -> SentLarkMessage:
         data = self._request(
             "POST",
             "/im/v1/messages?receive_id_type=chat_id",
             {
                 "receive_id": chat_id,
-                "msg_type": "text",
-                "content": json.dumps({"text": text}, ensure_ascii=False),
+                "msg_type": msg_type,
+                "content": json.dumps(content, ensure_ascii=False),
             },
         )
         message_id = data.get("data", {}).get("message_id")
@@ -99,9 +141,16 @@ class LarkOpenApiMessengerClient:
             return parse_lark_message(single, default_chat_id=default_chat_id)
         raise LarkOpenApiError(f"message not found in response: {data}")
 
-    def download_message_resource(self, *, message_id: str, resource_key: str) -> DownloadedLarkResource:
+    def download_message_resource(
+        self,
+        *,
+        message_id: str,
+        resource_key: str,
+        resource_type: str = "",
+    ) -> DownloadedLarkResource:
+        query = f"?{urlencode({'type': resource_type})}" if resource_type else ""
         request = urllib.request.Request(
-            f"{self._base_url}/im/v1/messages/{message_id}/resources/{resource_key}",
+            f"{self._base_url}/im/v1/messages/{message_id}/resources/{resource_key}{query}",
             method="GET",
             headers={"Authorization": f"Bearer {self._tenant_token()}"},
         )
@@ -156,11 +205,26 @@ class LarkOpenApiMessengerClient:
         headers: dict[str, str] | None = None,
     ) -> dict[str, object]:
         body = None if method == "GET" else json.dumps(payload, ensure_ascii=False).encode()
+        return self._request_raw(
+            method,
+            path,
+            body,
+            headers={"Content-Type": "application/json", **(headers or {})},
+        )
+
+    def _request_raw(
+        self,
+        method: str,
+        path: str,
+        body: bytes | None,
+        *,
+        headers: dict[str, str],
+    ) -> dict[str, object]:
         request = urllib.request.Request(
             f"{self._base_url}{path}",
             data=body,
             method=method,
-            headers={"Content-Type": "application/json", **(headers or {})},
+            headers=headers,
         )
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
@@ -225,3 +289,33 @@ def _filename_from_content_disposition(value: str) -> str:
         if part.startswith("filename="):
             return part.removeprefix("filename=").strip('"')
     return ""
+
+
+def _multipart_form_data(
+    *,
+    boundary: str,
+    fields: dict[str, str],
+    files: dict[str, tuple[str, bytes, str]],
+) -> bytes:
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.extend(
+            [
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+                value.encode(),
+                b"\r\n",
+            ]
+        )
+    for name, (filename, content, content_type) in files.items():
+        chunks.extend(
+            [
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode(),
+                f"Content-Type: {content_type}\r\n\r\n".encode(),
+                content,
+                b"\r\n",
+            ]
+        )
+    chunks.append(f"--{boundary}--\r\n".encode())
+    return b"".join(chunks)

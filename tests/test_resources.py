@@ -19,8 +19,14 @@ class FakeDownloader:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
-    def download_message_resource(self, *, message_id: str, resource_key: str) -> DownloadedLarkResource:
-        self.calls.append((message_id, resource_key))
+    def download_message_resource(
+        self,
+        *,
+        message_id: str,
+        resource_key: str,
+        resource_type: str = "",
+    ) -> DownloadedLarkResource:
+        self.calls.append((message_id, resource_key, resource_type))
         return DownloadedLarkResource(
             content=b"image-bytes",
             content_type="image/png",
@@ -61,7 +67,7 @@ class ResourcesTest(unittest.TestCase):
             self.assertEqual(path.read_bytes(), b"image-bytes")
             self.assertEqual(path.name, "bug_screenshot.png")
 
-        self.assertEqual(downloader.calls, [("om_1", "img_v2_abc")])
+        self.assertEqual(downloader.calls, [("om_1", "img_v2_abc", "image")])
         self.assertEqual(materialized.attachments[0].description, "bug screenshot.png")
 
     def test_materialize_keeps_non_lark_urls(self) -> None:

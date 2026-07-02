@@ -36,13 +36,19 @@ class FakeLarkHistory(FakeLarkMessengerClient):
     def __init__(self, messages: list[LarkMessage]) -> None:
         super().__init__()
         self._messages = messages
-        self.downloads: list[tuple[str, str]] = []
+        self.downloads: list[tuple[str, str, str]] = []
 
     def list_chat_messages(self, *, chat_id: str, limit: int = 20) -> list[LarkMessage]:
         return self._messages[:limit]
 
-    def download_message_resource(self, *, message_id: str, resource_key: str) -> DownloadedLarkResource:
-        self.downloads.append((message_id, resource_key))
+    def download_message_resource(
+        self,
+        *,
+        message_id: str,
+        resource_key: str,
+        resource_type: str = "",
+    ) -> DownloadedLarkResource:
+        self.downloads.append((message_id, resource_key, resource_type))
         return DownloadedLarkResource(
             content=b"image-bytes",
             content_type="image/png",
@@ -175,7 +181,7 @@ class BackfillTest(unittest.TestCase):
             self.assertIn(str(resource_path), github.created[0].issue.body)
 
         self.assertEqual(result.processed, 1)
-        self.assertEqual(lark.downloads, [("om_1", "img_v2_abc")])
+        self.assertEqual(lark.downloads, [("om_1", "img_v2_abc", "image")])
 
     def test_run_lark_backfill_materializes_resources_to_asset_repo(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
@@ -203,7 +209,7 @@ class BackfillTest(unittest.TestCase):
         )
 
         self.assertEqual(result.processed, 1)
-        self.assertEqual(lark.downloads, [("om_1", "img_v2_abc")])
+        self.assertEqual(lark.downloads, [("om_1", "img_v2_abc", "image")])
         self.assertEqual(store.writes, [("om_1", "img_v2_abc", "bug.png")])
         self.assertIn(store.url, github.created[0].issue.body)
         self.assertNotIn("lark://message/om_1/image/img_v2_abc", github.created[0].issue.body)

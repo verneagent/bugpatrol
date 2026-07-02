@@ -22,8 +22,16 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.assets.checkout_path, "~/clover/fived-assets")
         self.assertEqual(config.assets.base_path, ".github/issue-assets")
         self.assertEqual(config.assets.branch, "main")
+        self.assertEqual(config.assets.remote_url, "https://github.com/TheCloverLab/fived-assets.git")
         self.assertIn("fived-triage", config.triage_agent.runner_labels)
         config.validate_against(default_field_specs())
+
+    def test_sandbox_uses_shared_fived_assets_repo(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+
+        self.assertEqual(config.assets.github_repo, "TheCloverLab/fived-assets")
+        self.assertEqual(config.assets.checkout_path, "~/clover/fived-assets")
+        self.assertEqual(config.assets.remote_url, "https://github.com/TheCloverLab/fived-assets.git")
 
     def test_validation_rejects_missing_field(self) -> None:
         config = load_project_config(Path("projects/fived.toml"))
