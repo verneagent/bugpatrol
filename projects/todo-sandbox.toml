@@ -26,6 +26,16 @@ base_path = ".github/issue-assets"
 branch = "main"
 remote_url = "https://github.com/TheCloverLab/fived-assets.git"
 
+[media]
+description_command = [
+  "python3",
+  "-m",
+  "bugpatrol.media_vision",
+  "{path}",
+  "请描述这个媒体文件中和 bug 复现相关的界面、操作、错误提示、异常状态。视频请按时间顺序概括关键步骤。",
+]
+description_timeout_seconds = 300
+
 [issue_field_names]
 Priority = "Priority"
 "Triage status" = "Triage status"

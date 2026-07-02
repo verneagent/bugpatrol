@@ -20,7 +20,7 @@ from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lark import LarkOpenApiMessengerClient
 from bugpatrol.ownership import load_codeowners, resolve_owners
 from bugpatrol.prd import load_prd_documents, search_prd_documents
-from bugpatrol.resources import GitHubAssetRepoStore
+from bugpatrol.resources import CommandResourceDescriber, GitHubAssetRepoStore
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
 from bugpatrol.triage_result import apply_triage_result, parse_triage_result
 from bugpatrol.triage_runner import execute_triage_run, prepare_triage_run
@@ -154,6 +154,14 @@ def main(argv: list[str] | None = None) -> int:
                 branch=config.assets.branch,
                 remote_url=config.assets.remote_url,
             )
+        resource_describer = None
+        if config.media.description_command:
+            temp_dir = Path(config.media.description_temp_dir) if config.media.description_temp_dir else None
+            resource_describer = CommandResourceDescriber(
+                command=config.media.description_command,
+                timeout_seconds=config.media.description_timeout_seconds,
+                temp_dir=temp_dir,
+            )
         result = run_lark_backfill(
             config=config,
             lark=lark,
@@ -162,6 +170,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=not args.write,
             resource_dir=args.resource_dir,
             resource_store=resource_store,
+            resource_describer=resource_describer,
         )
         print(
             json.dumps(

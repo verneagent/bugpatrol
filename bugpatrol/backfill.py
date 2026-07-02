@@ -10,7 +10,7 @@ from bugpatrol.config import ProjectConfig
 from bugpatrol.intake import Attachment, IntakeRecord
 from bugpatrol.intake_workflow import IntakeOutcome, IntakeWorkflow
 from bugpatrol.lark import LarkMessage, LarkOpenApiMessengerClient
-from bugpatrol.resources import LocalResourceStore, ResourceStore, materialize_lark_attachments
+from bugpatrol.resources import LocalResourceStore, ResourceDescriber, ResourceStore, materialize_lark_attachments
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,7 @@ def run_lark_backfill(
     dry_run: bool = False,
     resource_dir: Path | None = None,
     resource_store: ResourceStore | None = None,
+    resource_describer: ResourceDescriber | None = None,
 ) -> BackfillResult:
     if resource_dir is not None and resource_store is not None:
         raise ValueError("resource_dir and resource_store are mutually exclusive")
@@ -52,6 +53,7 @@ def run_lark_backfill(
                 record=record,
                 lark=lark,
                 store=store,
+                describer=resource_describer,
             )
         outcomes.append(workflow.process(record))
     return BackfillResult(

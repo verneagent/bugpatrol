@@ -201,7 +201,15 @@ the Lark topic, downloads the Lark resource, pushes it to
 appends the asset URL to the issue comment, closes the sandbox issue, and
 removes the test asset file from the assets repo.
 
+Add `BUGPATROL_LIVE_VIDEO_E2E=1` to also send a generated mp4 video reply via
+`lark-cli`, download the Lark media resource, run the configured vision command,
+upload the mp4 to `TheCloverLab/fived-assets`, and verify the generated
+description appears in the issue comment. The video test temporarily rewrites
+and restores `~/.lark-cli/config.json` so it can send with the sandbox bot.
+
 Triage context includes the issue body, issue comments, and a `Media Evidence`
 section extracted from image/video attachment lines and generated descriptions.
-Video follow-up intake is covered by local e2e; live video upload still requires
-adding a Lark file/video upload sender.
+The default media command is `python3 -m bugpatrol.media_vision`, an
+OpenAI-compatible image/video describer configured by `~/.bugpatrol/vision.json`,
+`BUGPATROL_VISION_*` environment variables, or the existing
+`~/.lark-bug-watcher/vision.json` fallback.

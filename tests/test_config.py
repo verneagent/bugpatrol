@@ -23,6 +23,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.assets.base_path, ".github/issue-assets")
         self.assertEqual(config.assets.branch, "main")
         self.assertEqual(config.assets.remote_url, "https://github.com/TheCloverLab/fived-assets.git")
+        self.assertEqual(config.media.description_command[:3], ("python3", "-m", "bugpatrol.media_vision"))
         self.assertIn("fived-triage", config.triage_agent.runner_labels)
         config.validate_against(default_field_specs())
 
@@ -32,6 +33,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.assets.github_repo, "TheCloverLab/fived-assets")
         self.assertEqual(config.assets.checkout_path, "~/clover/fived-assets")
         self.assertEqual(config.assets.remote_url, "https://github.com/TheCloverLab/fived-assets.git")
+        self.assertEqual(config.media.description_command[:3], ("python3", "-m", "bugpatrol.media_vision"))
 
     def test_validation_rejects_missing_field(self) -> None:
         config = load_project_config(Path("projects/fived.toml"))

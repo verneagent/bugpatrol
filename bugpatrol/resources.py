@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
@@ -30,6 +31,11 @@ class ResourceStore(Protocol):
         """Persist a downloaded resource and return the URL/path to put in intake."""
 
 
+class ResourceDescriber(Protocol):
+    def describe(self, *, ref: "LarkResourceRef", resource: DownloadedLarkResource) -> str:
+        """Return a textual media description for triage."""
+
+
 @dataclass(frozen=True)
 class LarkResourceRef:
     message_id: str
@@ -44,7 +50,7 @@ class LocalResourceStore:
     def write(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> Path:
         directory = self._root / _safe_segment(ref.message_id)
         directory.mkdir(parents=True, exist_ok=True)
-        filename = _safe_segment(resource.filename or ref.resource_key)
+        filename = _resource_filename(resource=resource, fallback=ref.resource_key)
         path = directory / filename
         path.write_bytes(resource.content)
         return path
@@ -70,8 +76,9 @@ class GitHubAssetRepoStore:
 
     def write(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> str:
         self._ensure_checkout()
-        rel_path = Path(self._base_path) / _safe_segment(ref.message_id) / _safe_segment(
-            resource.filename or ref.resource_key
+        rel_path = Path(self._base_path) / _safe_segment(ref.message_id) / _resource_filename(
+            resource=resource,
+            fallback=ref.resource_key,
         )
         path = self._checkout_path / rel_path
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -127,14 +134,57 @@ class GitHubAssetRepoStore:
         raise RuntimeError(f"git {' '.join(args)} failed: {completed.stderr.strip()}")
 
 
+class CommandResourceDescriber:
+    def __init__(
+        self,
+        *,
+        command: tuple[str, ...],
+        timeout_seconds: int = 300,
+        temp_dir: Path | None = None,
+    ) -> None:
+        self._command = command
+        self._timeout_seconds = timeout_seconds
+        self._temp_dir = temp_dir
+
+    def describe(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> str:
+        if not self._command:
+            return ""
+        temp_root = self._temp_dir
+        if temp_root is not None:
+            temp_root.mkdir(parents=True, exist_ok=True)
+        filename = _resource_filename(resource=resource, fallback=ref.resource_key)
+        with tempfile.TemporaryDirectory(dir=temp_root) as tmp:
+            path = Path(tmp) / filename
+            path.write_bytes(resource.content)
+            command = tuple(
+                _format_command_part(part, path=path, ref=ref, resource=resource)
+                for part in self._command
+            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=self._timeout_seconds,
+                )
+            except subprocess.TimeoutExpired:
+                return f"vision description unavailable: timed out after {self._timeout_seconds}s"
+        if completed.returncode == 0 and completed.stdout.strip():
+            return completed.stdout.strip()
+        detail = (completed.stderr or completed.stdout or f"exit {completed.returncode}").strip()
+        return f"vision description unavailable: {detail[:300]}"
+
+
 def materialize_lark_attachments(
     *,
     record: IntakeRecord,
     lark: LarkResourceDownloader,
     store: ResourceStore,
+    describer: ResourceDescriber | None = None,
 ) -> IntakeRecord:
     attachments = tuple(
-        materialize_attachment(attachment=attachment, lark=lark, store=store)
+        materialize_attachment(attachment=attachment, lark=lark, store=store, describer=describer)
         for attachment in record.attachments
     )
     return replace(record, attachments=attachments)
@@ -145,6 +195,7 @@ def materialize_attachment(
     attachment: Attachment,
     lark: LarkResourceDownloader,
     store: ResourceStore,
+    describer: ResourceDescriber | None = None,
 ) -> Attachment:
     ref = parse_lark_resource_url(attachment.url)
     if ref is None:
@@ -155,10 +206,15 @@ def materialize_attachment(
         resource_type=_download_resource_type(ref.kind),
     )
     path = store.write(ref=ref, resource=resource)
+    description = attachment.description or resource.filename
+    if describer is not None:
+        generated = describer.describe(ref=ref, resource=resource).strip()
+        if generated:
+            description = generated
     return Attachment(
         kind=attachment.kind,
         url=str(path),
-        description=attachment.description or resource.filename,
+        description=description,
     )
 
 
@@ -178,9 +234,47 @@ def _safe_segment(value: str) -> str:
     return safe or "resource"
 
 
+def _resource_filename(*, resource: DownloadedLarkResource, fallback: str) -> str:
+    filename = _safe_segment(resource.filename or fallback)
+    if Path(filename).suffix:
+        return filename
+    extension = _extension_for_content_type(resource.content_type)
+    return f"{filename}{extension}" if extension else filename
+
+
+def _extension_for_content_type(content_type: str) -> str:
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    return {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+        "video/mp4": ".mp4",
+        "video/quicktime": ".mov",
+    }.get(media_type, "")
+
+
 def _download_resource_type(kind: str) -> str:
     if kind == "image":
         return "image"
-    if kind in {"file", "video"}:
+    if kind in {"file", "video", "media"}:
         return "file"
     return kind
+
+
+def _format_command_part(
+    part: str,
+    *,
+    path: Path,
+    ref: LarkResourceRef,
+    resource: DownloadedLarkResource,
+) -> str:
+    formatted = part.format(
+        path=str(path),
+        kind=ref.kind,
+        message_id=ref.message_id,
+        resource_key=ref.resource_key,
+        filename=resource.filename,
+        content_type=resource.content_type,
+    )
+    return Path(formatted).expanduser().as_posix() if formatted.startswith("~") else formatted

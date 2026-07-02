@@ -8,7 +8,8 @@ from bugpatrol.backfill import run_lark_backfill
 from bugpatrol.config import load_project_config
 from bugpatrol.triage_context import build_triage_context
 from bugpatrol.intake_workflow import IntakeWorkflow
-from bugpatrol.lark import LarkMessage
+from bugpatrol.lark import DownloadedLarkResource, LarkMessage
+from bugpatrol.resources import LarkResourceRef
 from bugpatrol.testing.fakes import FakeGitHubIssuesClient, FakeLarkMessengerClient
 
 
@@ -16,9 +17,34 @@ class FakeLarkHistory(FakeLarkMessengerClient):
     def __init__(self, messages: list[LarkMessage]) -> None:
         super().__init__()
         self._messages = messages
+        self.downloads: list[tuple[str, str, str]] = []
 
     def list_chat_messages(self, *, chat_id: str, limit: int = 20) -> list[LarkMessage]:
         return self._messages[:limit]
+
+    def download_message_resource(
+        self,
+        *,
+        message_id: str,
+        resource_key: str,
+        resource_type: str = "",
+    ) -> DownloadedLarkResource:
+        self.downloads.append((message_id, resource_key, resource_type))
+        return DownloadedLarkResource(
+            content=b"video-bytes",
+            content_type="video/mp4",
+            filename="repro.mp4",
+        )
+
+
+class FakeAssetStore:
+    def write(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> str:
+        return f"https://github.com/TheCloverLab/fived-assets/raw/main/.github/issue-assets/{ref.message_id}/{resource.filename}"
+
+
+class FakeDescriber:
+    def describe(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> str:
+        return "Video shows tapping Export, then the progress spinner freezes at 80%."
 
 
 class AttachmentIntakeLoopE2ETest(unittest.TestCase):
@@ -80,12 +106,23 @@ class AttachmentIntakeLoopE2ETest(unittest.TestCase):
         )
         workflow = IntakeWorkflow(config=config, github=github, lark=lark)
 
-        result = run_lark_backfill(config=config, lark=lark, workflow=workflow)
+        result = run_lark_backfill(
+            config=config,
+            lark=lark,
+            workflow=workflow,
+            resource_store=FakeAssetStore(),
+            resource_describer=FakeDescriber(),
+        )
 
         self.assertEqual(result.processed, 2)
         self.assertEqual(github.created[0].fields["Evidence"], "文字描述")
         self.assertEqual(len(github.created[0].comments), 1)
-        self.assertIn("video: lark://message/om_video/media/file_v2_repro", github.created[0].comments[0])
+        self.assertEqual(lark.downloads, [("om_video", "file_v2_repro", "file")])
+        self.assertIn(
+            "video: https://github.com/TheCloverLab/fived-assets/raw/main/.github/issue-assets/om_video/repro.mp4",
+            github.created[0].comments[0],
+        )
+        self.assertIn("Video shows tapping Export", github.created[0].comments[0])
         with self.subTest("triage context reads media from comments"):
             context = build_triage_context(
                 issue=github.created[0].issue,
@@ -93,7 +130,10 @@ class AttachmentIntakeLoopE2ETest(unittest.TestCase):
                 prd_root=Path("tests/fixtures/empty-prd"),
             )
             self.assertEqual(context.media[0].kind, "video")
-            self.assertEqual(context.media[0].description, "repro.mp4")
+            self.assertEqual(
+                context.media[0].description,
+                "Video shows tapping Export, then the progress spinner freezes at 80%.",
+            )
 
 
 if __name__ == "__main__":

@@ -49,6 +49,13 @@ class AssetsConfig:
 
 
 @dataclass(frozen=True)
+class MediaConfig:
+    description_command: tuple[str, ...] = ()
+    description_timeout_seconds: int = 300
+    description_temp_dir: str = ""
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     github_repo: str
     lark: LarkConfig
@@ -56,6 +63,7 @@ class ProjectConfig:
     prd: PrdConfig
     intake: IntakeConfig
     assets: AssetsConfig
+    media: MediaConfig
     issue_field_names: dict[str, str]
 
     @property
@@ -107,6 +115,9 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
     assets = data.get("assets") or {}
     if not isinstance(assets, dict):
         raise ValueError("[assets] must be a table")
+    media = data.get("media") or {}
+    if not isinstance(media, dict):
+        raise ValueError("[media] must be a table")
     field_names = _required_table(data, "issue_field_names")
     language = _required_str(intake, "language")
     if language not in {"zh-CN", "en-US"}:
@@ -143,6 +154,11 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             branch=str(assets.get("branch") or "main"),
             remote_url=str(assets.get("remote_url") or ""),
         ),
+        media=MediaConfig(
+            description_command=tuple(_optional_str_list(media, "description_command")),
+            description_timeout_seconds=int(media.get("description_timeout_seconds") or 300),
+            description_temp_dir=str(media.get("description_temp_dir") or ""),
+        ),
         issue_field_names={
             str(name): str(value)
             for name, value in field_names.items()
@@ -169,4 +185,13 @@ def _required_list(data: dict[str, Any], key: str) -> list[str]:
     value = data.get(key)
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"missing string list field {key!r}")
+    return value
+
+
+def _optional_str_list(data: dict[str, Any], key: str) -> list[str]:
+    value = data.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{key!r} must be a string list")
     return value
