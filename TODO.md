@@ -3,11 +3,6 @@
 Project-neutral product work that remains after the current intake, triage,
 media, and fix-notification slices.
 
-## Follow-Up After Triage
-
-- When material evidence arrives after `Done` or `Skipped`, move status to
-  `Needs review`.
-
 ## Watcher Robustness
 
 - Add reconnect/backoff and heartbeat handling for WebSocket mode.

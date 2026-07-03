@@ -102,6 +102,31 @@ class IntakeWorkflowTest(unittest.TestCase):
         self.assertEqual(len(lark.replies), 2)
         self.assertIn("已追加到 GitHub issue #1", lark.replies[1].text)
 
+    def test_material_followup_after_done_marks_needs_review(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        issue_fields = FakeIssueFields({"Triage status": "Done"})
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark, issue_fields=issue_fields)
+
+        workflow.process(make_record(message_id="om_first", original_text="首次上报"))
+        outcome = workflow.process(make_record(message_id="om_second", original_text="补充：安卓也会卡住"))
+
+        self.assertEqual(outcome.action, "updated")
+        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Needs review"})
+
+    def test_ack_followup_after_done_does_not_mark_needs_review(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        issue_fields = FakeIssueFields({"Triage status": "Done"})
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark, issue_fields=issue_fields)
+
+        workflow.process(make_record(message_id="om_first", original_text="首次上报"))
+        workflow.process(make_record(message_id="om_second", original_text="收到"))
+
+        self.assertEqual(issue_fields.writes, [])
+
     def test_process_deduplicates_create_race_without_commenting(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = RaceGitHubIssuesClient()
@@ -148,6 +173,18 @@ class RaceGitHubIssuesClient(FakeGitHubIssuesClient):
 
     def add_issue_comment(self, *, repo: str, issue_number: int, body: str) -> None:
         self.comments.append(body)
+
+
+class FakeIssueFields:
+    def __init__(self, values: dict[str, str]) -> None:
+        self.values = values
+        self.writes: list[dict[str, object]] = []
+
+    def get_issue_field_values(self, *, repo: str, issue_number: int) -> dict[str, str]:
+        return self.values
+
+    def add_issue_field_values(self, **kwargs: object) -> None:
+        self.writes.append(kwargs)
 
 
 if __name__ == "__main__":

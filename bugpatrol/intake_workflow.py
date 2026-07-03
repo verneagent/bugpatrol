@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from typing import Protocol
 
 from bugpatrol.clients import GitHubIssue, GitHubIssuesClient, LarkMessengerClient
 from bugpatrol.config import ProjectConfig
@@ -23,6 +24,14 @@ class IntakeOutcome:
     triage_signal: TriageSignal
 
 
+class IssueFieldsClient(Protocol):
+    def get_issue_field_values(self, *, repo: str, issue_number: int) -> dict[str, str]:
+        """Return current GitHub Issue Field values keyed by GitHub field name."""
+
+    def add_issue_field_values(self, **kwargs: object) -> None:
+        """Write GitHub Issue Field values."""
+
+
 class IntakeWorkflow:
     def __init__(
         self,
@@ -30,10 +39,12 @@ class IntakeWorkflow:
         config: ProjectConfig,
         github: GitHubIssuesClient,
         lark: LarkMessengerClient,
+        issue_fields: IssueFieldsClient | None = None,
     ) -> None:
         self._config = config
         self._github = github
         self._lark = lark
+        self._issue_fields = issue_fields
 
     def process(self, record: IntakeRecord) -> IntakeOutcome:
         if record.chat_id != self._config.lark.chat_id:
@@ -51,6 +62,11 @@ class IntakeWorkflow:
                 issue_number=existing.number,
                 body=comment,
             )
+            triage_signal = classify_triage_signal("updated", record, self._config.followup_classifier)
+            self._mark_needs_review_after_final_status(
+                issue_number=existing.number,
+                triage_signal=triage_signal,
+            )
             reply = f"已追加到 GitHub issue #{existing.number}: {existing.url}"
             self._lark.reply_to_message(
                 chat_id=record.chat_id,
@@ -61,7 +77,7 @@ class IntakeWorkflow:
                 action="updated",
                 issue=existing,
                 lark_reply=reply,
-                triage_signal=classify_triage_signal("updated", record, self._config.followup_classifier),
+                triage_signal=triage_signal,
             )
 
         fields = initial_intake_fields(record)
@@ -95,6 +111,23 @@ class IntakeWorkflow:
             issue=issue,
             lark_reply=reply,
             triage_signal=classify_triage_signal("created", record, self._config.followup_classifier),
+        )
+
+    def _mark_needs_review_after_final_status(self, *, issue_number: int, triage_signal: TriageSignal) -> None:
+        if self._issue_fields is None or not triage_signal.should_enqueue:
+            return
+        github_name = self._config.issue_field_names["Triage status"]
+        values = self._issue_fields.get_issue_field_values(
+            repo=self._config.github_repo,
+            issue_number=issue_number,
+        )
+        if values.get(github_name) not in {"Done", "Skipped"}:
+            return
+        self._issue_fields.add_issue_field_values(
+            repo=self._config.github_repo,
+            issue_number=issue_number,
+            values={"Triage status": "Needs review"},
+            config=self._config,
         )
 
 

@@ -190,11 +190,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
             return 2
         lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
+        issue_fields = GitHubIssueFieldsClient()
         github = GitHubCliIssuesClient(
-            issue_fields=GitHubIssueFieldsClient(),
+            issue_fields=issue_fields,
             project_config=config,
         )
-        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark, issue_fields=issue_fields)
         if args.resource_dir and args.asset_repo:
             print("--resource-dir and --asset-repo are mutually exclusive", file=sys.stderr)
             return 2
@@ -276,11 +277,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
             return 2
         lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
+        issue_fields = GitHubIssueFieldsClient()
         github = GitHubCliIssuesClient(
-            issue_fields=GitHubIssueFieldsClient(),
+            issue_fields=issue_fields,
             project_config=config,
         )
-        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark, issue_fields=issue_fields)
         if args.resource_dir and args.asset_repo:
             print("--resource-dir and --asset-repo are mutually exclusive", file=sys.stderr)
             return 2
@@ -341,11 +343,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
             return 2
         lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
+        issue_fields = GitHubIssueFieldsClient()
         github = GitHubCliIssuesClient(
-            issue_fields=GitHubIssueFieldsClient(),
+            issue_fields=issue_fields,
             project_config=config,
         )
-        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark, issue_fields=issue_fields)
         if args.resource_dir and args.asset_repo:
             print("--resource-dir and --asset-repo are mutually exclusive", file=sys.stderr)
             return 2
