@@ -64,6 +64,9 @@ class MediaConfig:
     max_video_duration_seconds: float = 0.0
     video_probe_command: tuple[str, ...] = ()
     video_probe_timeout_seconds: int = 30
+    video_frame_command: tuple[str, ...] = ()
+    video_frame_timeout_seconds: int = 300
+    video_frame_min_duration_seconds: float = 0.0
     description_retries: int = 0
     description_retry_backoff_seconds: float = 1.0
 
@@ -203,6 +206,9 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             max_video_duration_seconds=float(media.get("max_video_duration_seconds") or 0.0),
             video_probe_command=tuple(_optional_str_list(media, "video_probe_command")),
             video_probe_timeout_seconds=int(media.get("video_probe_timeout_seconds") or 30),
+            video_frame_command=tuple(_optional_str_list(media, "video_frame_command")),
+            video_frame_timeout_seconds=int(media.get("video_frame_timeout_seconds") or 300),
+            video_frame_min_duration_seconds=float(media.get("video_frame_min_duration_seconds") or 0.0),
             description_retries=int(media.get("description_retries") or 0),
             description_retry_backoff_seconds=float(media.get("description_retry_backoff_seconds") or 1.0),
         ),

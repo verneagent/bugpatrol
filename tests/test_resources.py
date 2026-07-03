@@ -9,8 +9,10 @@ from unittest.mock import Mock, patch
 from bugpatrol.intake import Attachment, IntakeRecord
 from bugpatrol.lark import DownloadedLarkResource
 from bugpatrol.resources import (
+    CommandVideoFrameExtractor,
     CommandResourceDescriber,
     CommandResourceRedactor,
+    CompositeResourceTransformer,
     FfprobeVideoDurationProbe,
     GitHubAssetRepoStore,
     ImageResourceResizer,
@@ -369,6 +371,87 @@ class ResourcesTest(unittest.TestCase):
 
         self.assertEqual(materialized.url, "https://assets/repro.mp4")
         store.write.assert_called_once()
+
+    def test_video_frame_extractor_replaces_video_before_store_and_description(self) -> None:
+        record = IntakeRecord(
+            reporter_name="Reporter",
+            reporter_open_id="ou_1",
+            created_at="2026-07-01T00:00:00Z",
+            chat_id="oc_1",
+            root_id="om_1",
+            message_id="om_1",
+            original_text="bug",
+            attachments=(Attachment(kind="video", url="lark://message/om_1/media/file_v2_abc"),),
+        )
+        transformer = CommandVideoFrameExtractor(
+            command=(
+                "python3",
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).write_bytes(b'frames-image')",
+                "{output_path}",
+            )
+        )
+        describer = CommandResourceDescriber(
+            command=(
+                "python3",
+                "-c",
+                "from pathlib import Path; import sys; print('frames: ' + Path(sys.argv[1]).read_text())",
+                "{path}",
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            materialized = materialize_lark_attachments(
+                record=record,
+                lark=FakeVideoDownloader(),
+                store=LocalResourceStore(Path(tmp)),
+                describer=describer,
+                transformer=transformer,
+            )
+
+            path = Path(materialized.attachments[0].url)
+            self.assertEqual(path.name, "repro.frames.png")
+            self.assertEqual(path.read_bytes(), b"frames-image")
+            self.assertEqual(materialized.attachments[0].description, "frames: frames-image")
+
+    def test_video_frame_extractor_respects_min_duration(self) -> None:
+        ref = parse_lark_resource_url("lark://message/om_1/media/file_v2_abc")
+        assert ref is not None
+        resource = DownloadedLarkResource(
+            content=b"video-bytes",
+            content_type="video/mp4",
+            filename="repro.mp4",
+        )
+        transformer = CommandVideoFrameExtractor(
+            command=("python3", "-c", "raise SystemExit(9)"),
+            min_duration_seconds=10,
+            duration_probe=FakeVideoDurationProbe(2),
+        )
+
+        self.assertIs(transformer.transform(ref=ref, resource=resource), resource)
+
+    def test_composite_transformer_runs_in_order(self) -> None:
+        class AppendTransformer:
+            def __init__(self, suffix: bytes) -> None:
+                self.suffix = suffix
+
+            def transform(self, *, ref, resource):  # type: ignore[no-untyped-def]
+                return DownloadedLarkResource(
+                    content=resource.content + self.suffix,
+                    content_type=resource.content_type,
+                    filename=resource.filename,
+                )
+
+        ref = parse_lark_resource_url("lark://message/om_1/image/img_v2_abc")
+        assert ref is not None
+        transformed = CompositeResourceTransformer(
+            (AppendTransformer(b"-a"), AppendTransformer(b"-b"))
+        ).transform(
+            ref=ref,
+            resource=DownloadedLarkResource(content=b"x", content_type="image/png", filename="bug.png"),
+        )
+
+        self.assertEqual(transformed.content, b"x-a-b")
 
     def test_ffprobe_video_duration_probe_parses_stdout(self) -> None:
         ref = parse_lark_resource_url("lark://message/om_1/media/file_v2_abc")

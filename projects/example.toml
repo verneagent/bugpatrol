@@ -49,6 +49,9 @@ max_file_bytes = 52428800
 max_video_duration_seconds = 120
 video_probe_command = []
 video_probe_timeout_seconds = 30
+video_frame_command = []
+video_frame_timeout_seconds = 300
+video_frame_min_duration_seconds = 0
 
 [owners]
 default = ["@example-triage"]

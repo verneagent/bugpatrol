@@ -22,12 +22,15 @@ from bugpatrol.lark import LarkOpenApiMessengerClient
 from bugpatrol.ownership import load_codeowners, resolve_configured_owners, resolve_owners
 from bugpatrol.prd import load_prd_documents, search_prd_documents
 from bugpatrol.resources import (
+    CommandVideoFrameExtractor,
     CommandResourceDescriber,
     CommandResourceRedactor,
+    CompositeResourceTransformer,
     FfprobeVideoDurationProbe,
     GitHubAssetRepoStore,
     ImageResourceResizer,
     ResourcePolicy,
+    ResourceTransformer,
 )
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
 from bugpatrol.triage_result import apply_triage_result, build_triage_dry_run_report, parse_triage_result
@@ -77,14 +80,39 @@ def media_resource_redactor(config) -> CommandResourceRedactor | None:  # type: 
     )
 
 
-def media_resource_transformer(config) -> ImageResourceResizer | None:  # type: ignore[no-untyped-def]
-    if not config.media.resize_max_image_width and not config.media.resize_max_image_height:
+def media_resource_transformer(config) -> ResourceTransformer | None:  # type: ignore[no-untyped-def]
+    transformers: list[ResourceTransformer] = []
+    temp_dir = Path(config.media.description_temp_dir) if config.media.description_temp_dir else None
+    if config.media.video_frame_command:
+        duration_probe = None
+        if config.media.video_frame_min_duration_seconds > 0:
+            duration_probe = FfprobeVideoDurationProbe(
+                command=config.media.video_probe_command or FfprobeVideoDurationProbe.DEFAULT_COMMAND,
+                timeout_seconds=config.media.video_probe_timeout_seconds,
+                temp_dir=temp_dir,
+            )
+        transformers.append(
+            CommandVideoFrameExtractor(
+                command=config.media.video_frame_command,
+                timeout_seconds=config.media.video_frame_timeout_seconds,
+                temp_dir=temp_dir,
+                min_duration_seconds=config.media.video_frame_min_duration_seconds,
+                duration_probe=duration_probe,
+            )
+        )
+    if config.media.resize_max_image_width or config.media.resize_max_image_height:
+        transformers.append(
+            ImageResourceResizer(
+                max_width=config.media.resize_max_image_width,
+                max_height=config.media.resize_max_image_height,
+                quality=config.media.resize_image_quality,
+            )
+        )
+    if not transformers:
         return None
-    return ImageResourceResizer(
-        max_width=config.media.resize_max_image_width,
-        max_height=config.media.resize_max_image_height,
-        quality=config.media.resize_image_quality,
-    )
+    if len(transformers) == 1:
+        return transformers[0]
+    return CompositeResourceTransformer(tuple(transformers))
 
 
 def main(argv: list[str] | None = None) -> int:

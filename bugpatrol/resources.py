@@ -89,6 +89,17 @@ class ResourcePolicy:
         return self.video_duration_probe or FfprobeVideoDurationProbe()
 
 
+class CompositeResourceTransformer:
+    def __init__(self, transformers: tuple[ResourceTransformer, ...]) -> None:
+        self._transformers = transformers
+
+    def transform(self, *, ref: "LarkResourceRef", resource: DownloadedLarkResource) -> DownloadedLarkResource:
+        transformed = resource
+        for transformer in self._transformers:
+            transformed = transformer.transform(ref=ref, resource=transformed)
+        return transformed
+
+
 @dataclass(frozen=True)
 class LarkResourceRef:
     message_id: str
@@ -345,6 +356,70 @@ class FfprobeVideoDurationProbe:
         return float(match.group(0))
 
 
+class CommandVideoFrameExtractor:
+    def __init__(
+        self,
+        *,
+        command: tuple[str, ...],
+        timeout_seconds: int = 300,
+        temp_dir: Path | None = None,
+        min_duration_seconds: float = 0.0,
+        duration_probe: VideoDurationProbe | None = None,
+    ) -> None:
+        self._command = command
+        self._timeout_seconds = timeout_seconds
+        self._temp_dir = temp_dir
+        self._min_duration_seconds = max(0.0, min_duration_seconds)
+        self._duration_probe = duration_probe
+
+    def transform(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> DownloadedLarkResource:
+        if not self._command or not _is_video_resource(ref=ref, resource=resource):
+            return resource
+        if self._min_duration_seconds > 0 and not self._meets_min_duration(ref=ref, resource=resource):
+            return resource
+
+        temp_root = self._temp_dir
+        if temp_root is not None:
+            temp_root.mkdir(parents=True, exist_ok=True)
+        filename = _resource_filename(resource=resource, fallback=ref.resource_key)
+        with tempfile.TemporaryDirectory(dir=temp_root) as tmp:
+            path = Path(tmp) / filename
+            output_path = Path(tmp) / _frame_filename(filename=filename)
+            path.write_bytes(resource.content)
+            command = tuple(
+                _format_command_part(part, path=path, output_path=output_path, ref=ref, resource=resource)
+                for part in self._command
+            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=self._timeout_seconds,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(f"video frame command timed out after {self._timeout_seconds}s") from exc
+            if completed.returncode != 0:
+                detail = (completed.stderr or completed.stdout or f"exit {completed.returncode}").strip()
+                raise RuntimeError(f"video frame command failed: {detail[:300]}")
+            if not output_path.is_file():
+                raise RuntimeError(f"video frame command did not write output: {output_path}")
+            frames = output_path.read_bytes()
+        return DownloadedLarkResource(
+            content=frames,
+            content_type="image/png",
+            filename=_frame_filename(filename=filename),
+        )
+
+    def _meets_min_duration(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> bool:
+        probe = self._duration_probe or FfprobeVideoDurationProbe(temp_dir=self._temp_dir)
+        try:
+            return probe.duration_seconds(ref=ref, resource=resource) >= self._min_duration_seconds
+        except RuntimeError:
+            return True
+
+
 class ImageResourceResizer:
     def __init__(
         self,
@@ -478,6 +553,11 @@ def _resource_filename(*, resource: DownloadedLarkResource, fallback: str) -> st
     return f"{filename}{extension}" if extension else filename
 
 
+def _frame_filename(*, filename: str) -> str:
+    stem = Path(filename).stem or "video"
+    return f"{_safe_segment(stem)}.frames.png"
+
+
 def _extension_for_content_type(content_type: str) -> str:
     media_type = content_type.split(";", 1)[0].strip().lower()
     return {
@@ -538,11 +618,13 @@ def _format_command_part(
     part: str,
     *,
     path: Path,
+    output_path: Path | None = None,
     ref: LarkResourceRef,
     resource: DownloadedLarkResource,
 ) -> str:
     formatted = part.format(
         path=str(path),
+        output_path=str(output_path or ""),
         kind=ref.kind,
         message_id=ref.message_id,
         resource_key=ref.resource_key,
