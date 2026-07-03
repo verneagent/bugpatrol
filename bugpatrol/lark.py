@@ -299,7 +299,32 @@ def _extract_text(content: str) -> str:
         text = data.get("text")
         if isinstance(text, str):
             return text
+        post_text = _extract_post_text(data)
+        if post_text:
+            return post_text
     return content
+
+
+def _extract_post_text(data: object) -> str:
+    parts: list[str] = []
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            if value.get("tag") == "text" and isinstance(value.get("text"), str):
+                text = str(value["text"]).strip()
+                if text:
+                    parts.append(text)
+                return
+            for child in value.values():
+                visit(child)
+            return
+        if isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    for key in ("content", "content_v2"):
+        visit(data.get(key))
+    return "\n".join(dict.fromkeys(parts))
 
 
 def _filename_from_content_disposition(value: str) -> str:

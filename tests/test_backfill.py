@@ -153,6 +153,36 @@ class BackfillTest(unittest.TestCase):
         self.assertEqual(attachments[0].kind, "file")
         self.assertEqual(attachments[0].description, "console.log")
 
+    def test_post_message_with_missing_open_id_is_user_intake(self) -> None:
+        msg = message(
+            sender_open_id="",
+            sender_type="user",
+            msg_type="post",
+            text="拨打之前在手机上登录过的账号，会收到通话邀请",
+            raw_content=json.dumps(
+                {
+                    "title": "",
+                    "content": [
+                        [
+                            {
+                                "tag": "media",
+                                "file_key": "file_v3_repro",
+                                "image_key": "img_v3_thumb",
+                            }
+                        ],
+                        [{"tag": "text", "text": "拨打之前在手机上登录过的账号，会收到通话邀请"}],
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        attachments = attachments_from_lark_message(msg)
+
+        self.assertFalse(should_skip_message(msg, bot_open_id="ou_bot"))
+        self.assertEqual(attachments[0].kind, "video")
+        self.assertEqual(attachments[0].url, "lark://message/om_1/media/file_v3_repro")
+
     def test_run_lark_backfill_processes_non_bot_messages_oldest_first(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGitHubIssuesClient()

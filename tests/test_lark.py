@@ -173,6 +173,32 @@ class LarkOpenApiMessengerClientTest(unittest.TestCase):
 
         self.assertEqual(parsed.text, "not json")
 
+    def test_parse_lark_post_message_extracts_text_tags(self) -> None:
+        parsed = parse_lark_message(
+            {
+                "message_id": "om_1",
+                "msg_type": "post",
+                "sender": {"sender_type": "user", "id": {}},
+                "body": {
+                    "content": json.dumps(
+                        {
+                            "title": "",
+                            "content": [
+                                [{"tag": "media", "file_key": "file_v3_repro", "image_key": "img_v3_thumb"}],
+                                [{"tag": "text", "text": "拨打之前在手机上登录过的账号，会收到通话邀请"}],
+                            ],
+                        },
+                        ensure_ascii=False,
+                    )
+                },
+            },
+            default_chat_id="oc_1",
+        )
+
+        self.assertEqual(parsed.sender_type, "user")
+        self.assertEqual(parsed.sender_open_id, "")
+        self.assertEqual(parsed.text, "拨打之前在手机上登录过的账号，会收到通话邀请")
+
     def test_get_message_parses_single_message_items_shape(self) -> None:
         client = LarkOpenApiMessengerClient(app_id="app", app_secret="secret")
 

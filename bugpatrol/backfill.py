@@ -135,9 +135,9 @@ def skip_reason(message: LarkMessage, *, bot_open_id: str) -> str:
         return "missing_message_id"
     if message.sender_open_id == bot_open_id:
         return "bot_message"
-    if not message.sender_open_id:
+    if not message.sender_open_id and message.sender_type != "user":
         return "missing_sender"
-    if message.msg_type not in {"text", "image", "file", "media"}:
+    if message.msg_type not in {"text", "image", "file", "media", "post"}:
         return "unsupported_msg_type"
     if _is_template_system_message(message):
         return "system_template"
@@ -188,6 +188,8 @@ def attachments_from_lark_message(message: LarkMessage) -> tuple[Attachment, ...
         name = _content_str(content, "file_name")
         if key:
             return (Attachment(kind="video", url=_lark_resource_url(message, key), description=name),)
+    if message.msg_type == "post":
+        return _attachments_from_lark_post(message, content)
     return ()
 
 
@@ -208,3 +210,40 @@ def _content_str(data: dict[str, object], key: str) -> str:
 
 def _lark_resource_url(message: LarkMessage, key: str) -> str:
     return f"lark://message/{message.message_id}/{message.msg_type}/{key}"
+
+
+def _lark_resource_url_with_kind(message: LarkMessage, kind: str, key: str) -> str:
+    return f"lark://message/{message.message_id}/{kind}/{key}"
+
+
+def _attachments_from_lark_post(message: LarkMessage, content: dict[str, object]) -> tuple[Attachment, ...]:
+    attachments: list[Attachment] = []
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            file_key = _content_str(value, "file_key")
+            image_key = _content_str(value, "image_key")
+            name = _content_str(value, "file_name")
+            if file_key:
+                kind = "video" if value.get("tag") == "media" else "file"
+                attachments.append(
+                    Attachment(
+                        kind=kind,
+                        url=_lark_resource_url_with_kind(message, "media" if kind == "video" else "file", file_key),
+                        description=name,
+                    )
+                )
+                return
+            if image_key:
+                attachments.append(Attachment(kind="image", url=_lark_resource_url_with_kind(message, "image", image_key)))
+                return
+            for child in value.values():
+                visit(child)
+            return
+        if isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    for key in ("content", "content_v2"):
+        visit(content.get(key))
+    return tuple(dict.fromkeys(attachments))
