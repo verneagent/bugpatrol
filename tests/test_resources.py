@@ -218,6 +218,27 @@ class ResourcesTest(unittest.TestCase):
         self.assertIn("vision description unavailable", description)
         self.assertIn("bad", description)
 
+    def test_command_description_retries_transient_failures(self) -> None:
+        ref = parse_lark_resource_url("lark://message/om_1/image/img_v2_abc")
+        assert ref is not None
+        first = Mock(returncode=1, stdout="", stderr="temporary")
+        second = Mock(returncode=0, stdout="visual ok\n", stderr="")
+
+        with patch("bugpatrol.resources.subprocess.run", side_effect=[first, second]) as run:
+            with patch("bugpatrol.resources.time.sleep") as sleep:
+                description = CommandResourceDescriber(
+                    command=("vision", "{path}"),
+                    retries=1,
+                    retry_backoff_seconds=0.5,
+                ).describe(
+                    ref=ref,
+                    resource=DownloadedLarkResource(content=b"x", content_type="image/png", filename="bug.png"),
+                )
+
+        self.assertEqual(description, "visual ok")
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once_with(0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

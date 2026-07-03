@@ -218,6 +218,8 @@ def main(argv: list[str] | None = None) -> int:
                 command=config.media.description_command,
                 timeout_seconds=config.media.description_timeout_seconds,
                 temp_dir=temp_dir,
+                retries=config.media.description_retries,
+                retry_backoff_seconds=config.media.description_retry_backoff_seconds,
             )
         resource_policy = media_resource_policy(config)
         result = run_lark_backfill(
@@ -305,6 +307,8 @@ def main(argv: list[str] | None = None) -> int:
                 command=config.media.description_command,
                 timeout_seconds=config.media.description_timeout_seconds,
                 temp_dir=temp_dir,
+                retries=config.media.description_retries,
+                retry_backoff_seconds=config.media.description_retry_backoff_seconds,
             )
         resource_policy = media_resource_policy(config)
         result = run_polling_watcher(
@@ -371,6 +375,8 @@ def main(argv: list[str] | None = None) -> int:
                 command=config.media.description_command,
                 timeout_seconds=config.media.description_timeout_seconds,
                 temp_dir=temp_dir,
+                retries=config.media.description_retries,
+                retry_backoff_seconds=config.media.description_retry_backoff_seconds,
             )
         resource_policy = media_resource_policy(config)
         result = run_lark_event_watcher(

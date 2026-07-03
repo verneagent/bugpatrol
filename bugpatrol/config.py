@@ -56,6 +56,8 @@ class MediaConfig:
     max_image_bytes: int = 0
     max_video_bytes: int = 0
     max_file_bytes: int = 0
+    description_retries: int = 0
+    description_retry_backoff_seconds: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -185,6 +187,8 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             max_image_bytes=int(media.get("max_image_bytes") or 0),
             max_video_bytes=int(media.get("max_video_bytes") or 0),
             max_file_bytes=int(media.get("max_file_bytes") or 0),
+            description_retries=int(media.get("description_retries") or 0),
+            description_retry_backoff_seconds=float(media.get("description_retry_backoff_seconds") or 1.0),
         ),
         owners=OwnersConfig(
             default=tuple(_optional_str_list(owners, "default")),

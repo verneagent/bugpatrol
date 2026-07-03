@@ -24,6 +24,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.assets.branch, "main")
         self.assertEqual(config.assets.remote_url, "https://github.com/example-org/example-assets.git")
         self.assertEqual(config.media.description_command[:3], ("python3", "-m", "bugpatrol.media_vision"))
+        self.assertEqual(config.media.description_retries, 2)
+        self.assertEqual(config.media.description_retry_backoff_seconds, 1.0)
         self.assertEqual(config.media.max_image_bytes, 10485760)
         self.assertEqual(config.media.max_video_bytes, 104857600)
         self.assertEqual(config.media.max_file_bytes, 52428800)

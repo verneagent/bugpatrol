@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
@@ -162,10 +163,14 @@ class CommandResourceDescriber:
         command: tuple[str, ...],
         timeout_seconds: int = 300,
         temp_dir: Path | None = None,
+        retries: int = 0,
+        retry_backoff_seconds: float = 1.0,
     ) -> None:
         self._command = command
         self._timeout_seconds = timeout_seconds
         self._temp_dir = temp_dir
+        self._retries = max(0, retries)
+        self._retry_backoff_seconds = max(0.0, retry_backoff_seconds)
 
     def describe(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> str:
         if not self._command:
@@ -181,16 +186,25 @@ class CommandResourceDescriber:
                 _format_command_part(part, path=path, ref=ref, resource=resource)
                 for part in self._command
             )
-            try:
-                completed = subprocess.run(
-                    command,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=self._timeout_seconds,
-                )
-            except subprocess.TimeoutExpired:
-                return f"vision description unavailable: timed out after {self._timeout_seconds}s"
+            completed = None
+            for attempt in range(self._retries + 1):
+                try:
+                    completed = subprocess.run(
+                        command,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=self._timeout_seconds,
+                    )
+                except subprocess.TimeoutExpired:
+                    if attempt >= self._retries:
+                        return f"vision description unavailable: timed out after {self._timeout_seconds}s"
+                    time.sleep(self._retry_backoff_seconds)
+                    continue
+                if completed.returncode == 0 and completed.stdout.strip():
+                    break
+                if attempt < self._retries:
+                    time.sleep(self._retry_backoff_seconds)
         if completed.returncode == 0 and completed.stdout.strip():
             return completed.stdout.strip()
         detail = (completed.stderr or completed.stdout or f"exit {completed.returncode}").strip()
