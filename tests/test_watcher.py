@@ -8,6 +8,7 @@ from unittest.mock import patch
 from bugpatrol.backfill import BackfillResult
 from bugpatrol.config import load_project_config
 from bugpatrol.intake_workflow import IntakeWorkflow
+from bugpatrol.lease import FileLease, LeaseHeldError
 from bugpatrol.lark import LarkMessage
 from bugpatrol.testing.fakes import FakeGitHubIssuesClient, FakeLarkMessengerClient
 from bugpatrol.triage_queue import TriageRequest, TriageRequestQueue
@@ -99,6 +100,46 @@ class WatcherTest(unittest.TestCase):
         self.assertEqual(result.dispatched_triage, 1)
         self.assertEqual(dispatcher.requests[0].issue_number, 1)
         self.assertEqual(queue.due_requests(now=999999), ())
+
+    def test_run_polling_watcher_releases_lease_after_once(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeHistoryLark()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        with tempfile.TemporaryDirectory() as temp:
+            lease_file = Path(temp) / "watch.lock"
+            result = run_polling_watcher(
+                config=config,
+                lark=lark,  # type: ignore[arg-type]
+                workflow=workflow,
+                once=True,
+                interval_seconds=0,
+                lease_file=lease_file,
+            )
+
+            self.assertEqual(result.iterations, 1)
+            self.assertFalse(lease_file.exists())
+
+    def test_run_polling_watcher_rejects_active_lease(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeHistoryLark()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        with tempfile.TemporaryDirectory() as temp:
+            lease_file = Path(temp) / "watch.lock"
+            FileLease(lease_file, ttl_seconds=120, owner="other").acquire()
+
+            with self.assertRaises(LeaseHeldError):
+                run_polling_watcher(
+                    config=config,
+                    lark=lark,  # type: ignore[arg-type]
+                    workflow=workflow,
+                    once=True,
+                    interval_seconds=0,
+                    lease_file=lease_file,
+                )
 
 
 class RecordingDispatcher:

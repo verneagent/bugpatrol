@@ -11,6 +11,7 @@ from bugpatrol.backfill import BackfillResult, run_lark_backfill
 from bugpatrol.config import ProjectConfig
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.ledger import JsonMessageLedger, MessageLedger
+from bugpatrol.lease import FileLease
 from bugpatrol.lark import LarkOpenApiMessengerClient
 from bugpatrol.resources import ResourceDescriber, ResourceStore
 from bugpatrol.triage_queue import CommandTriageDispatcher, TriageRequest, TriageRequestQueue
@@ -46,6 +47,8 @@ def run_polling_watcher(
     resource_describer: ResourceDescriber | None = None,
     processed_ledger_path: Path | None = None,
     processed_ledger: MessageLedger | None = None,
+    lease_file: Path | None = None,
+    lease_ttl_seconds: float = 120,
     triage_queue_path: Path | None = None,
     triage_queue: TriageRequestQueue | None = None,
     triage_quiet_seconds: float = 60,
@@ -67,6 +70,7 @@ def run_polling_watcher(
     ledger = processed_ledger
     if ledger is None and processed_ledger_path is not None:
         ledger = JsonMessageLedger.load(processed_ledger_path)
+    lease = FileLease(lease_file, ttl_seconds=lease_ttl_seconds) if lease_file is not None else None
 
     iterations = 0
     scanned = 0
@@ -74,43 +78,51 @@ def run_polling_watcher(
     skipped = 0
     queued_triage = 0
     dispatched_triage = 0
-    while True:
-        result = run_lark_backfill(
-            config=config,
-            lark=lark,
-            workflow=workflow,
-            limit=limit,
-            dry_run=dry_run,
-            resource_dir=resource_dir,
-            resource_store=resource_store,
-            resource_describer=resource_describer,
-            processed_ledger=ledger,
-        )
-        iterations += 1
-        scanned += result.scanned
-        processed += result.processed
-        skipped += result.skipped
-        if queue is not None:
-            for outcome in result.outcomes:
-                request = queue.enqueue(
-                    issue_number=outcome.issue.number,
-                    signal=outcome.triage_signal,
-                    quiet_seconds=triage_quiet_seconds,
-                )
-                if request is not None:
-                    queued_triage += 1
-            if dispatcher is not None:
-                for request in queue.due_requests():
-                    dispatcher.dispatch(request)
-                    queue.mark_dispatched(request)
-                    dispatched_triage += 1
-        if once or (max_iterations is not None and iterations >= max_iterations):
-            return WatchResult(
-                iterations=iterations,
-                scanned=scanned,
-                processed=processed,
-                skipped=skipped,
-                queued_triage=queued_triage,
-                dispatched_triage=dispatched_triage,
+    if lease is not None:
+        lease.acquire()
+    try:
+        while True:
+            result = run_lark_backfill(
+                config=config,
+                lark=lark,
+                workflow=workflow,
+                limit=limit,
+                dry_run=dry_run,
+                resource_dir=resource_dir,
+                resource_store=resource_store,
+                resource_describer=resource_describer,
+                processed_ledger=ledger,
             )
-        time.sleep(interval_seconds)
+            iterations += 1
+            scanned += result.scanned
+            processed += result.processed
+            skipped += result.skipped
+            if queue is not None:
+                for outcome in result.outcomes:
+                    request = queue.enqueue(
+                        issue_number=outcome.issue.number,
+                        signal=outcome.triage_signal,
+                        quiet_seconds=triage_quiet_seconds,
+                    )
+                    if request is not None:
+                        queued_triage += 1
+                if dispatcher is not None:
+                    for request in queue.due_requests():
+                        dispatcher.dispatch(request)
+                        queue.mark_dispatched(request)
+                        dispatched_triage += 1
+            if lease is not None:
+                lease.refresh()
+            if once or (max_iterations is not None and iterations >= max_iterations):
+                return WatchResult(
+                    iterations=iterations,
+                    scanned=scanned,
+                    processed=processed,
+                    skipped=skipped,
+                    queued_triage=queued_triage,
+                    dispatched_triage=dispatched_triage,
+                )
+            time.sleep(interval_seconds)
+    finally:
+        if lease is not None:
+            lease.release()
