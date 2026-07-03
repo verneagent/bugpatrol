@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime, timezone
 from dataclasses import dataclass, replace
 from pathlib import Path
+from uuid import uuid4
 
 from bugpatrol.agents import AgentInvocation, build_triage_agent_invocation
 from bugpatrol.clients import GitHubIssueComment
@@ -15,6 +17,10 @@ from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
 from bugpatrol.triage_result import TriageResult, apply_triage_result, parse_triage_result
+
+
+TRIAGE_RUN_META_START = "<!-- BUGPATROL_TRIAGE_RUN_META"
+TRIAGE_RUN_META_END = "BUGPATROL_TRIAGE_RUN_META -->"
 
 
 @dataclass(frozen=True)
@@ -74,10 +80,18 @@ def execute_triage_run(
     github: GitHubCliIssuesClient,
     issue_fields: GitHubIssueFieldsClient,
 ) -> None:
+    run_id = str(uuid4())
     mark_triage_running(
         config=config,
         issue_number=issue_number,
         issue_fields=issue_fields,
+    )
+    record_triage_run_start(
+        config=config,
+        issue_number=issue_number,
+        plan=plan,
+        run_id=run_id,
+        github=github,
     )
     completed = subprocess.run(plan.invocation.command, check=False)
     if completed.returncode != 0:
@@ -91,6 +105,15 @@ def execute_triage_run(
         raise RuntimeError(f"triage agent failed with exit {completed.returncode}")
     result = parse_triage_result(json.loads(plan.output_path.read_text()))
     current_comments = github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)
+    if latest_triage_run_id(current_comments) != run_id:
+        mark_triage_superseded(
+            config=config,
+            issue_number=issue_number,
+            run_id=run_id,
+            github=github,
+            issue_fields=issue_fields,
+        )
+        return
     if comment_ids(current_comments) != plan.context_comment_ids:
         result = mark_result_needs_review(result)
     apply_triage_result(
@@ -100,6 +123,28 @@ def execute_triage_run(
         result=result,
         github=github,
         issue_fields=issue_fields,
+    )
+
+
+def record_triage_run_start(
+    *,
+    config: ProjectConfig,
+    issue_number: int,
+    plan: TriageRunPlan,
+    run_id: str,
+    github: GitHubCliIssuesClient,
+) -> None:
+    metadata = {
+        "version": 1,
+        "issue": issue_number,
+        "run_id": run_id,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "context_comment_ids": list(plan.context_comment_ids),
+    }
+    github.add_issue_comment(
+        repo=config.github_repo,
+        issue_number=issue_number,
+        body=append_triage_run_metadata(metadata),
     )
 
 
@@ -114,6 +159,30 @@ def mark_triage_running(
         issue_number=issue_number,
         values={"Triage status": "Running"},
         config=config,
+    )
+
+
+def mark_triage_superseded(
+    *,
+    config: ProjectConfig,
+    issue_number: int,
+    run_id: str,
+    github: GitHubCliIssuesClient,
+    issue_fields: GitHubIssueFieldsClient,
+) -> None:
+    issue_fields.add_issue_field_values(
+        repo=config.github_repo,
+        issue_number=issue_number,
+        values={"Triage status": "Needs review"},
+        config=config,
+    )
+    github.add_issue_comment(
+        repo=config.github_repo,
+        issue_number=issue_number,
+        body=(
+            "## BugPatrol triage skipped\n\n"
+            f"Run `{run_id}` was superseded by a newer triage run. Review the latest context before applying results."
+        ),
     )
 
 
@@ -139,7 +208,36 @@ def mark_triage_failed(
 
 
 def comment_ids(comments: tuple[GitHubIssueComment, ...]) -> tuple[str, ...]:
-    return tuple(comment.id for comment in comments)
+    return tuple(comment.id for comment in comments if parse_triage_run_metadata(comment.body) is None)
+
+
+def append_triage_run_metadata(metadata: dict[str, object]) -> str:
+    return (
+        f"{TRIAGE_RUN_META_START}\n"
+        f"{json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2)}\n"
+        f"{TRIAGE_RUN_META_END}"
+    )
+
+
+def parse_triage_run_metadata(comment_body: str) -> dict[str, object] | None:
+    start = comment_body.find(TRIAGE_RUN_META_START)
+    if start == -1:
+        return None
+    json_start = start + len(TRIAGE_RUN_META_START)
+    end = comment_body.find(TRIAGE_RUN_META_END, json_start)
+    if end == -1:
+        return None
+    data = json.loads(comment_body[json_start:end].strip())
+    return data if isinstance(data, dict) else None
+
+
+def latest_triage_run_id(comments: tuple[GitHubIssueComment, ...]) -> str:
+    latest = ""
+    for comment in comments:
+        metadata = parse_triage_run_metadata(comment.body)
+        if metadata is not None and isinstance(metadata.get("run_id"), str):
+            latest = str(metadata["run_id"])
+    return latest
 
 
 def mark_result_needs_review(result: TriageResult) -> TriageResult:

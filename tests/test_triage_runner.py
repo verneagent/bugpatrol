@@ -9,7 +9,14 @@ from unittest.mock import patch
 from bugpatrol.agents import AgentInvocation
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment
 from bugpatrol.config import load_project_config
-from bugpatrol.triage_runner import TriageRunPlan, execute_triage_run, prepare_triage_run, render_triage_failed_comment
+from bugpatrol.triage_runner import (
+    TriageRunPlan,
+    append_triage_run_metadata,
+    comment_ids,
+    execute_triage_run,
+    prepare_triage_run,
+    render_triage_failed_comment,
+)
 
 
 class FakeGithub:
@@ -75,6 +82,14 @@ class TriageRunnerTest(unittest.TestCase):
             self.assertIn("Todo empty state missing", plan.context_path.read_text())
             self.assertIn("Follow-up comment", plan.context_path.read_text())
             self.assertIn("triage-context.md", plan.invocation.command[-1])
+
+    def test_comment_ids_ignore_triage_run_metadata_comments(self) -> None:
+        comments = (
+            GitHubIssueComment(id="1", body="Reporter follow-up"),
+            GitHubIssueComment(id="2", body=append_triage_run_metadata({"version": 1, "run_id": "run-1"})),
+        )
+
+        self.assertEqual(comment_ids(comments), ("1",))
 
     def test_execute_triage_run_marks_failed_when_agent_exits_nonzero(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
@@ -156,11 +171,70 @@ class TriageRunnerTest(unittest.TestCase):
         self.assertEqual(issue_fields.writes[1]["values"]["Triage status"], "Needs review")
         self.assertIn("new issue comments arrived", github.comments[-1])
 
+    def test_execute_triage_run_skips_apply_when_superseded(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "output.json"
+            output.write_text(valid_triage_output())
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=output,
+                invocation=AgentInvocation(provider="codex", command=["true"]),
+                context_comment_ids=("1",),
+            )
+
+            def run_agent(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+                github.comments.append(append_triage_run_metadata({"version": 1, "run_id": "run-new"}))
+                return subprocess.CompletedProcess(["true"], 0)
+
+            with patch("bugpatrol.triage_runner.uuid4", return_value="run-old"):
+                with patch("subprocess.run", side_effect=run_agent):
+                    execute_triage_run(
+                        config=config,
+                        issue_number=7,
+                        plan=plan,
+                        github=github,  # type: ignore[arg-type]
+                        issue_fields=issue_fields,  # type: ignore[arg-type]
+                    )
+
+        self.assertEqual(issue_fields.writes[0]["values"], {"Triage status": "Running"})
+        self.assertEqual(issue_fields.writes[1]["values"], {"Triage status": "Needs review"})
+        self.assertEqual(github.issue_types, [])
+        self.assertEqual(github.assignees, [])
+        self.assertIn("superseded", github.comments[-1])
+
     def test_render_triage_failed_comment_is_actionable(self) -> None:
         comment = render_triage_failed_comment(exit_code=2)
 
         self.assertIn("BugPatrol triage failed", comment)
         self.assertIn("credentials", comment)
+
+
+def valid_triage_output() -> str:
+    return """
+    {
+      "issue_type": "Bug",
+      "priority": "High",
+      "triage_status": "Done",
+      "triage_verdict": "代码 Bug",
+      "platform": "Web",
+      "reproducibility": "必现",
+      "other_platforms": "未验证",
+      "capability": "Quest",
+      "evidence": "文字描述",
+      "prd_status": "已对齐",
+      "triage_confidence": "高",
+      "assignee": "octocat",
+      "owner_reason": "Manual",
+      "summary_cn": "空状态缺失",
+      "follow_up_questions": [],
+      "comment_markdown": "## Triage Analysis\\n\\nLooks like a code bug."
+    }
+    """
 
 
 if __name__ == "__main__":

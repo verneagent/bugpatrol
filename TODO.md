@@ -7,11 +7,6 @@ media, and fix-notification slices.
 
 - Add reconnect/backoff and heartbeat handling for WebSocket mode.
 
-## Triage Automation
-
-- Add active-run metadata so concurrent triage jobs for the same issue do not
-  overwrite each other.
-
 ## Media Handling
 
 - Add configurable image resizing before vision and upload.
