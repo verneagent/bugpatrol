@@ -6,6 +6,8 @@ import fnmatch
 from dataclasses import dataclass
 from pathlib import Path
 
+from bugpatrol.config import OwnersConfig
+
 
 @dataclass(frozen=True)
 class CodeownersRule:
@@ -53,6 +55,28 @@ def resolve_first_owner(path: str, rules: tuple[CodeownersRule, ...]) -> str:
     return owners[0].lstrip("@") if owners else ""
 
 
+def resolve_configured_owners(
+    *,
+    path: str,
+    capability: str = "",
+    owners: OwnersConfig,
+) -> tuple[str, ...]:
+    normalized = _normalize_path(path)
+    matched: tuple[str, ...] = ()
+    for pattern, pattern_owners in (owners.paths or {}).items():
+        if _matches(pattern, normalized):
+            matched = pattern_owners
+    if matched:
+        return normalize_owner_handles(matched)
+    if capability and capability in (owners.capabilities or {}):
+        return normalize_owner_handles((owners.capabilities or {})[capability])
+    return normalize_owner_handles(owners.default)
+
+
+def normalize_owner_handles(owners: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(owner if owner.startswith("@") else f"@{owner}" for owner in owners if owner)
+
+
 def _normalize_path(path: str) -> str:
     return path.strip().lstrip("/")
 
@@ -69,4 +93,3 @@ def _matches(pattern: str, path: str) -> bool:
     if "/" not in pattern and not anchored:
         return fnmatch.fnmatch(path.rsplit("/", 1)[-1], pattern)
     return fnmatch.fnmatch(path, pattern)
-

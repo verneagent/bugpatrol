@@ -56,6 +56,13 @@ class MediaConfig:
 
 
 @dataclass(frozen=True)
+class OwnersConfig:
+    default: tuple[str, ...] = ()
+    paths: dict[str, tuple[str, ...]] | None = None
+    capabilities: dict[str, tuple[str, ...]] | None = None
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     github_repo: str
     lark: LarkConfig
@@ -64,6 +71,7 @@ class ProjectConfig:
     intake: IntakeConfig
     assets: AssetsConfig
     media: MediaConfig
+    owners: OwnersConfig
     issue_field_names: dict[str, str]
 
     @property
@@ -118,6 +126,9 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
     media = data.get("media") or {}
     if not isinstance(media, dict):
         raise ValueError("[media] must be a table")
+    owners = data.get("owners") or {}
+    if not isinstance(owners, dict):
+        raise ValueError("[owners] must be a table")
     field_names = _required_table(data, "issue_field_names")
     language = _required_str(intake, "language")
     if language not in {"zh-CN", "en-US"}:
@@ -159,6 +170,11 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             description_timeout_seconds=int(media.get("description_timeout_seconds") or 300),
             description_temp_dir=str(media.get("description_temp_dir") or ""),
         ),
+        owners=OwnersConfig(
+            default=tuple(_optional_str_list(owners, "default")),
+            paths=_optional_owner_map(owners, "paths"),
+            capabilities=_optional_owner_map(owners, "capabilities"),
+        ),
         issue_field_names={
             str(name): str(value)
             for name, value in field_names.items()
@@ -195,3 +211,19 @@ def _optional_str_list(data: dict[str, Any], key: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"{key!r} must be a string list")
     return value
+
+
+def _optional_owner_map(data: dict[str, Any], key: str) -> dict[str, tuple[str, ...]]:
+    value = data.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"owners.{key} must be a table")
+    result: dict[str, tuple[str, ...]] = {}
+    for name, owners in value.items():
+        if not isinstance(name, str):
+            raise ValueError(f"owners.{key} keys must be strings")
+        if not isinstance(owners, list) or not all(isinstance(item, str) for item in owners):
+            raise ValueError(f"owners.{key}.{name} must be a string list")
+        result[name] = tuple(owners)
+    return result

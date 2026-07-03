@@ -19,7 +19,7 @@ from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lark import LarkOpenApiMessengerClient
-from bugpatrol.ownership import load_codeowners, resolve_owners
+from bugpatrol.ownership import load_codeowners, resolve_configured_owners, resolve_owners
 from bugpatrol.prd import load_prd_documents, search_prd_documents
 from bugpatrol.resources import CommandResourceDescriber, GitHubAssetRepoStore
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
@@ -99,6 +99,8 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     owner = sub.add_parser("resolve-owner", help="resolve owners for paths using CODEOWNERS")
+    owner.add_argument("--project-config", type=Path)
+    owner.add_argument("--capability", default="")
     owner.add_argument("repo_path", type=Path)
     owner.add_argument("paths", nargs="+")
 
@@ -369,10 +371,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "resolve-owner":
         rules = load_codeowners(args.repo_path)
+        owner_config = load_project_config(args.project_config).owners if args.project_config else None
         print(
             json.dumps(
                 {
-                    path: list(resolve_owners(path, rules))
+                    path: list(
+                        resolve_configured_owners(
+                            path=path,
+                            capability=args.capability,
+                            owners=owner_config,
+                        )
+                        if owner_config is not None
+                        else ()
+                    )
+                    or list(resolve_owners(path, rules))
                     for path in args.paths
                 },
                 ensure_ascii=False,

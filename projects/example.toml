@@ -37,6 +37,15 @@ description_command = [
 ]
 description_timeout_seconds = 300
 
+[owners]
+default = ["@example-triage"]
+
+[owners.paths]
+"src/auth/**" = ["@example-auth-owner"]
+
+[owners.capabilities]
+Quest = ["@example-quest-owner"]
+
 [issue_field_names]
 Priority = "Priority"
 "Triage status" = "Triage status"

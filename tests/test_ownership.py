@@ -4,7 +4,14 @@ import unittest
 import tempfile
 from pathlib import Path
 
-from bugpatrol.ownership import load_codeowners, parse_codeowners, resolve_first_owner, resolve_owners
+from bugpatrol.config import OwnersConfig
+from bugpatrol.ownership import (
+    load_codeowners,
+    parse_codeowners,
+    resolve_configured_owners,
+    resolve_first_owner,
+    resolve_owners,
+)
 
 
 class OwnershipTest(unittest.TestCase):
@@ -61,6 +68,26 @@ class OwnershipTest(unittest.TestCase):
 
         self.assertEqual(resolve_first_owner("src/todo/list.ts", rules), "garlanddiego")
         self.assertEqual(resolve_first_owner("src/notifications/reminders.ts", rules), "verneagent")
+
+    def test_resolve_configured_owners_prefers_path_then_capability_then_default(self) -> None:
+        owners = OwnersConfig(
+            default=("@default",),
+            paths={"src/auth/**": ("auth-owner",)},
+            capabilities={"Quest": ("@quest-owner",)},
+        )
+
+        self.assertEqual(
+            resolve_configured_owners(path="src/auth/login.ts", capability="Quest", owners=owners),
+            ("@auth-owner",),
+        )
+        self.assertEqual(
+            resolve_configured_owners(path="src/quest/list.ts", capability="Quest", owners=owners),
+            ("@quest-owner",),
+        )
+        self.assertEqual(
+            resolve_configured_owners(path="src/other.ts", capability="", owners=owners),
+            ("@default",),
+        )
 
 
 if __name__ == "__main__":

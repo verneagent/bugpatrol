@@ -24,6 +24,9 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.assets.branch, "main")
         self.assertEqual(config.assets.remote_url, "https://github.com/example-org/example-assets.git")
         self.assertEqual(config.media.description_command[:3], ("python3", "-m", "bugpatrol.media_vision"))
+        self.assertEqual(config.owners.default, ("@example-triage",))
+        self.assertEqual(config.owners.paths, {"src/auth/**": ("@example-auth-owner",)})
+        self.assertEqual(config.owners.capabilities, {"Quest": ("@example-quest-owner",)})
         self.assertIn("bugpatrol-example-triage", config.triage_agent.runner_labels)
         config.validate_against(default_field_specs())
 
