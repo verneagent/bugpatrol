@@ -105,6 +105,14 @@ class TriageResultTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "follow_up_questions"):
             parse_triage_result(data)
 
+    def test_parse_triage_result_ignores_questions_unless_needs_info(self) -> None:
+        data = dict(VALID)
+        data["follow_up_questions"] = ["无效追问"]
+
+        result = parse_triage_result(data)
+
+        self.assertEqual(result.follow_up_questions, ())
+
     def test_apply_triage_result_writes_type_fields_comment_and_assignee(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGithub()
@@ -127,12 +135,19 @@ class TriageResultTest(unittest.TestCase):
 
         self.assertEqual(
             [name for name, _ in github.calls],
-            ["get_issue", "set_issue_type", "list_issue_comments", "add_issue_comment", "add_assignee"],
+            ["get_issue", "list_issue_comments", "set_issue_type", "add_issue_comment", "add_assignee"],
         )
-        self.assertEqual(issue_fields.calls[0][0], "add_issue_field_values")
+        self.assertEqual(
+            [name for name, _ in issue_fields.calls],
+            ["get_issue_field_values", "add_issue_field_values"],
+        )
         self.assertTrue(summary.comment_added)
         self.assertFalse(summary.duplicate_comment_skipped)
         self.assertIn("BUGPATROL_TRIAGE_META", github.comments[0])
+        metadata = parse_triage_metadata(github.comments[0])
+        self.assertIsNotNone(metadata)
+        assert metadata is not None
+        self.assertIn("decision_key", metadata)
 
     def test_apply_triage_result_rejects_unmanaged_issue_before_writes(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
@@ -224,6 +239,68 @@ class TriageResultTest(unittest.TestCase):
         self.assertTrue(second.duplicate_comment_skipped)
         self.assertEqual(len(github.comments), 1)
         self.assertEqual(second.result_fingerprint, triage_result_fingerprint(result))
+
+    def test_triage_result_fingerprint_ignores_comment_wording(self) -> None:
+        first = parse_triage_result(dict(VALID))
+        data = dict(VALID)
+        data["comment_markdown"] = "## Triage\n\n同一个结构化结论，但换一种说明。"
+        second = parse_triage_result(data)
+
+        self.assertEqual(triage_result_fingerprint(first), triage_result_fingerprint(second))
+
+    def test_apply_triage_result_skips_legacy_metadata_when_core_fields_unchanged(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.comments.append(
+            append_triage_metadata(
+                "## Triage\n\n旧算法写过的 triage。",
+                {"version": 1, "issue": 1, "result_fingerprint": "legacy"},
+            )
+        )
+        issue_fields = FakeIssueFields()
+        result = parse_triage_result(dict(VALID))
+        issue_fields.current_values = {
+            field: result.fields[field]
+            for field in ("Priority", "Triage status", "Triage verdict", "Capability", "PRD status")
+        }
+
+        summary = apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+        )
+
+        self.assertFalse(summary.comment_added)
+        self.assertTrue(summary.duplicate_comment_skipped)
+        self.assertEqual(len(github.comments), 1)
+
+    def test_apply_triage_result_skips_legacy_comment_when_decision_line_matches(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.comments.append(
+            append_triage_metadata(
+                "## Triage\n\n结论：代码 Bug，优先级 High，归属 Notifications owner @garlanddiego。",
+                {"version": 1, "issue": 1, "result_fingerprint": "legacy"},
+            )
+        )
+        issue_fields = FakeIssueFields()
+        result = parse_triage_result(dict(VALID))
+
+        summary = apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+        )
+
+        self.assertFalse(summary.comment_added)
+        self.assertTrue(summary.duplicate_comment_skipped)
+        self.assertEqual(len(github.comments), 1)
 
     def test_intake_metadata_round_trips_for_lark_follow_up(self) -> None:
         body = render_issue_body(

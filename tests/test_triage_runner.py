@@ -55,6 +55,9 @@ class FakeIssueFields:
     def __init__(self) -> None:
         self.writes: list[dict[str, object]] = []
 
+    def get_issue_field_values(self, **kwargs: object) -> dict[str, str]:
+        return {}
+
     def add_issue_field_values(self, **kwargs: object) -> None:
         self.writes.append(kwargs)
 

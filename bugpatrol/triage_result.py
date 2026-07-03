@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from bugpatrol.clients import LarkMessengerClient
+from bugpatrol.clients import GitHubIssueComment, LarkMessengerClient
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import NATIVE_ISSUE_TYPES, default_field_specs, validate_field_value
 from bugpatrol.github import GitHubCliIssuesClient
@@ -58,6 +58,13 @@ TRIAGE_META_RE = re.compile(
     rf"{re.escape(TRIAGE_META_START)}\s*(.*?)\s*{re.escape(TRIAGE_META_END)}",
     re.DOTALL,
 )
+CORE_DUPLICATE_FIELDS = (
+    "Priority",
+    "Triage status",
+    "Triage verdict",
+    "Capability",
+    "PRD status",
+)
 
 
 def parse_triage_result(data: dict[str, Any]) -> TriageResult:
@@ -82,6 +89,8 @@ def parse_triage_result(data: dict[str, Any]) -> TriageResult:
     follow_up_questions = _optional_str_tuple(data, "follow_up_questions")
     if fields["Triage status"] == "Needs info" and not follow_up_questions:
         raise ValueError("Needs info triage requires follow_up_questions")
+    if fields["Triage status"] != "Needs info":
+        follow_up_questions = ()
     assignee = _required_str(data, "assignee").lstrip("@")
     comment = _required_str(data, "comment_markdown")
     return TriageResult(
@@ -106,18 +115,26 @@ def apply_triage_result(
     issue = github.get_issue(repo=repo, issue_number=issue_number)
     require_bugpatrol_managed_issue(issue)
     fingerprint = triage_result_fingerprint(result)
+    decision_key = triage_decision_key(result)
+    existing_comments = github.list_issue_comments(repo=repo, issue_number=issue_number)
+    existing_field_values = issue_fields.get_issue_field_values(
+        repo=repo,
+        issue_number=issue_number,
+    )
+    duplicate = _has_applied_triage_decision(
+        comments=existing_comments,
+        fingerprint=fingerprint,
+        decision_key=decision_key,
+        result=result,
+        config=config,
+        existing_field_values=existing_field_values,
+    )
     github.set_issue_type(repo=repo, issue_number=issue_number, issue_type=result.issue_type)
     issue_fields.add_issue_field_values(
         repo=repo,
         issue_number=issue_number,
         values=result.fields,
         config=config,
-    )
-    duplicate = _has_applied_triage_fingerprint(
-        github=github,
-        repo=repo,
-        issue_number=issue_number,
-        fingerprint=fingerprint,
     )
     if not duplicate:
         if lark is not None and result.fields["Triage status"] == "Needs info":
@@ -137,6 +154,7 @@ def apply_triage_result(
                     "version": 1,
                     "issue": issue_number,
                     "result_fingerprint": fingerprint,
+                    "decision_key": decision_key,
                 },
             ),
         )
@@ -183,13 +201,24 @@ def build_triage_dry_run_report(
 
 
 def triage_result_fingerprint(result: TriageResult) -> str:
+    return _sha256_json(triage_decision_payload(result))
+
+
+def triage_decision_key(result: TriageResult) -> str:
+    return _sha256_json(triage_decision_payload(result))
+
+
+def triage_decision_payload(result: TriageResult) -> dict[str, object]:
     payload = {
         "issue_type": result.issue_type,
-        "fields": result.fields,
+        "fields": {field: result.fields.get(field, "") for field in CORE_DUPLICATE_FIELDS},
         "assignee": result.assignee,
-        "comment_markdown": result.comment_markdown,
         "follow_up_questions": result.follow_up_questions,
     }
+    return payload
+
+
+def _sha256_json(payload: dict[str, object]) -> str:
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -213,18 +242,46 @@ def parse_triage_metadata(comment_body: str) -> dict[str, Any] | None:
     return data
 
 
-def _has_applied_triage_fingerprint(
+def _has_applied_triage_decision(
     *,
-    github: GitHubCliIssuesClient,
-    repo: str,
-    issue_number: int,
+    comments: tuple[GitHubIssueComment, ...],
     fingerprint: str,
+    decision_key: str,
+    result: TriageResult,
+    config: ProjectConfig,
+    existing_field_values: dict[str, str],
 ) -> bool:
-    for comment in github.list_issue_comments(repo=repo, issue_number=issue_number):
+    has_prior_triage = False
+    for comment in comments:
         metadata = parse_triage_metadata(comment.body)
         if metadata is not None and metadata.get("result_fingerprint") == fingerprint:
             return True
-    return False
+        if metadata is not None and metadata.get("decision_key") == decision_key:
+            return True
+        if metadata is not None and _triage_comment_matches_decision(comment.body, result):
+            return True
+        if metadata is not None:
+            has_prior_triage = True
+    if not has_prior_triage:
+        return False
+    return all(
+        existing_field_values.get(config.issue_field_names.get(field, field), "")
+        == result.fields.get(field, "")
+        for field in CORE_DUPLICATE_FIELDS
+    )
+
+
+def _triage_comment_matches_decision(comment_body: str, result: TriageResult) -> bool:
+    if result.fields.get("Triage status") == "Needs info":
+        return False
+    if "## Triage" not in comment_body:
+        return False
+    required_tokens = (
+        result.fields.get("Triage verdict", ""),
+        f"优先级 {result.fields.get('Priority', '')}",
+        f"@{result.assignee}",
+    )
+    return all(token and token in comment_body for token in required_tokens)
 
 
 def _send_lark_follow_up(
