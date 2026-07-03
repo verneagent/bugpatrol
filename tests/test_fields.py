@@ -18,6 +18,11 @@ class FieldsTest(unittest.TestCase):
         self.assertIn("Needs info", props["triage_status"]["enum"])
         self.assertIn("Lark @mention", props["owner_reason"]["enum"])
 
+    def test_triage_schema_is_strict_response_format_compatible(self) -> None:
+        props = TRIAGE_OUTPUT_SCHEMA["properties"]
+
+        self.assertEqual(set(TRIAGE_OUTPUT_SCHEMA["required"]), set(props))
+
     def test_validate_field_value(self) -> None:
         validate_field_value("Platform", "iOS")
         with self.assertRaisesRegex(ValueError, "invalid value"):
@@ -26,4 +31,3 @@ class FieldsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

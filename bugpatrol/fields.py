@@ -72,6 +72,8 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
         "triage_confidence",
         "assignee",
         "owner_reason",
+        "prd_refs",
+        "likely_locations",
         "summary_cn",
         "follow_up_questions",
         "comment_markdown",
