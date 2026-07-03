@@ -45,9 +45,11 @@ class IntakeTest(unittest.TestCase):
                 root_id="om_root",
                 message_id="om_msg",
                 original_text="删除最后一项后空状态没出现",
+                lark_topic_url="https://applink.larksuite.com/client/chat/open?openChatId=oc_123&messageId=om_root",
+                lark_message_url="https://applink.larksuite.com/client/chat/open?openChatId=oc_123&messageId=om_msg",
                 attachments=(
                     Attachment(
-                        kind="screenshot",
+                        kind="image",
                         url="https://assets.example/s1.png",
                         description="todo 空列表页面",
                     ),
@@ -59,8 +61,11 @@ class IntakeTest(unittest.TestCase):
         self.assertIn("## Lark 上报", body)
         self.assertIn("- 上报人: QA (ou_qa)", body)
         self.assertIn("- 创建时间: 2026-07-03 17:28:48 UTC (1783099728900)", body)
+        self.assertIn("- Lark 话题: [打开话题](https://applink.larksuite.com/client/chat/open?openChatId=oc_123&messageId=om_root) (`om_root`)", body)
+        self.assertIn("- 消息 ID: [打开消息](https://applink.larksuite.com/client/chat/open?openChatId=oc_123&messageId=om_msg) (`om_msg`)", body)
         self.assertIn("## 原始消息", body)
         self.assertIn("## 附件", body)
+        self.assertIn("![图片 1](https://assets.example/s1.png)", body)
         self.assertIn("生成描述: todo 空列表页面", body)
 
     def test_format_created_at_keeps_existing_readable_values(self) -> None:

@@ -140,7 +140,7 @@ class AttachmentIntakeLoopE2ETest(unittest.TestCase):
         self.assertEqual(len(github.created[0].comments), 1)
         self.assertEqual(lark.downloads, [("om_video", "file_v2_repro", "file")])
         self.assertIn(
-            "video: https://github.com/example-org/example-assets/raw/main/.github/issue-assets/om_video/repro.mp4",
+            "video: [打开附件](https://github.com/example-org/example-assets/raw/main/.github/issue-assets/om_video/repro.mp4)",
             github.created[0].comments[0],
         )
         self.assertIn("Video shows tapping Export", github.created[0].comments[0])
@@ -230,7 +230,11 @@ class AttachmentIntakeLoopE2ETest(unittest.TestCase):
         self.assertEqual(len(github.created[0].comments), 2)
         self.assertIn("补充：iOS 和 Android 都能复现。", github.created[0].comments[0])
         self.assertIn(
-            "image: https://github.com/example-org/example-assets/raw/main/.github/issue-assets/om_image_followup/bug.png",
+            "image: [打开附件](https://github.com/example-org/example-assets/raw/main/.github/issue-assets/om_image_followup/bug.png)",
+            github.created[0].comments[1],
+        )
+        self.assertIn(
+            "![图片 1](https://github.com/example-org/example-assets/raw/main/.github/issue-assets/om_image_followup/bug.png)",
             github.created[0].comments[1],
         )
         self.assertIn("Screenshot shows account switch call routing", github.created[0].comments[1])

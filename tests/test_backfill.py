@@ -134,11 +134,22 @@ class BackfillTest(unittest.TestCase):
         self.assertTrue(should_skip_message(message(msg_type="system"), bot_open_id="ou_bot"))
 
     def test_intake_record_from_lark_message_maps_topic_root(self) -> None:
-        record = intake_record_from_lark_message(message())
+        record = intake_record_from_lark_message(
+            message(),
+            message_url_template="https://applink.larksuite.com/client/chat/open?openChatId={chat_id}&messageId={message_id}",
+        )
 
         self.assertEqual(record.root_id, "om_root")
         self.assertEqual(record.message_id, "om_1")
         self.assertEqual(record.original_text, "Todo 删除最后一项后空状态没出现")
+        self.assertEqual(
+            record.lark_topic_url,
+            "https://applink.larksuite.com/client/chat/open?openChatId=oc_d371f022f168b567a141ced142691894&messageId=om_root",
+        )
+        self.assertEqual(
+            record.lark_message_url,
+            "https://applink.larksuite.com/client/chat/open?openChatId=oc_d371f022f168b567a141ced142691894&messageId=om_1",
+        )
 
     def test_intake_record_from_lark_app_message_uses_app_reporter(self) -> None:
         record = intake_record_from_lark_message(

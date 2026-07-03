@@ -10,7 +10,7 @@ from typing import Protocol
 from bugpatrol.clients import GitHubIssue, GitHubIssuesClient, LarkMessengerClient
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import NATIVE_ISSUE_TYPES, validate_field_value
-from bugpatrol.intake import Attachment, IntakeRecord, format_created_at, render_issue_body
+from bugpatrol.intake import Attachment, IntakeRecord, format_created_at, render_attachments_markdown, render_issue_body
 from bugpatrol.triage_queue import TriageSignal, classify_triage_signal
 
 INTAKE_REPLY_META_MARKER = "BUGPATROL_INTAKE_REPLY_META"
@@ -178,13 +178,7 @@ def infer_evidence(attachments: tuple[Attachment, ...], original_text: str) -> s
 
 def render_followup_comment(record: IntakeRecord, *, language: str = "en-US") -> str:
     copy = _followup_copy(language)
-    attachment_lines = []
-    for item in record.attachments:
-        line = f"- {item.kind}: {item.url}"
-        if item.description:
-            line += f"\n  - {copy['generated_description']}: {item.description}"
-        attachment_lines.append(line)
-    attachments = "\n".join(attachment_lines) if attachment_lines else f"- {copy['none']}"
+    attachments = render_attachments_markdown(record.attachments, copy=copy)
     meta = {
         "source": "lark",
         "schema_version": 1,
@@ -199,7 +193,8 @@ def render_followup_comment(record: IntakeRecord, *, language: str = "en-US") ->
             "",
             f"- {copy['reporter']}: {record.reporter_name} ({record.reporter_open_id})",
             f"- {copy['created_at']}: {format_created_at(record.created_at)}",
-            f"- {copy['message_id']}: {record.message_id}",
+            f"- {copy['lark_topic']}: {_link_or_id(label=copy['open_topic'], url=record.lark_topic_url, identifier=record.root_id)}",
+            f"- {copy['message_id']}: {_link_or_id(label=copy['open_message'], url=record.lark_message_url, identifier=record.message_id)}",
             "",
             f"## {copy['message']}",
             "",
@@ -221,10 +216,16 @@ def _followup_copy(language: str) -> dict[str, str]:
             "topic_update": "Lark 话题更新",
             "reporter": "上报人",
             "created_at": "创建时间",
+            "lark_topic": "Lark 话题",
             "message_id": "消息 ID",
             "message": "消息",
             "attachments": "附件",
             "generated_description": "生成描述",
+            "open_topic": "打开话题",
+            "open_message": "打开消息",
+            "open_asset": "打开附件",
+            "preview": "预览",
+            "image_alt": "图片",
             "none": "无",
             "empty": "（空）",
         }
@@ -232,10 +233,22 @@ def _followup_copy(language: str) -> dict[str, str]:
         "topic_update": "Lark Topic Update",
         "reporter": "Reporter",
         "created_at": "Created at",
+        "lark_topic": "Lark topic",
         "message_id": "Message id",
         "message": "Message",
         "attachments": "Attachments",
         "generated_description": "generated description",
+        "open_topic": "open topic",
+        "open_message": "open message",
+        "open_asset": "open asset",
+        "preview": "preview",
+        "image_alt": "image",
         "none": "none",
         "empty": "(empty)",
     }
+
+
+def _link_or_id(*, label: str, url: str, identifier: str) -> str:
+    if url:
+        return f"[{label}]({url}) (`{identifier}`)"
+    return identifier

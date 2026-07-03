@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment
 from bugpatrol.prd import PrdSearchHit, load_prd_documents, search_prd_documents
+
+
+MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\((?P<url>https?://[^)\s]+)\)")
 
 
 @dataclass(frozen=True)
@@ -120,8 +124,12 @@ def extract_media_evidence(markdown: str, *, source: str = "") -> tuple[MediaEvi
     for raw_line in markdown.splitlines():
         line = raw_line.strip()
         if line.startswith("- image:") or line.startswith("- video:"):
-            kind, url = line.removeprefix("- ").split(":", 1)
-            items.append(MediaEvidence(kind=kind.strip(), url=url.strip(), source=source))
+            kind, value = line.removeprefix("- ").split(":", 1)
+            url = extract_url(value.strip())
+            if not url:
+                current_index = None
+                continue
+            items.append(MediaEvidence(kind=kind.strip(), url=url, source=source))
             current_index = len(items) - 1
             continue
         if current_index is None:
@@ -136,3 +144,12 @@ def extract_media_evidence(markdown: str, *, source: str = "") -> tuple[MediaEvi
                 source=current.source,
             )
     return tuple(items)
+
+
+def extract_url(value: str) -> str:
+    markdown_link = MARKDOWN_LINK_RE.search(value)
+    if markdown_link:
+        return markdown_link.group("url")
+    if value.startswith("http://") or value.startswith("https://"):
+        return value.split()[0]
+    return ""

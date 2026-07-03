@@ -33,6 +33,7 @@ class IntakeRecord:
     message_id: str
     original_text: str
     lark_topic_url: str = ""
+    lark_message_url: str = ""
     attachments: tuple[Attachment, ...] = field(default_factory=tuple)
 
 
@@ -57,19 +58,14 @@ def intake_record_from_dict(data: dict[str, Any]) -> IntakeRecord:
         message_id=_required_str(data, "message_id"),
         original_text=str(data.get("original_text") or ""),
         lark_topic_url=str(data.get("lark_topic_url") or ""),
+        lark_message_url=str(data.get("lark_message_url") or ""),
         attachments=attachments,
     )
 
 
 def render_issue_body(record: IntakeRecord, *, language: str = "en-US") -> str:
     copy = _copy(language)
-    attachment_lines = []
-    for item in record.attachments:
-        line = f"- {item.kind}: {item.url}"
-        if item.description:
-            line += f"\n  - {copy['generated_description']}: {item.description}"
-        attachment_lines.append(line)
-    attachments = "\n".join(attachment_lines) if attachment_lines else f"- {copy['none']}"
+    attachments = render_attachments_markdown(record.attachments, copy=copy)
 
     meta = {
         "source": "lark",
@@ -87,8 +83,8 @@ def render_issue_body(record: IntakeRecord, *, language: str = "en-US") -> str:
             "",
             f"- {copy['reporter']}: {record.reporter_name} ({record.reporter_open_id})",
             f"- {copy['created_at']}: {format_created_at(record.created_at)}",
-            f"- {copy['lark_topic']}: {record.lark_topic_url or record.root_id}",
-            f"- {copy['message_id']}: {record.message_id}",
+            f"- {copy['lark_topic']}: {_link_or_id(label=copy['open_topic'], url=record.lark_topic_url, identifier=record.root_id)}",
+            f"- {copy['message_id']}: {_link_or_id(label=copy['open_message'], url=record.lark_message_url, identifier=record.message_id)}",
             "",
             f"## {copy['original_message']}",
             "",
@@ -164,6 +160,41 @@ def format_created_at(value: str) -> str:
     return f"{readable} ({value})"
 
 
+def render_attachments_markdown(attachments: tuple[Attachment, ...], *, copy: dict[str, str]) -> str:
+    if not attachments:
+        return f"- {copy['none']}"
+    lines: list[str] = []
+    for index, item in enumerate(attachments, start=1):
+        url = item.url
+        label = copy["open_asset"] if _is_url(url) else url
+        lines.append(f"- {item.kind}: {_markdown_link(label, url) if _is_url(url) else url}")
+        if _is_previewable_image(item):
+            lines.append(f"  - {copy['preview']}:")
+            lines.append("")
+            lines.append(f"    ![{copy['image_alt']} {index}]({url})")
+        if item.description:
+            lines.append(f"  - {copy['generated_description']}: {item.description}")
+    return "\n".join(lines)
+
+
+def _is_previewable_image(item: Attachment) -> bool:
+    return "image" in item.kind.lower() and _is_url(item.url)
+
+
+def _is_url(value: str) -> bool:
+    return value.startswith("https://") or value.startswith("http://")
+
+
+def _link_or_id(*, label: str, url: str, identifier: str) -> str:
+    if url:
+        return f"{_markdown_link(label, url)} (`{identifier}`)"
+    return identifier
+
+
+def _markdown_link(label: str, url: str) -> str:
+    return f"[{label}]({url})"
+
+
 def _copy(language: str) -> dict[str, str]:
     if language == "zh-CN":
         return {
@@ -175,6 +206,11 @@ def _copy(language: str) -> dict[str, str]:
             "original_message": "原始消息",
             "attachments": "附件",
             "generated_description": "生成描述",
+            "open_topic": "打开话题",
+            "open_message": "打开消息",
+            "open_asset": "打开附件",
+            "preview": "预览",
+            "image_alt": "图片",
             "none": "无",
             "empty": "（空）",
         }
@@ -187,6 +223,11 @@ def _copy(language: str) -> dict[str, str]:
         "original_message": "Original Message",
         "attachments": "Attachments",
         "generated_description": "generated description",
+        "open_topic": "open topic",
+        "open_message": "open message",
+        "open_asset": "open asset",
+        "preview": "preview",
+        "image_alt": "image",
         "none": "none",
         "empty": "(empty)",
     }

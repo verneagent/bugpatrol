@@ -5,6 +5,7 @@ chat_id = "oc_example"
 app_id = "cli_example"
 app_secret_env = "EXAMPLE_LARK_APP_SECRET"
 bot_open_id = "ou_example_bot"
+message_url_template = "https://applink.larksuite.com/client/chat/open?openChatId={chat_id}&messageId={message_id}"
 
 [lark.sender_names]
 cli_external_reporter = "External Reporter Bot"

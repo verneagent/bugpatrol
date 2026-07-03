@@ -40,7 +40,10 @@ class TriageContextTest(unittest.TestCase):
                     [
                         "## Attachments",
                         "",
-                        "- image: https://assets/screenshot.png",
+                        "- image: [打开附件](https://assets/screenshot.png)",
+                        "",
+                        "  ![图片 1](https://assets/screenshot.png)",
+                        "",
                         "  - 生成描述: Screenshot shows spinner stuck at 80%.",
                     ]
                 ),
@@ -54,7 +57,7 @@ class TriageContextTest(unittest.TestCase):
                             "",
                             "## 附件",
                             "",
-                            "- video: https://assets/repro.mp4",
+                            "- video: [打开附件](https://assets/repro.mp4)",
                             "  - 生成描述: Video shows export progress freezing after tapping Done.",
                         ]
                     ),
@@ -77,13 +80,15 @@ class TriageContextTest(unittest.TestCase):
                     "- image: https://assets/one.png",
                     "  - generated description: red error toast",
                     "- file: https://assets/log.txt",
-                    "- video: https://assets/repro.mp4",
+                    "- video: [打开附件](https://assets/repro.mp4)",
                 ]
             ),
             source="comment 1",
         )
 
         self.assertEqual(len(media), 2)
+        self.assertEqual(media[0].url, "https://assets/one.png")
+        self.assertEqual(media[1].url, "https://assets/repro.mp4")
         self.assertEqual(media[0].description, "red error toast")
         self.assertEqual(media[0].source, "comment 1")
 

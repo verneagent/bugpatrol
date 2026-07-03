@@ -14,6 +14,18 @@ Use `[lark.sender_names]` in project config to render human-readable reporter
 names for known Lark `app_id` or `open_id` values. BugPatrol keeps the raw ID
 visible next to the display name for auditability.
 
+Use `[lark].message_url_template` to render clickable Lark backlinks in GitHub
+issues and follow-up comments. Supported placeholders are `{chat_id}`,
+`{root_id}`, and `{message_id}`. A common Lark chat AppLink template is:
+
+```toml
+message_url_template = "https://applink.larksuite.com/client/chat/open?openChatId={chat_id}&messageId={message_id}"
+```
+
+If a Lark client ignores message-level parameters, the link should still open
+the configured chat; projects can replace the template when they have a stronger
+topic or message deeplink format.
+
 ## Principles
 
 - Intake records what the reporter said. It does not triage.
@@ -341,6 +353,12 @@ a configured asset repository. Optional redaction, video frame extraction,
 image resizing, byte limits, and video duration limits run before upload and
 vision. When a media description command is configured, resources are described
 before issue/comment rendering so triage can read the generated text.
+
+Issue and follow-up rendering keeps each media URL as a normal attachment link.
+HTTP(S) image attachments are also embedded with Markdown image syntax so GitHub
+shows an inline preview. Video and generic file attachments remain links, while
+triage still extracts image/video evidence from either the old bare URL format
+or the newer Markdown link format.
 
 Default media command:
 

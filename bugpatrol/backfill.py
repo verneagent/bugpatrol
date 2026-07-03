@@ -81,7 +81,11 @@ def run_lark_backfill(
                 )
             )
             continue
-        record = intake_record_from_lark_message(message, sender_names=config.lark.sender_names or {})
+        record = intake_record_from_lark_message(
+            message,
+            sender_names=config.lark.sender_names or {},
+            message_url_template=config.lark.message_url_template,
+        )
         if dry_run:
             skipped += 1
             events.append(
@@ -171,10 +175,21 @@ def _is_template_system_message(message: LarkMessage) -> bool:
     return "template" in content and "text" not in content
 
 
-def intake_record_from_lark_message(message: LarkMessage, *, sender_names: dict[str, str] | None = None) -> IntakeRecord:
+def intake_record_from_lark_message(
+    message: LarkMessage,
+    *,
+    sender_names: dict[str, str] | None = None,
+    message_url_template: str = "",
+) -> IntakeRecord:
     names = sender_names or {}
     reporter_id = message.sender_open_id or message.sender_id
     reporter_name = _reporter_name(message, sender_names=names)
+    topic_url = _message_url_from_template(message_url_template, message=message, target_message_id=message.root_id)
+    message_url = _message_url_from_template(
+        message_url_template,
+        message=message,
+        target_message_id=message.message_id,
+    )
     return IntakeRecord(
         reporter_name=reporter_name,
         reporter_open_id=reporter_id,
@@ -183,6 +198,8 @@ def intake_record_from_lark_message(message: LarkMessage, *, sender_names: dict[
         root_id=message.root_id,
         message_id=message.message_id,
         original_text=message.text,
+        lark_topic_url=topic_url,
+        lark_message_url=message_url,
         attachments=attachments_from_lark_message(message),
     )
 
@@ -201,6 +218,19 @@ def _reporter_name(message: LarkMessage, *, sender_names: dict[str, str]) -> str
     if message.sender_open_id:
         return sender_names.get(message.sender_open_id) or message.sender_open_id
     return "Lark user"
+
+
+def _message_url_from_template(template: str, *, message: LarkMessage, target_message_id: str) -> str:
+    if not template:
+        return ""
+    try:
+        return template.format(
+            chat_id=message.chat_id,
+            root_id=message.root_id,
+            message_id=target_message_id,
+        )
+    except KeyError as error:
+        raise ValueError(f"unknown lark.message_url_template placeholder: {error}") from error
 
 
 def attachments_from_lark_message(message: LarkMessage) -> tuple[Attachment, ...]:

@@ -15,6 +15,10 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.github_repo, "example-org/example-app")
         self.assertEqual(config.intake.language, "zh-CN")
         self.assertEqual(
+            config.lark.message_url_template,
+            "https://applink.larksuite.com/client/chat/open?openChatId={chat_id}&messageId={message_id}",
+        )
+        self.assertEqual(
             config.lark.sender_names,
             {
                 "cli_external_reporter": "External Reporter Bot",

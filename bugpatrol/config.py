@@ -18,6 +18,7 @@ class LarkConfig:
     app_secret_env: str
     bot_open_id: str
     sender_names: dict[str, str] | None = None
+    message_url_template: str = ""
 
 
 @dataclass(frozen=True)
@@ -178,6 +179,7 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             app_secret_env=_required_str(lark, "app_secret_env"),
             bot_open_id=_required_str(lark, "bot_open_id"),
             sender_names=dict(sender_names),
+            message_url_template=str(lark.get("message_url_template") or ""),
         ),
         triage_agent=TriageAgentConfig(
             runner_labels=tuple(_required_list(triage_agent, "runner_labels")),

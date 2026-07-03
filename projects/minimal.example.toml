@@ -5,6 +5,8 @@ chat_id = "oc_example"
 app_id = "cli_example"
 app_secret_env = "EXAMPLE_LARK_APP_SECRET"
 bot_open_id = "ou_example_bot"
+# Optional. Supports {chat_id}, {root_id}, and {message_id}.
+# message_url_template = "https://applink.larksuite.com/client/chat/open?openChatId={chat_id}&messageId={message_id}"
 
 [triage_agent]
 provider = "codex"
