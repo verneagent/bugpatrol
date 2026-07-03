@@ -49,6 +49,3 @@ media, and fix-notification slices.
 
 - Keep `README.md` project-neutral.
 - Keep project-specific rollout notes outside this repo.
-- Add a runner setup guide.
-- Add a daemon setup guide for `watch-lark`.
-- Add an operations guide for replay/backfill/rollback.

@@ -240,6 +240,12 @@ It uses an OpenAI-compatible multimodal API configured by:
 
 ## Development
 
+Operational guides:
+
+- `docs/RUNNER.md`
+- `docs/DAEMON.md`
+- `docs/OPERATIONS.md`
+
 ```bash
 python -m unittest discover -s tests
 python -m unittest discover -s tests/e2e
