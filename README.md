@@ -20,26 +20,24 @@ plans, credentials, group IDs, and rollout notes should not live in this repo.
 
 ## Architecture
 
-```text
-                 long-running daemon
-Lark group ─────────── watcher ───────────┐
-                                           │
-                                           ▼
-                                 GitHub issue/comment
-                                           │
-                                           │ one-shot job
-                                           ▼
-                                  triage runner
-                                           │
-                                           ▼
-                           Issue Type + Issue Fields
-                           assignee + triage comment
-                                           │
-       one-shot job                         │
-PR/commit/issue event ─── notify runner ───┘
-                                           │
-                                           ▼
-                                   Lark notification
+```mermaid
+flowchart LR
+  lark[Lark group]
+  watcher[watcher daemon]
+  issue[GitHub issue/comment]
+  triage[triage runner]
+  fields[Issue Type + Issue Fields<br/>assignee + triage comment]
+  event[PR / commit / issue event]
+  notify[notify runner]
+  lark_notice[Lark notification]
+
+  lark --> watcher
+  watcher --> issue
+  issue --> triage
+  triage --> fields
+  event --> notify
+  fields --> notify
+  notify --> lark_notice
 ```
 
 ## Workflows
@@ -135,23 +133,20 @@ has already completed, or while a triage run was in progress.
 
 ### State flow
 
-```text
-Lark intake
-  └─ creates issue
-       └─ Pending
-            ├─ triage starts ────────────────┐
-            │                                 ▼
-            │                              Running
-            │                                 │
-            │          ┌──────────────────────┼──────────────────────┐
-            │          ▼                      ▼                      ▼
-            │       Done                 Needs info                Failed
-            │          │                      │
-            │          │ material follow-up   │ reporter follow-up
-            │          ▼                      ▼
-            │   Needs review (planned)      Pending
-            │
-            └─ skipped by policy ─────────► Skipped
+```mermaid
+stateDiagram-v2
+  [*] --> Pending: Lark intake creates issue
+  Pending --> Running: triage starts
+  Running --> Done
+  Running --> NeedsInfo: needs reporter info
+  Running --> Failed
+  Pending --> Skipped: skipped by policy
+  Done --> NeedsReview: material follow-up
+  Skipped --> NeedsReview: material follow-up
+  NeedsInfo --> Pending: reporter follow-up
+
+  state "Needs info" as NeedsInfo
+  state "Needs review (planned)" as NeedsReview
 ```
 
 Follow-up Lark messages always append to the existing GitHub issue when the
