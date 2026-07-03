@@ -34,15 +34,21 @@ flowchart LR
   fields[Issue Type + Issue Fields<br/>assignee + triage comment]
   event[PR / commit / issue event]
   notify[notify runner]
+  reconcile[scheduled reconcile scanner]
   lark_notice[Lark notification]
 
   lark --> watcher
   watcher --> issue
+  watcher --> triage
   issue --> triage
   triage --> fields
   event --> notify
   fields --> notify
   notify --> lark_notice
+  issue --> reconcile
+  event --> reconcile
+  reconcile --> triage
+  reconcile --> notify
 ```
 
 ## Workflows
@@ -145,6 +151,41 @@ python -m bugpatrol reconcile-fix-notifications projects/example.toml \
 See `examples/github-actions/bugpatrol-notify-fix.yml` for a workflow template
 covering PR opened, PR merged, issue closed, and manual notification runs.
 
+### reconcile
+
+`reconcile` is a scheduled scanner. It is not the primary worker for Lark
+intake, triage, or notification. It periodically reads durable GitHub state and
+replays work that should have happened while a runner, webhook, workflow, or
+event dispatch path was down.
+
+Recommended runtime:
+
+```yaml
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+```
+
+Triage reconcile scans BugPatrol-managed issues, then dispatches
+`bugpatrol-triage.yml` for issues that still need triage:
+
+- has `BUGPATROL_INTAKE_META`
+- `Triage status` is `Pending` or `Needs review`
+- or `Triage status` is `Running` but the active run is stale
+- was not updated inside the coalescing quiet window
+
+Notify reconcile scans recent PRs, commits, issue timelines, and closed issues,
+then dispatches `bugpatrol-notify-fix.yml` or calls `notify-fix` for fix events
+that have not been announced yet:
+
+- target issue has `BUGPATROL_INTAKE_META`
+- candidate event is `pr_opened`, `pr_merged`, `commit_linked`, or `issue_fixed`
+- issue does not already contain the matching `BUGPATROL_FIX_META` key
+
+Reconcile must be idempotent. It should be safe to run every few minutes and
+safe to rerun manually after an outage.
+
 ## Runner vs Daemon
 
 | Workflow | Form | Recommended runtime | Multiplicity |
@@ -152,10 +193,19 @@ covering PR opened, PR merged, issue closed, and manual notification runs.
 | watcher | daemon | systemd, launchd, tmux, or existing service host | one active writer per Lark group |
 | triage | one-shot job | GitHub Actions self-hosted runner | multiple runners are OK |
 | notify | one-shot job | GitHub Actions hosted or self-hosted runner | multiple runners are OK |
+| reconcile | scheduled scanner | GitHub Actions scheduled workflow | one logical scanner per project is enough; reruns must be idempotent |
 
 GitHub Actions self-hosted runners can be multiple. GitHub assigns each job to
 one matching runner. The thing that must not be duplicated is the active Lark
 watcher writer for the same group.
+
+The four project entry points are:
+
+- `watcher` daemon: Lark messages to GitHub issues/comments.
+- `bugpatrol-triage.yml`: one issue to triage result.
+- `bugpatrol-notify-fix.yml`: one fix event to Lark notification.
+- `bugpatrol-reconcile.yml`: scheduled GitHub scan that backfills missed triage
+  and notification work.
 
 ## Issue State
 
