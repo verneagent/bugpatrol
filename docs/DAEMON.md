@@ -36,6 +36,12 @@ lark-cli event listen --format ndjson \
       --triage-queue .bugpatrol/triage-queue.json
 ```
 
+Heartbeat payloads such as `{"type":"heartbeat"}` or `{"header":{"event_type":"ping"}}`
+are ignored by `watch-lark-events`. In-process WebSocket adapters should wrap
+their subscription with `iter_reconnecting_event_payloads` so transient socket
+closures reconnect with exponential backoff before handing NDJSON lines to the
+watcher.
+
 Keep polling mode available as a fallback.
 
 ## State Files

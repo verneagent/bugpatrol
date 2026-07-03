@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 from bugpatrol.backfill import (
     BackfillEvent,
@@ -38,6 +40,14 @@ from bugpatrol.watcher import (
 )
 
 
+@dataclass(frozen=True)
+class ReconnectPolicy:
+    initial_delay_seconds: float = 1.0
+    max_delay_seconds: float = 60.0
+    multiplier: float = 2.0
+    max_attempts: int = 0
+
+
 def iter_json_event_lines(lines: Iterable[str]) -> Iterable[dict[str, object]]:
     for line in lines:
         text = line.strip()
@@ -46,7 +56,36 @@ def iter_json_event_lines(lines: Iterable[str]) -> Iterable[dict[str, object]]:
         data = json.loads(text)
         if not isinstance(data, dict):
             raise ValueError("event line must be a JSON object")
+        if is_heartbeat_payload(data):
+            continue
         yield data
+
+
+def is_heartbeat_payload(payload: dict[str, object]) -> bool:
+    event_type = _payload_type(payload)
+    return event_type in {"heartbeat", "ping", "pong"}
+
+
+def iter_reconnecting_event_payloads(
+    *,
+    connect: Callable[[], Iterable[str]],
+    policy: ReconnectPolicy = ReconnectPolicy(),
+    sleep: Callable[[float], None] = time.sleep,
+    retriable_exceptions: tuple[type[BaseException], ...] = (ConnectionError, TimeoutError, OSError),
+) -> Iterable[dict[str, object]]:
+    attempt = 0
+    delay = max(0.0, policy.initial_delay_seconds)
+    max_delay = max(delay, policy.max_delay_seconds)
+    while True:
+        try:
+            yield from iter_json_event_lines(connect())
+            return
+        except retriable_exceptions:
+            attempt += 1
+            if policy.max_attempts > 0 and attempt >= policy.max_attempts:
+                raise
+            sleep(delay)
+            delay = min(max_delay, delay * max(1.0, policy.multiplier))
 
 
 def run_lark_event_watcher(
@@ -181,3 +220,14 @@ def run_lark_event_watcher(
                 status_reader=triage_status_reader,
             )
     return result
+
+
+def _payload_type(payload: dict[str, object]) -> str:
+    value = payload.get("type")
+    if not isinstance(value, str):
+        header = payload.get("header")
+        if isinstance(header, dict):
+            value = header.get("event_type")
+    if not isinstance(value, str):
+        value = payload.get("event_type")
+    return value.strip().lower() if isinstance(value, str) else ""

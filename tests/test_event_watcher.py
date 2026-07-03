@@ -6,7 +6,13 @@ import unittest
 from pathlib import Path
 
 from bugpatrol.config import load_project_config
-from bugpatrol.event_watcher import iter_json_event_lines, run_lark_event_watcher
+from bugpatrol.event_watcher import (
+    ReconnectPolicy,
+    is_heartbeat_payload,
+    iter_json_event_lines,
+    iter_reconnecting_event_payloads,
+    run_lark_event_watcher,
+)
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.testing.fakes import FakeGitHubIssuesClient, FakeLarkMessengerClient
 from bugpatrol.triage_queue import TriageRequest, TriageRequestQueue
@@ -36,6 +42,55 @@ class EventWatcherTest(unittest.TestCase):
         events = list(iter_json_event_lines(["\n", json.dumps({"event": {}}), "  "]))
 
         self.assertEqual(events, [{"event": {}}])
+
+    def test_iter_json_event_lines_skips_heartbeats(self) -> None:
+        events = list(
+            iter_json_event_lines(
+                [
+                    json.dumps({"type": "heartbeat"}),
+                    json.dumps({"header": {"event_type": "ping"}}),
+                    json.dumps({"event": {"message": {}}}),
+                ]
+            )
+        )
+
+        self.assertEqual(events, [{"event": {"message": {}}}])
+        self.assertTrue(is_heartbeat_payload({"event_type": "pong"}))
+
+    def test_iter_reconnecting_event_payloads_retries_with_backoff(self) -> None:
+        calls = 0
+        sleeps: list[float] = []
+
+        def connect():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ConnectionError("socket closed")
+            return [json.dumps({"event": {"ok": True}})]
+
+        events = list(
+            iter_reconnecting_event_payloads(
+                connect=connect,
+                policy=ReconnectPolicy(initial_delay_seconds=1, max_delay_seconds=5, multiplier=2),
+                sleep=sleeps.append,
+            )
+        )
+
+        self.assertEqual(events, [{"event": {"ok": True}}])
+        self.assertEqual(sleeps, [1])
+
+    def test_iter_reconnecting_event_payloads_respects_max_attempts(self) -> None:
+        def connect():
+            raise ConnectionError("socket closed")
+
+        with self.assertRaisesRegex(ConnectionError, "socket closed"):
+            list(
+                iter_reconnecting_event_payloads(
+                    connect=connect,
+                    policy=ReconnectPolicy(initial_delay_seconds=1, max_attempts=2),
+                    sleep=lambda delay: None,
+                )
+            )
 
     def test_run_lark_event_watcher_processes_event_payloads(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
