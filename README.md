@@ -127,6 +127,14 @@ python -m bugpatrol notify-fix projects/example.toml \
 This can run on GitHub-hosted or self-hosted runners, depending on where the
 required GitHub and Lark credentials are available.
 
+Scheduled reconcile jobs can replay missed events from a JSON array:
+
+```bash
+python -m bugpatrol reconcile-fix-notifications projects/example.toml \
+  --input .bugpatrol/fix-events.json \
+  --write
+```
+
 See `examples/github-actions/bugpatrol-notify-fix.yml` for a workflow template
 covering PR opened, PR merged, issue closed, and manual notification runs.
 

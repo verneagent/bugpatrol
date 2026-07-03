@@ -6,11 +6,15 @@ from pathlib import Path
 from bugpatrol.config import load_project_config
 from bugpatrol.clients import GitHubPullRequest
 from bugpatrol.fix_notify import (
+    FixEventCandidate,
     apply_fix_notification,
     associated_issue_numbers_from_pr,
+    fix_event_candidates_from_json,
     fix_notification_key,
+    issue_numbers_from_timeline_events,
     notified_fix_keys,
     parse_fix_metadata,
+    reconcile_fix_notifications,
     render_fix_metadata_comment,
     resolve_single_issue_from_pr,
 )
@@ -46,9 +50,20 @@ class FixNotifyTest(unittest.TestCase):
             title="Fix #3",
             body="Closes #2\nRefs o/r#4\nHex abc#123 is not a repo ref.",
             closing_issue_numbers=(1, 2),
+            timeline_issue_numbers=(5,),
         )
 
-        self.assertEqual(associated_issue_numbers_from_pr(pr), (1, 2, 3, 4))
+        self.assertEqual(associated_issue_numbers_from_pr(pr), (1, 2, 3, 4, 5))
+
+    def test_issue_numbers_from_timeline_events_reads_source_subject_and_issue(self) -> None:
+        events = [
+            {"event": "cross-referenced", "source": {"type": "issue", "issue": {"number": 2}}},
+            {"event": "connected", "subject": {"type": "issue", "number": 3}},
+            {"event": "referenced", "issue": {"number": 4}},
+            {"event": "self", "issue": {"number": 9}},
+        ]
+
+        self.assertEqual(issue_numbers_from_timeline_events(events, exclude=(9,)), (2, 3, 4))
 
     def test_resolve_single_issue_from_pr_requires_exactly_one_issue(self) -> None:
         self.assertEqual(
@@ -117,6 +132,86 @@ class FixNotifyTest(unittest.TestCase):
         self.assertIn("修复 PR 已合并", lark.replies[1].text)
         self.assertEqual(len(github.created[0].comments), 1)
         self.assertEqual(notified_fix_keys(github.list_issue_comments(repo=config.github_repo, issue_number=1)), {first.key})
+
+    def test_reconcile_fix_notifications_dedupes_multiple_workflow_reruns(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        issue = workflow.process(
+            IntakeRecord(
+                reporter_name="Reporter",
+                reporter_open_id="ou_1",
+                created_at="2026-07-01T00:00:00Z",
+                chat_id=config.lark.chat_id,
+                root_id="om_root",
+                message_id="om_1",
+                original_text="bug",
+            )
+        ).issue
+
+        result = reconcile_fix_notifications(
+            repo=config.github_repo,
+            candidates=(
+                FixEventCandidate(event="pr_opened", issue_number=issue.number, pr="123"),
+                FixEventCandidate(event="pr_opened", issue_number=issue.number, pr="123"),
+                FixEventCandidate(event="pr_opened", issue_number=issue.number, pr="123"),
+            ),
+            dry_run=False,
+            github=github,  # type: ignore[arg-type]
+            lark=lark,
+        )
+
+        self.assertEqual(result.attempted, 3)
+        self.assertEqual(result.sent, 1)
+        self.assertEqual(result.duplicate_skipped, 2)
+        self.assertEqual(len(lark.replies), 2)
+        self.assertEqual(len(github.created[0].comments), 1)
+
+    def test_reconcile_fix_notifications_resolves_issue_from_pr_timeline(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        issue = workflow.process(
+            IntakeRecord(
+                reporter_name="Reporter",
+                reporter_open_id="ou_1",
+                created_at="2026-07-01T00:00:00Z",
+                chat_id=config.lark.chat_id,
+                root_id="om_root",
+                message_id="om_1",
+                original_text="bug",
+            )
+        ).issue
+        github.get_pull_request = lambda repo, pr: GitHubPullRequest(  # type: ignore[method-assign]
+            number=int(pr),
+            url=f"https://github.test/{repo}/pull/{pr}",
+            title="Fix",
+            body="",
+            timeline_issue_numbers=(issue.number,),
+        )
+
+        result = reconcile_fix_notifications(
+            repo=config.github_repo,
+            candidates=(FixEventCandidate(event="pr_merged", pr="123"),),
+            dry_run=False,
+            github=github,  # type: ignore[arg-type]
+            lark=lark,
+        )
+
+        self.assertEqual(result.sent, 1)
+        self.assertEqual(result.errors, ())
+
+    def test_fix_event_candidates_from_json_accepts_issue_alias(self) -> None:
+        candidates = fix_event_candidates_from_json(
+            [{"event": "commit_linked", "issue": "7", "commit": "abc"}]
+        )
+
+        self.assertEqual(
+            candidates,
+            (FixEventCandidate(event="commit_linked", issue_number=7, commit="abc"),),
+        )
 
     def test_notify_fix_dry_run_does_not_send_or_write(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

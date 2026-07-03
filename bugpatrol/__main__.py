@@ -15,7 +15,13 @@ from bugpatrol.config import load_project_config
 from bugpatrol.doctor import run_doctor
 from bugpatrol.event_watcher import iter_json_event_lines, run_lark_event_watcher
 from bugpatrol.fields import TRIAGE_OUTPUT_SCHEMA, default_field_specs
-from bugpatrol.fix_notify import FIX_EVENTS, apply_fix_notification, resolve_single_issue_from_pr
+from bugpatrol.fix_notify import (
+    FIX_EVENTS,
+    apply_fix_notification,
+    fix_event_candidates_from_json,
+    reconcile_fix_notifications,
+    resolve_single_issue_from_pr,
+)
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake_workflow import IntakeWorkflow
@@ -225,6 +231,11 @@ def main(argv: list[str] | None = None) -> int:
     notify_fix.add_argument("--pr", default="")
     notify_fix.add_argument("--commit", default="")
     notify_fix.add_argument("--write", action="store_true", help="send Lark notification and write metadata")
+
+    reconcile_fix = sub.add_parser("reconcile-fix-notifications", help="replay missed fix notification events")
+    reconcile_fix.add_argument("project_config", type=Path)
+    reconcile_fix.add_argument("--input", type=Path, required=True, help="JSON array of fix notification events")
+    reconcile_fix.add_argument("--write", action="store_true", help="send Lark notifications and write metadata")
 
     cleanup_assets = sub.add_parser("cleanup-assets", help="dry-run or delete materialized asset repo files")
     cleanup_assets.add_argument("project_config", type=Path)
@@ -639,6 +650,38 @@ def main(argv: list[str] | None = None) -> int:
             lark=lark,
         )
         print(json.dumps(summary.__dict__, ensure_ascii=False))
+        return 0
+
+    if args.command == "reconcile-fix-notifications":
+        config = load_project_config(args.project_config)
+        candidates = fix_event_candidates_from_json(json.loads(args.input.read_text()))
+        lark = None
+        if args.write:
+            app_secret = os.environ.get(config.lark.app_secret_env)
+            if not app_secret:
+                print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
+                return 2
+            lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
+        result = reconcile_fix_notifications(
+            repo=config.github_repo,
+            candidates=candidates,
+            github=GitHubCliIssuesClient(),
+            lark=lark,
+            dry_run=not args.write,
+        )
+        print(
+            json.dumps(
+                {
+                    "attempted": result.attempted,
+                    "sent": result.sent,
+                    "duplicate_skipped": result.duplicate_skipped,
+                    "skipped": result.skipped,
+                    "summaries": [summary.__dict__ for summary in result.summaries],
+                    "errors": result.errors,
+                },
+                ensure_ascii=False,
+            )
+        )
         return 0
 
     if args.command == "cleanup-assets":

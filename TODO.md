@@ -7,12 +7,6 @@ media, and fix-notification slices.
 
 - Add reconnect/backoff and heartbeat handling for WebSocket mode.
 
-## Fix Notifications
-
-- Add scheduled reconcile for missed PR/commit events.
-- Add timeline-event based issue association, not only PR body/title parsing.
-- Add duplicate notification tests for multiple workflow reruns.
-
 ## Configuration And Doctor
 
 - Extend `doctor` to validate:

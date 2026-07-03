@@ -41,6 +41,24 @@ class FixNotificationSummary:
     metadata_written: bool
 
 
+@dataclass(frozen=True)
+class FixEventCandidate:
+    event: str
+    issue_number: int | None = None
+    pr: str = ""
+    commit: str = ""
+
+
+@dataclass(frozen=True)
+class FixReconcileResult:
+    attempted: int
+    sent: int
+    duplicate_skipped: int
+    skipped: int
+    summaries: tuple[FixNotificationSummary, ...]
+    errors: tuple[str, ...]
+
+
 def build_fix_notification(
     *,
     repo: str,
@@ -208,6 +226,7 @@ def notified_fix_keys(comments: tuple[GitHubIssueComment, ...]) -> set[str]:
 
 def associated_issue_numbers_from_pr(pr: GitHubPullRequest) -> tuple[int, ...]:
     numbers = set(pr.closing_issue_numbers)
+    numbers.update(pr.timeline_issue_numbers)
     for text in (pr.title, pr.body):
         numbers.update(int(match.group(1)) for match in ISSUE_REF_RE.finditer(text or ""))
     return tuple(sorted(numbers))
@@ -220,6 +239,106 @@ def resolve_single_issue_from_pr(pr: GitHubPullRequest) -> int:
             f"PR #{pr.number} must reference exactly one issue for automatic notification; found {list(numbers)}"
         )
     return numbers[0]
+
+
+def issue_numbers_from_timeline_events(events: tuple[dict[str, Any], ...] | list[object], *, exclude: tuple[int, ...] = ()) -> tuple[int, ...]:
+    excluded = set(exclude)
+    numbers: set[int] = set()
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        numbers.update(_issue_numbers_from_timeline_event(event))
+    return tuple(sorted(number for number in numbers if number not in excluded))
+
+
+def reconcile_fix_notifications(
+    *,
+    repo: str,
+    candidates: tuple[FixEventCandidate, ...],
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient | None = None,
+    dry_run: bool = True,
+) -> FixReconcileResult:
+    summaries: list[FixNotificationSummary] = []
+    errors: list[str] = []
+    skipped = 0
+    for candidate in candidates:
+        issue_number = candidate.issue_number
+        if issue_number is None:
+            if candidate.event not in ("pr_opened", "pr_merged") or not candidate.pr:
+                skipped += 1
+                errors.append(f"{candidate.event}: missing issue_number")
+                continue
+            try:
+                issue_number = resolve_single_issue_from_pr(
+                    github.get_pull_request(repo=repo, pr=candidate.pr)
+                )
+            except ValueError as error:
+                skipped += 1
+                errors.append(str(error))
+                continue
+        summary = apply_fix_notification(
+            repo=repo,
+            issue_number=issue_number,
+            event=candidate.event,
+            pr=candidate.pr,
+            commit=candidate.commit,
+            github=github,
+            lark=lark,
+            dry_run=dry_run,
+        )
+        summaries.append(summary)
+    return FixReconcileResult(
+        attempted=len(candidates),
+        sent=sum(1 for summary in summaries if summary.lark_sent),
+        duplicate_skipped=sum(1 for summary in summaries if summary.duplicate_skipped),
+        skipped=skipped,
+        summaries=tuple(summaries),
+        errors=tuple(errors),
+    )
+
+
+def fix_event_candidates_from_json(data: object) -> tuple[FixEventCandidate, ...]:
+    if not isinstance(data, list):
+        raise ValueError("fix reconcile input must be a JSON array")
+    candidates: list[FixEventCandidate] = []
+    for item in data:
+        if not isinstance(item, dict):
+            raise ValueError("fix reconcile item must be an object")
+        event = item.get("event")
+        if not isinstance(event, str):
+            raise ValueError("fix reconcile item missing event")
+        raw_issue = item.get("issue") if "issue" in item else item.get("issue_number")
+        issue_number = int(raw_issue) if isinstance(raw_issue, (int, str)) and str(raw_issue).strip() else None
+        candidates.append(
+            FixEventCandidate(
+                event=event,
+                issue_number=issue_number,
+                pr=_optional_str(item.get("pr")),
+                commit=_optional_str(item.get("commit")),
+            )
+        )
+    return tuple(candidates)
+
+
+def _issue_numbers_from_timeline_event(event: dict[str, Any]) -> set[int]:
+    numbers: set[int] = set()
+    source = event.get("source")
+    if isinstance(source, dict) and source.get("type") == "issue":
+        issue = source.get("issue")
+        if isinstance(issue, dict) and isinstance(issue.get("number"), int):
+            numbers.add(int(issue["number"]))
+    subject = event.get("subject")
+    if isinstance(subject, dict) and subject.get("type") == "issue" and isinstance(subject.get("number"), int):
+        numbers.add(int(subject["number"]))
+    issue = event.get("issue")
+    if isinstance(issue, dict) and isinstance(issue.get("number"), int):
+        numbers.add(int(issue["number"]))
+    return numbers
+
+
+def _optional_str(value: object) -> str:
+    return value if isinstance(value, str) else ""
 
 
 def _normalize_pr(pr: str) -> str:

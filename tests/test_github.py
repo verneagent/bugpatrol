@@ -126,28 +126,38 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
         client = GitHubCliIssuesClient()
 
         with patch("subprocess.run") as run:
-            run.return_value = subprocess.CompletedProcess(
-                ["gh"],
-                0,
-                json.dumps(
-                    {
-                        "number": 7,
-                        "url": "https://github.com/o/r/pull/7",
-                        "title": "Fix thing",
-                        "body": "Closes #2",
-                        "closingIssuesReferences": [{"number": 2}],
-                    }
+            run.side_effect = (
+                subprocess.CompletedProcess(
+                    ["gh"],
+                    0,
+                    json.dumps(
+                        {
+                            "number": 7,
+                            "url": "https://github.com/o/r/pull/7",
+                            "title": "Fix thing",
+                            "body": "Closes #2",
+                            "closingIssuesReferences": [{"number": 2}],
+                        }
+                    ),
+                    "",
                 ),
-                "",
+                subprocess.CompletedProcess(
+                    ["gh"],
+                    0,
+                    json.dumps([{"event": "connected", "subject": {"type": "issue", "number": 3}}]),
+                    "",
+                ),
             )
             pr = client.get_pull_request(repo="o/r", pr="7")
 
         self.assertEqual(pr.number, 7)
         self.assertEqual(pr.closing_issue_numbers, (2,))
-        self.assertIn("pr", run.call_args.args[0])
+        self.assertEqual(pr.timeline_issue_numbers, (3,))
+        self.assertIn("pr", run.call_args_list[0].args[0])
         self.assertTrue(
-            any("closingIssuesReferences" in arg for arg in run.call_args.args[0])
+            any("closingIssuesReferences" in arg for arg in run.call_args_list[0].args[0])
         )
+        self.assertIn("/repos/o/r/issues/7/timeline", run.call_args_list[1].args[0])
 
     def test_raises_on_gh_failure(self) -> None:
         client = GitHubCliIssuesClient()

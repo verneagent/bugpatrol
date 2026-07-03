@@ -192,7 +192,29 @@ class GitHubCliIssuesClient:
             title=str(data.get("title") or ""),
             body=str(data.get("body") or ""),
             closing_issue_numbers=tuple(closing_numbers),
+            timeline_issue_numbers=self._timeline_issue_numbers_for_pr(repo=repo, pr_number=int(data["number"])),
         )
+
+    def _timeline_issue_numbers_for_pr(self, *, repo: str, pr_number: int) -> tuple[int, ...]:
+        try:
+            result = self._run(
+                [
+                    "api",
+                    "-H",
+                    f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                    "-H",
+                    "Accept: application/vnd.github+json",
+                    f"/repos/{repo}/issues/{pr_number}/timeline",
+                ]
+            )
+        except GitHubCliError:
+            return ()
+        data = json.loads(result.stdout)
+        if not isinstance(data, list):
+            return ()
+        from bugpatrol.fix_notify import issue_numbers_from_timeline_events
+
+        return issue_numbers_from_timeline_events(data, exclude=(pr_number,))
 
     def list_issue_types(self, *, repo: str) -> tuple[str, ...]:
         result = self._run(
