@@ -39,7 +39,7 @@ class FakeLarkHistory(FakeLarkMessengerClient):
 
 class FakeAssetStore:
     def write(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> str:
-        return f"https://github.com/TheCloverLab/fived-assets/raw/main/.github/issue-assets/{ref.message_id}/{resource.filename}"
+        return f"https://github.com/example-org/example-assets/raw/main/.github/issue-assets/{ref.message_id}/{resource.filename}"
 
 
 class FakeDescriber:
@@ -119,7 +119,7 @@ class AttachmentIntakeLoopE2ETest(unittest.TestCase):
         self.assertEqual(len(github.created[0].comments), 1)
         self.assertEqual(lark.downloads, [("om_video", "file_v2_repro", "file")])
         self.assertIn(
-            "video: https://github.com/TheCloverLab/fived-assets/raw/main/.github/issue-assets/om_video/repro.mp4",
+            "video: https://github.com/example-org/example-assets/raw/main/.github/issue-assets/om_video/repro.mp4",
             github.created[0].comments[0],
         )
         self.assertIn("Video shows tapping Export", github.created[0].comments[0])

@@ -20,11 +20,11 @@ cache_path = "docs/prd"
 language = "zh-CN"
 
 [assets]
-github_repo = "TheCloverLab/fived-assets"
-checkout_path = "~/clover/fived-assets"
+github_repo = "TheCloverLab/bugpatrol-todo-sandbox-assets"
+checkout_path = "~/clover/bugpatrol-todo-sandbox-assets"
 base_path = ".github/issue-assets"
 branch = "main"
-remote_url = "https://github.com/TheCloverLab/fived-assets.git"
+remote_url = "https://github.com/TheCloverLab/bugpatrol-todo-sandbox-assets.git"
 
 [media]
 description_command = [

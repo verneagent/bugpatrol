@@ -9,7 +9,7 @@ from bugpatrol.config import load_project_config, parse_project_config
 
 class AgentsTest(unittest.TestCase):
     def test_builds_subscription_friendly_codex_exec_command(self) -> None:
-        config = load_project_config(Path("projects/fived.toml"))
+        config = load_project_config(Path("projects/example.toml"))
         invocation = build_triage_agent_invocation(
             config,
             issue_number=123,
@@ -27,7 +27,7 @@ class AgentsTest(unittest.TestCase):
         self.assertIn("triage-context.md", invocation.command[-1])
 
     def test_supports_claude_provider_boundary(self) -> None:
-        config = load_project_config(Path("projects/fived.toml"))
+        config = load_project_config(Path("projects/example.toml"))
         claude_config = parse_project_config(
             {
                 "github_repo": config.github_repo,

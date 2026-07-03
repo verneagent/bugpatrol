@@ -1,34 +1,31 @@
-github_repo = "TheCloverLab/fived"
+github_repo = "example-org/example-app"
 
 [lark]
-chat_id = "oc_91575ce4fdfa88ae0e110f04f61bc53a"
-app_id = "cli_a9518095a9b8ded3"
-app_secret_env = "FIVED_LARK_BUG_APP_SECRET"
-bot_open_id = "ou_649aebe71fec53e3c0cafc10fd20ea76"
+chat_id = "oc_example"
+app_id = "cli_example"
+app_secret_env = "EXAMPLE_LARK_APP_SECRET"
+bot_open_id = "ou_example_bot"
 
 [triage_agent]
 provider = "codex"
-runner_labels = ["self-hosted", "fived-triage"]
+runner_labels = ["self-hosted", "bugpatrol-example-triage"]
 model = ""
 effort = ""
 
 [prd]
-root_wiki_node = "U4wvw2k0SildCUkdClOlAXWFgde"
-cache_path = "openspec"
-include_globs = [
-  "specs/**/spec.md",
-  "changes/**/prd-snapshot.md",
-]
+root_wiki_node = "LOCAL_PRD_DOCS"
+cache_path = "docs/prd"
+include_globs = ["**/*.md"]
 
 [intake]
 language = "zh-CN"
 
 [assets]
-github_repo = "TheCloverLab/fived-assets"
-checkout_path = "~/clover/fived-assets"
+github_repo = "example-org/example-assets"
+checkout_path = "~/example-assets"
 base_path = ".github/issue-assets"
 branch = "main"
-remote_url = "https://github.com/TheCloverLab/fived-assets.git"
+remote_url = "https://github.com/example-org/example-assets.git"
 
 [media]
 description_command = [

@@ -1,220 +1,255 @@
 # bugpatrol
 
-Bug intake and triage orchestration for Five Degrees-style projects.
+`bugpatrol` is a project-neutral bug intake, triage, and notification toolchain.
+It turns Lark bug conversations into durable GitHub issue workflow state, then
+runs deterministic triage and fix-notification steps around that state.
 
-`bugpatrol` is intentionally project-neutral. It owns the platform code for:
+Project-specific values live in `projects/*.toml`. Product-specific migration
+plans, credentials, group IDs, and rollout notes should not live in this repo.
 
-- mirroring Lark topics into GitHub issues without doing product triage;
-- storing structured facts in GitHub native issue fields and Issue Fields;
-- running triage agents on trusted self-hosted runners using subscription auth
-  where possible;
-- writing deterministic GitHub updates and Lark follow-ups from validated JSON.
+## Principles
 
-Project-specific values live in `projects/*.toml`. The first project config is
-`projects/fived.toml`.
-
-Issue intake language is project-specific:
-
-```toml
-[intake]
-language = "zh-CN" # or "en-US"
-```
-
-The language controls the GitHub issue body and follow-up comment copy emitted
-by the intake workflow. `projects/todo-sandbox.toml` uses Chinese.
+- Intake records what the reporter said. It does not triage.
+- Triage is a separate workflow that reads GitHub issue state and local project
+  context, then writes validated fields and comments.
+- Fix notification is separate from triage.
+- GitHub issues, comments, native Issue Type, Issue Fields, assignees, PRs, and
+  commits are the durable workflow surface.
+- Hidden metadata is used only for idempotency and backlinks.
+- Lark is the reporter interaction surface, not the durable source of truth.
 
 ## Architecture
 
-The default flow is:
-
-1. Intake watcher receives a Lark topic or backfill record.
-2. The watcher creates or updates one GitHub issue per Lark root topic.
-3. GitHub Actions on a self-hosted runner starts the triage runner.
-4. The runner calls the configured triage provider, for example
-   `codex exec --output-schema ...` using the runner user's existing Codex
-   subscription login, or a Claude CLI command on a Claude-authenticated runner.
-5. A deterministic field writer validates the JSON and writes GitHub native
-   issue type, Issue Fields, assignee, comments, and Lark follow-up messages.
-
-The watcher must not decide whether the report is a code bug. DeepSeek may be
-used only for lossy intake helpers such as title drafts, summaries, and media
-descriptions.
-
-## Codex auth
-
-No OpenAI API key is assumed. Run GitHub jobs on trusted self-hosted runners
-where a dedicated OS user has already run:
-
-```bash
-codex login
+```text
+                 long-running daemon
+Lark group ─────────── watcher ───────────┐
+                                           │
+                                           ▼
+                                 GitHub issue/comment
+                                           │
+                                           │ one-shot job
+                                           ▼
+                                  triage runner
+                                           │
+                                           ▼
+                           Issue Type + Issue Fields
+                           assignee + triage comment
+                                           │
+       one-shot job                         │
+PR/commit/issue event ─── notify runner ───┘
+                                           │
+                                           ▼
+                                   Lark notification
 ```
 
-Treat `~/.codex/auth.json` as a password. Do not upload it as an artifact, print
-it in logs, or share it across untrusted jobs.
+## Workflows
+
+### watcher
+
+`watcher` is a long-running daemon. It polls or receives Lark messages, normalizes
+them into intake records, and creates or updates one GitHub issue per Lark topic.
+
+Typical command:
+
+```bash
+python -m bugpatrol watch-lark projects/example.toml \
+  --interval 30 \
+  --limit 20 \
+  --asset-repo
+```
+
+Run exactly one active watcher writer per Lark group. Multiple watcher writers
+against the same group can race and create duplicate issues or comments.
+
+### triage
+
+`triage` is a one-shot job. It reads an issue, comments, local PRD/docs, media
+evidence, and owner data; invokes the configured agent provider; validates the
+JSON result; then writes GitHub fields, assignee, and a triage comment.
+
+Typical command:
+
+```bash
+python -m bugpatrol run-triage projects/example.toml \
+  --issue 123 \
+  --repo-path /path/to/project \
+  --output-dir .bugpatrol/triage-123 \
+  --execute
+```
+
+This is a good fit for GitHub Actions self-hosted runners because it needs local
+repo context and pre-authenticated agent tooling such as `codex login`.
+
+### notify
+
+`notify` is a one-shot job. It reports fix progress from PRs, merges, linked
+commits, or issue closure back to the original Lark topic, with idempotency.
+
+Typical command:
+
+```bash
+python -m bugpatrol notify-fix projects/example.toml \
+  --event pr_merged \
+  --pr 123 \
+  --write
+```
+
+This can run on GitHub-hosted or self-hosted runners, depending on where the
+required GitHub and Lark credentials are available.
+
+## Runner vs Daemon
+
+| Workflow | Form | Recommended runtime | Multiplicity |
+| --- | --- | --- | --- |
+| watcher | daemon | systemd, launchd, tmux, or existing service host | one active writer per Lark group |
+| triage | one-shot job | GitHub Actions self-hosted runner | multiple runners are OK |
+| notify | one-shot job | GitHub Actions hosted or self-hosted runner | multiple runners are OK |
+
+GitHub Actions self-hosted runners can be multiple. GitHub assigns each job to
+one matching runner. The thing that must not be duplicated is the active Lark
+watcher writer for the same group.
+
+## Issue State
+
+### Native Issue Type
+
+`bugpatrol` uses GitHub native Issue Type:
+
+- `Bug`
+- `Feature`
+- `Task`
+
+### Triage status
+
+Current `Triage status` values:
+
+- `Pending`: intake created or updated the issue; triage has not completed.
+- `Running`: triage is executing.
+- `Needs info`: triage needs more reporter information.
+- `Done`: triage completed and wrote fields/comment/assignee.
+- `Failed`: triage execution failed.
+- `Skipped`: triage was intentionally skipped.
+
+Planned: add `Needs review` for material Lark follow-up received after triage
+has already completed, or while a triage run was in progress.
+
+### State flow
+
+```text
+Lark intake
+  └─ creates issue
+       └─ Pending
+            ├─ triage starts ────────────────┐
+            │                                 ▼
+            │                              Running
+            │                                 │
+            │          ┌──────────────────────┼──────────────────────┐
+            │          ▼                      ▼                      ▼
+            │       Done                 Needs info                Failed
+            │          │                      │
+            │          │ material follow-up   │ reporter follow-up
+            │          ▼                      ▼
+            │   Needs review (planned)      Pending
+            │
+            └─ skipped by policy ─────────► Skipped
+```
+
+Follow-up Lark messages always append to the existing GitHub issue when the
+`chat_id + root_id` backlink matches. Not every follow-up should retrigger
+triage. The planned classifier should distinguish acknowledgements, fix/status
+chatter, and material new evidence.
+
+## Fields
+
+Canonical logical fields:
+
+| Field | Values |
+| --- | --- |
+| `Priority` | `Urgent`, `High`, `Medium`, `Low` |
+| `Triage status` | `Pending`, `Running`, `Needs info`, `Done`, `Failed`, `Skipped` |
+| `Source` | `Lark`, `GitHub`, `Manual`, `Import` |
+| `Intake version` | `v2`, `manual`, `unknown` |
+| `Triage verdict` | `代码 Bug`, `PRD 错误`, `PRD 缺失`, `Case 错误`, `信息不足`, `预期行为` |
+| `Platform` | `iOS`, `Android`, `Web`, `Desktop`, `多平台`, `未知` |
+| `Reproducibility` | `必现`, `偶发`, `仅一次`, `未知` |
+| `Other platforms` | `其他平台正常`, `其他平台也异常`, `未验证`, `不适用` |
+| `Capability` | `Auth`, `Quest`, `Buddy`, `Match`, `Message`, `Me`, `Contacts`, `Notifications`, `Unknown` |
+| `Evidence` | `截图`, `视频`, `日志`, `文字描述`, `多种`, `无` |
+| `PRD status` | `已对齐`, `PRD 错误`, `PRD 缺失`, `未校验` |
+| `Triage confidence` | `高`, `中`, `低` |
+| `Owner reason` | `CODEOWNERS`, `Lark @mention`, `Git history`, `Capability fallback`, `Manual` |
+
+Project configs map these logical names to the actual GitHub Issue Field names.
+
+## Metadata
+
+`bugpatrol` writes hidden HTML comments for idempotency and backlinks:
+
+- `BUGPATROL_INTAKE_META`: source Lark chat/root/message and attachment URLs.
+- `BUGPATROL_INTAKE_REPLY_META`: later Lark follow-up message references.
+- `BUGPATROL_TRIAGE_META`: applied triage result fingerprint.
+- `BUGPATROL_FIX_META`: sent fix notification keys.
+
+These blocks are machine state. User-visible status should stay in GitHub native
+fields and comments.
+
+## Media
+
+Lark image, video, and file resources can be materialized locally or uploaded to
+a configured asset repository. When a media description command is configured,
+resources are described before issue/comment rendering so triage can read the
+generated text.
+
+Default media command:
+
+```bash
+python -m bugpatrol.media_vision <image-or-video-path> [question]
+```
+
+It uses an OpenAI-compatible multimodal API configured by:
+
+- `~/.bugpatrol/vision.json`
+- `BUGPATROL_VISION_*` environment variables
+- `~/.lark-bug-watcher/vision.json` as a compatibility fallback
 
 ## Development
 
 ```bash
 python -m unittest discover -s tests
 python -m unittest discover -s tests/e2e
-python -m bugpatrol validate-config projects/fived.toml
-python -m bugpatrol validate-config projects/todo-sandbox.toml
+python -m compileall bugpatrol tests
 python -m bugpatrol schema
-python -m bugpatrol agent-command projects/fived.toml --issue 123
+python -m bugpatrol validate-config projects/example.toml
+python -m bugpatrol validate-config projects/todo-sandbox.toml
 ```
 
-## Current Intake Loop
+Useful commands:
 
-The implemented product slice is Lark intake only:
+```bash
+python -m bugpatrol doctor projects/todo-sandbox.toml
+python -m bugpatrol backfill-lark projects/todo-sandbox.toml --limit 20
+python -m bugpatrol backfill-lark projects/todo-sandbox.toml --limit 20 --write --asset-repo
+python -m bugpatrol issue-context projects/todo-sandbox.toml --issue 1 --repo-path /path/to/project
+python -m bugpatrol run-triage projects/todo-sandbox.toml --issue 1 --repo-path /path/to/project
+python -m bugpatrol notify-fix projects/todo-sandbox.toml --event pr_opened --pr 12
+```
 
-1. Receive a normalized `IntakeRecord`.
-2. Find an existing GitHub issue by `chat_id + root_id`.
-3. If none exists, create one issue with:
-   - native issue type: `Bug`;
-   - fields: `Source = Lark`, `Intake version = v2`,
-     `Triage status = Pending`, and deterministic `Evidence`;
-   - `BUGPATROL_INTAKE_META` backlink metadata in the issue body.
-4. If the root already exists, append the new Lark message as an issue comment.
-5. Reply in Lark with the GitHub issue backlink.
+## Live Tests
 
-This layer does not triage, assign owners, compare PRD, or decide whether the
-report is truly a code bug.
-
-Reusable tests:
-
-- Unit contract: `tests/test_intake_workflow.py`
-- Local e2e loop: `tests/e2e/test_intake_loop.py`
-- E2E fixture payload: `tests/fixtures/intake_topic_loop.json`
-
-Opt-in live sandbox e2e:
+Live tests are opt-in and must target disposable sandbox resources.
 
 ```bash
 BUGPATROL_LIVE_E2E=1 \
-BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
+BUGPATROL_TODO_LARK_APP_SECRET=... \
 python -m unittest tests.e2e.test_live_intake_loop
-```
 
-The live e2e uses only `TheCloverLab/bugpatrol-todo-sandbox` and
-`Bugpatrol Todo Sandbox`. It creates a test issue, posts Lark backlinks, appends
-a follow-up comment, writes native Issue Type + initial Issue Fields, asserts
-them, and closes the test issue in cleanup.
-
-The sandbox repository lives under `TheCloverLab` because GitHub Issue Fields
-are organization-scoped and are unavailable on user-owned repositories.
-
-FiveD migration notes live in `MIGRATION_PLAN.md`. The migration path keeps the
-current `~/clover/fived` bug pipeline as the only production writer until
-`bugpatrol` has passed shadow reads, sandbox media e2e, and one controlled FiveD
-pilot topic.
-
-Backfill recent Lark messages:
-
-```bash
-# Check GitHub Issue Types, Issue Fields, and optional Lark access.
-python -m bugpatrol doctor projects/todo-sandbox.toml
-BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
-python -m bugpatrol doctor projects/todo-sandbox.toml --with-lark
-
-# Dry-run is the default and performs no GitHub writes.
-BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
-python -m bugpatrol backfill-lark projects/todo-sandbox.toml --limit 20
-
-# Explicit write mode.
-BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
-python -m bugpatrol backfill-lark projects/todo-sandbox.toml --limit 20 --write
-
-# Download Lark image/file/video resources to a local directory before writing
-# issues. This is for local debugging and leaves local file paths in the issue.
-BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
-python -m bugpatrol backfill-lark projects/todo-sandbox.toml \
-  --limit 20 \
-  --write \
-  --resource-dir .bugpatrol/resources
-
-# Upload resources to the configured durable assets repo before writing issues.
-# FiveD uses TheCloverLab/fived-assets and stores raw GitHub URLs in issues.
-# The sandbox config also uses TheCloverLab/fived-assets for attachment smoke tests.
-FIVED_LARK_BUG_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_a9518095a9b8ded3.secret)" \
-python -m bugpatrol backfill-lark projects/fived.toml \
-  --limit 20 \
-  --write \
-  --asset-repo
-
-# Poll once, useful for smoke tests and cron/systemd wrappers.
-BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
-python -m bugpatrol watch-lark projects/todo-sandbox.toml --once --dry-run --limit 20
-
-# Long-running polling watcher. Use --dry-run until doctor passes.
-BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
-python -m bugpatrol watch-lark projects/todo-sandbox.toml --interval 30 --limit 20
-
-# Resolve owners from CODEOWNERS.
-python -m bugpatrol resolve-owner ../bugpatrol-todo-sandbox src/todo/list.ts
-
-# Search local PRD markdown cache.
-python -m bugpatrol search-prd ../bugpatrol-todo-sandbox/docs/prd "todo empty state"
-
-# Build deterministic triage context for an issue.
-python -m bugpatrol issue-context projects/todo-sandbox.toml \
-  --issue 3 \
-  --repo-path ../bugpatrol-todo-sandbox \
-  --output triage-context.md
-
-# Validate and apply a triage JSON result.
-python -m bugpatrol apply-triage-result projects/todo-sandbox.toml \
-  --issue 4 \
-  --input triage-output.json
-
-# Prepare triage context/schema/agent command without executing the agent.
-python -m bugpatrol run-triage projects/todo-sandbox.toml \
-  --issue 3 \
-  --repo-path ../bugpatrol-todo-sandbox \
-  --output-dir .bugpatrol/triage-3
-
-# Dry-run a fix notification for a PR that references exactly one issue.
-python -m bugpatrol notify-fix projects/todo-sandbox.toml \
-  --event pr_opened \
-  --pr 12
-
-# Write the fix notification to Lark and record BUGPATROL_FIX_META.
-BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
-python -m bugpatrol notify-fix projects/todo-sandbox.toml \
-  --event pr_merged \
-  --pr 12 \
-  --write
-```
-
-`notify-fix` can infer `--issue` for `pr_opened` and `pr_merged` when the PR
-references exactly one issue through GitHub closing references, `#123`, or
-`owner/repo#123`. Pass `--issue` explicitly when a PR references zero or
-multiple issues. A reusable GitHub Actions template is available at
-`examples/github-actions/fix-notify.yml`; it defaults to dry-run until
-`BUGPATROL_WRITE_FIX_NOTIFICATIONS` is set to `1`.
-
-Opt-in live asset e2e:
-
-```bash
 BUGPATROL_LIVE_E2E=1 \
 BUGPATROL_LIVE_ASSET_E2E=1 \
-BUGPATROL_TODO_LARK_APP_SECRET="$(cat ~/.bugpatrol/lark/cli_aac97d050d385ee9.secret)" \
+BUGPATROL_LIVE_VIDEO_E2E=1 \
+BUGPATROL_LIVE_ASSET_REPO=example-org/example-assets \
+BUGPATROL_LIVE_ASSET_CHECKOUT=~/example-assets \
+BUGPATROL_TODO_LARK_APP_SECRET=... \
 python -m unittest tests.e2e.test_live_asset_resource_loop
 ```
 
-This creates a sandbox issue from a text seed, replies with a real test image in
-the Lark topic, downloads the Lark resource, pushes it to
-`TheCloverLab/fived-assets`, reads it back through the GitHub contents API,
-appends the asset URL to the issue comment, closes the sandbox issue, and
-removes the test asset file from the assets repo.
-
-Add `BUGPATROL_LIVE_VIDEO_E2E=1` to also send a generated mp4 video reply via
-`lark-cli`, download the Lark media resource, run the configured vision command,
-upload the mp4 to `TheCloverLab/fived-assets`, and verify the generated
-description appears in the issue comment. The video test temporarily rewrites
-and restores `~/.lark-cli/config.json` so it can send with the sandbox bot.
-
-Triage context includes the issue body, issue comments, and a `Media Evidence`
-section extracted from image/video attachment lines and generated descriptions.
-The default media command is `python3 -m bugpatrol.media_vision`, an
-OpenAI-compatible image/video describer configured by `~/.bugpatrol/vision.json`,
-`BUGPATROL_VISION_*` environment variables, or the existing
-`~/.lark-bug-watcher/vision.json` fallback.
+Live tests must clean up test issues and test assets where the platform allows.

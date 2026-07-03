@@ -8,35 +8,35 @@ from bugpatrol.fields import default_field_specs
 
 
 class ConfigTest(unittest.TestCase):
-    def test_fived_config_matches_canonical_fields(self) -> None:
-        config = load_project_config(Path("projects/fived.toml"))
+    def test_example_config_matches_canonical_fields(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
 
-        self.assertEqual(config.project, "fived")
-        self.assertEqual(config.github_repo, "TheCloverLab/fived")
+        self.assertEqual(config.project, "example-app")
+        self.assertEqual(config.github_repo, "example-org/example-app")
         self.assertEqual(config.intake.language, "zh-CN")
         self.assertEqual(
             config.prd.include_globs,
-            ("specs/**/spec.md", "changes/**/prd-snapshot.md"),
+            ("**/*.md",),
         )
-        self.assertEqual(config.assets.github_repo, "TheCloverLab/fived-assets")
-        self.assertEqual(config.assets.checkout_path, "~/clover/fived-assets")
+        self.assertEqual(config.assets.github_repo, "example-org/example-assets")
+        self.assertEqual(config.assets.checkout_path, "~/example-assets")
         self.assertEqual(config.assets.base_path, ".github/issue-assets")
         self.assertEqual(config.assets.branch, "main")
-        self.assertEqual(config.assets.remote_url, "https://github.com/TheCloverLab/fived-assets.git")
+        self.assertEqual(config.assets.remote_url, "https://github.com/example-org/example-assets.git")
         self.assertEqual(config.media.description_command[:3], ("python3", "-m", "bugpatrol.media_vision"))
-        self.assertIn("fived-triage", config.triage_agent.runner_labels)
+        self.assertIn("bugpatrol-example-triage", config.triage_agent.runner_labels)
         config.validate_against(default_field_specs())
 
-    def test_sandbox_uses_shared_fived_assets_repo(self) -> None:
+    def test_sandbox_has_configured_asset_repo(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
 
-        self.assertEqual(config.assets.github_repo, "TheCloverLab/fived-assets")
-        self.assertEqual(config.assets.checkout_path, "~/clover/fived-assets")
-        self.assertEqual(config.assets.remote_url, "https://github.com/TheCloverLab/fived-assets.git")
+        self.assertEqual(config.assets.github_repo, "TheCloverLab/bugpatrol-todo-sandbox-assets")
+        self.assertEqual(config.assets.checkout_path, "~/clover/bugpatrol-todo-sandbox-assets")
+        self.assertEqual(config.assets.remote_url, "https://github.com/TheCloverLab/bugpatrol-todo-sandbox-assets.git")
         self.assertEqual(config.media.description_command[:3], ("python3", "-m", "bugpatrol.media_vision"))
 
     def test_validation_rejects_missing_field(self) -> None:
-        config = load_project_config(Path("projects/fived.toml"))
+        config = load_project_config(Path("projects/example.toml"))
         broken = parse_project_config(
             {
                 "github_repo": config.github_repo,
@@ -61,7 +61,7 @@ class ConfigTest(unittest.TestCase):
             broken.validate_against(default_field_specs())
 
     def test_config_rejects_unknown_intake_language(self) -> None:
-        config = load_project_config(Path("projects/fived.toml"))
+        config = load_project_config(Path("projects/example.toml"))
         with self.assertRaisesRegex(ValueError, "intake.language"):
             parse_project_config(
                 {
@@ -80,7 +80,7 @@ class ConfigTest(unittest.TestCase):
             )
 
     def test_validation_rejects_live_github_option_drift(self) -> None:
-        config = load_project_config(Path("projects/fived.toml"))
+        config = load_project_config(Path("projects/example.toml"))
         live_options = {
             github_name: spec.values
             for logical_name, spec in default_field_specs().items()

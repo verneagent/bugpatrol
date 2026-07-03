@@ -93,7 +93,7 @@ class ResourcesTest(unittest.TestCase):
 
     def test_github_asset_repo_store_writes_and_pushes_asset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            checkout = Path(tmp) / "fived-assets"
+            checkout = Path(tmp) / "example-assets"
             (checkout / ".git").mkdir(parents=True)
             run = Mock()
             run.return_value.returncode = 0
@@ -104,7 +104,7 @@ class ResourcesTest(unittest.TestCase):
                 ref = parse_lark_resource_url("lark://message/om_1/image/img_v2_abc")
                 assert ref is not None
                 url = GitHubAssetRepoStore(
-                    repo="TheCloverLab/fived-assets",
+                    repo="example-org/example-assets",
                     checkout_path=checkout,
                 ).write(
                     ref=ref,
@@ -119,7 +119,7 @@ class ResourcesTest(unittest.TestCase):
             self.assertEqual(asset_path.read_bytes(), b"image-bytes")
             self.assertEqual(
                 url,
-                "https://github.com/TheCloverLab/fived-assets/raw/main/.github/issue-assets/om_1/bug_screenshot.png",
+                "https://github.com/example-org/example-assets/raw/main/.github/issue-assets/om_1/bug_screenshot.png",
             )
             commands = [call.args[0] for call in run.call_args_list]
             self.assertEqual(commands[0], ["git", "-C", str(checkout), "pull", "--quiet", "origin", "main"])
@@ -129,7 +129,7 @@ class ResourcesTest(unittest.TestCase):
 
     def test_github_asset_repo_store_adds_extension_from_content_type(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            checkout = Path(tmp) / "fived-assets"
+            checkout = Path(tmp) / "example-assets"
             (checkout / ".git").mkdir(parents=True)
             run = Mock()
             run.return_value.returncode = 0
@@ -140,7 +140,7 @@ class ResourcesTest(unittest.TestCase):
 
             with patch("subprocess.run", run):
                 url = GitHubAssetRepoStore(
-                    repo="TheCloverLab/fived-assets",
+                    repo="example-org/example-assets",
                     checkout_path=checkout,
                 ).write(
                     ref=ref,

@@ -8,6 +8,7 @@ import unittest
 import struct
 import zlib
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -47,9 +48,10 @@ def _png_chunk(kind: bytes, data: bytes) -> bytes:
 
 @unittest.skipUnless(os.environ.get("BUGPATROL_LIVE_E2E") == "1", "live e2e is opt-in")
 @unittest.skipUnless(os.environ.get("BUGPATROL_LIVE_ASSET_E2E") == "1", "asset repo write e2e is opt-in")
+@unittest.skipUnless(os.environ.get("BUGPATROL_LIVE_ASSET_REPO"), "requires BUGPATROL_LIVE_ASSET_REPO")
 class LiveAssetResourceLoopE2ETest(unittest.TestCase):
     def test_live_lark_image_reply_uploads_to_asset_repo_and_updates_issue(self) -> None:
-        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = _load_live_config()
         app_secret = os.environ[config.lark.app_secret_env]
         lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
         issue_fields = GitHubIssueFieldsClient()
@@ -103,7 +105,7 @@ class LiveAssetResourceLoopE2ETest(unittest.TestCase):
             )
             self.assertEqual(len(record.attachments), 1)
             asset_url = record.attachments[0].url
-            self.assertIn("https://github.com/TheCloverLab/fived-assets/raw/main/", asset_url)
+            self.assertIn(f"https://github.com/{config.assets.github_repo}/raw/{config.assets.branch}/", asset_url)
 
             outcome = workflow.process(record)
             self.assertEqual(outcome.action, "updated")
@@ -119,7 +121,7 @@ class LiveAssetResourceLoopE2ETest(unittest.TestCase):
                 )["Evidence"],
                 "文字描述",
             )
-            _assert_asset_exists_in_remote(asset_url)
+            _assert_asset_exists_in_remote(asset_url, repo=config.assets.github_repo, branch=config.assets.branch)
         finally:
             if created_issue_number is not None:
                 github.close_issue(repo=config.github_repo, issue_number=created_issue_number)
@@ -130,7 +132,7 @@ class LiveAssetResourceLoopE2ETest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("ffmpeg"), "requires ffmpeg")
     @unittest.skipUnless(shutil.which("lark-cli"), "requires lark-cli")
     def test_live_lark_video_reply_uploads_to_asset_repo_and_updates_issue(self) -> None:
-        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = _load_live_config()
         app_secret = os.environ[config.lark.app_secret_env]
         lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
         issue_fields = GitHubIssueFieldsClient()
@@ -214,7 +216,7 @@ class LiveAssetResourceLoopE2ETest(unittest.TestCase):
                 self.assertTrue(any(asset_url in comment.body for comment in comments))
                 self.assertTrue(any("生成描述" in comment.body for comment in comments))
                 self.assertFalse(any("vision description unavailable" in comment.body for comment in comments))
-                _assert_asset_exists_in_remote(asset_url)
+                _assert_asset_exists_in_remote(asset_url, repo=config.assets.github_repo, branch=config.assets.branch)
             finally:
                 if created_issue_number is not None:
                     github.close_issue(repo=config.github_repo, issue_number=created_issue_number)
@@ -222,17 +224,34 @@ class LiveAssetResourceLoopE2ETest(unittest.TestCase):
                     _cleanup_asset(config=config, asset_url=asset_url)
 
 
-def _assert_asset_exists_in_remote(asset_url: str) -> None:
-    rel_path = _asset_rel_path(asset_url)
+def _load_live_config():
+    config = load_project_config(Path("projects/todo-sandbox.toml"))
+    asset_repo = os.environ.get("BUGPATROL_LIVE_ASSET_REPO", "").strip()
+    if not asset_repo:
+        return config
+    config = replace(
+        config,
+        assets=replace(
+            config.assets,
+            github_repo=asset_repo,
+            checkout_path=os.environ.get("BUGPATROL_LIVE_ASSET_CHECKOUT", config.assets.checkout_path),
+            remote_url=os.environ.get("BUGPATROL_LIVE_ASSET_REMOTE_URL", f"https://github.com/{asset_repo}.git"),
+        ),
+    )
+    return config
+
+
+def _assert_asset_exists_in_remote(asset_url: str, *, repo: str, branch: str) -> None:
+    rel_path = _asset_rel_path(asset_url, branch=branch)
     completed = subprocess.run(
         [
             "gh",
             "api",
             "--method",
             "GET",
-            f"repos/TheCloverLab/fived-assets/contents/{rel_path}",
+            f"repos/{repo}/contents/{rel_path}",
             "-f",
-            "ref=main",
+            f"ref={branch}",
         ],
         capture_output=True,
         text=True,
@@ -292,7 +311,7 @@ def _temporary_lark_cli_config(*, app_id: str, app_secret: str):
 
 
 def _cleanup_asset(*, config, asset_url: str) -> None:  # type: ignore[no-untyped-def]
-    rel_path = _asset_rel_path(asset_url)
+    rel_path = _asset_rel_path(asset_url, branch=config.assets.branch)
     checkout = Path(config.assets.checkout_path).expanduser()
     subprocess.run(["git", "-C", str(checkout), "rm", "-f", rel_path], check=False)
     commit = subprocess.run(
@@ -324,8 +343,8 @@ def _cleanup_asset(*, config, asset_url: str) -> None:  # type: ignore[no-untype
         )
 
 
-def _asset_rel_path(asset_url: str) -> str:
-    marker = "/raw/main/"
+def _asset_rel_path(asset_url: str, *, branch: str) -> str:
+    marker = f"/raw/{branch}/"
     if marker not in asset_url:
         raise AssertionError(f"unexpected asset URL: {asset_url}")
     return asset_url.split(marker, 1)[1]

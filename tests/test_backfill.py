@@ -197,7 +197,7 @@ class BackfillTest(unittest.TestCase):
         )
         workflow = IntakeWorkflow(config=config, github=github, lark=lark)
         store = FakeResourceStore(
-            "https://github.com/TheCloverLab/fived-assets/raw/main/.github/issue-assets/om_1/bug.png"
+            "https://github.com/example-org/example-assets/raw/main/.github/issue-assets/om_1/bug.png"
         )
 
         result = run_lark_backfill(
