@@ -271,19 +271,19 @@ python -m unittest discover -s tests/e2e
 python -m compileall bugpatrol tests
 python -m bugpatrol schema
 python -m bugpatrol validate-config projects/example.toml
-python -m bugpatrol validate-config projects/todo-sandbox.toml
+python -m bugpatrol validate-config projects/full.example.toml
 ```
 
 Useful commands:
 
 ```bash
-python -m bugpatrol doctor projects/todo-sandbox.toml
-python -m bugpatrol backfill-lark projects/todo-sandbox.toml --limit 20
-python -m bugpatrol backfill-lark projects/todo-sandbox.toml --limit 20 --write --asset-repo
-python -m bugpatrol issue-context projects/todo-sandbox.toml --issue 1 --repo-path /path/to/project
-python -m bugpatrol run-triage projects/todo-sandbox.toml --issue 1 --repo-path /path/to/project
-python -m bugpatrol apply-triage-result projects/todo-sandbox.toml --issue 1 --input triage-output.json --dry-run
-python -m bugpatrol notify-fix projects/todo-sandbox.toml --event pr_opened --pr 12
+python -m bugpatrol doctor projects/example.toml
+python -m bugpatrol backfill-lark projects/example.toml --limit 20
+python -m bugpatrol backfill-lark projects/example.toml --limit 20 --write --asset-repo
+python -m bugpatrol issue-context projects/example.toml --issue 1 --repo-path /path/to/project
+python -m bugpatrol run-triage projects/example.toml --issue 1 --repo-path /path/to/project
+python -m bugpatrol apply-triage-result projects/example.toml --issue 1 --input triage-output.json --dry-run
+python -m bugpatrol notify-fix projects/example.toml --event pr_opened --pr 12
 ```
 
 ## Live Tests
