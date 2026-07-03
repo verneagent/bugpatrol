@@ -67,6 +67,20 @@ class IntakeWorkflow:
         fields = initial_intake_fields(record)
         title = build_issue_title(record)
         body = render_issue_body(record, language=self._config.intake.language)
+        raced = self._github.find_issue_by_intake_root(
+            repo=self._config.github_repo,
+            chat_id=record.chat_id,
+            root_id=record.root_id,
+        )
+        if raced is not None:
+            reply = f"已创建 GitHub issue #{raced.number}: {raced.url}"
+            self._lark.reply_to_message(chat_id=record.chat_id, message_id=record.message_id, text=reply)
+            return IntakeOutcome(
+                action="deduplicated",
+                issue=raced,
+                lark_reply=reply,
+                triage_signal=TriageSignal(should_enqueue=False, reason="create_race"),
+            )
         issue = self._github.create_issue(
             repo=self._config.github_repo,
             title=title,

@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from bugpatrol.config import load_project_config
+from bugpatrol.clients import GitHubIssue
 from bugpatrol.intake import Attachment, IntakeRecord
 from bugpatrol.intake_workflow import (
     IntakeWorkflow,
@@ -101,6 +102,21 @@ class IntakeWorkflowTest(unittest.TestCase):
         self.assertEqual(len(lark.replies), 2)
         self.assertIn("已追加到 GitHub issue #1", lark.replies[1].text)
 
+    def test_process_deduplicates_create_race_without_commenting(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = RaceGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        outcome = workflow.process(make_record())
+
+        self.assertEqual(outcome.action, "deduplicated")
+        self.assertEqual(outcome.issue.number, 9)
+        self.assertFalse(outcome.triage_signal.should_enqueue)
+        self.assertEqual(github.created, [])
+        self.assertEqual(github.comments, [])
+        self.assertIn("已创建 GitHub issue #9", lark.replies[0].text)
+
     def test_rejects_records_from_unconfigured_chat(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         workflow = IntakeWorkflow(
@@ -111,6 +127,27 @@ class IntakeWorkflowTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "unexpected chat_id"):
             workflow.process(make_record(chat_id="oc_other"))
+
+
+class RaceGitHubIssuesClient(FakeGitHubIssuesClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.find_calls = 0
+        self.comments: list[str] = []
+
+    def find_issue_by_intake_root(self, *, repo: str, chat_id: str, root_id: str) -> GitHubIssue | None:
+        self.find_calls += 1
+        if self.find_calls == 1:
+            return None
+        return GitHubIssue(
+            number=9,
+            url="https://github.test/o/r/issues/9",
+            title="[Lark] existing",
+            body="existing body",
+        )
+
+    def add_issue_comment(self, *, repo: str, issue_number: int, body: str) -> None:
+        self.comments.append(body)
 
 
 if __name__ == "__main__":
