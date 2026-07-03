@@ -76,6 +76,15 @@ class FakeResourceRedactor:
         )
 
 
+class FakeResourceTransformer:
+    def transform(self, *, ref, resource):  # type: ignore[no-untyped-def]
+        return DownloadedLarkResource(
+            content=b"resized",
+            content_type=resource.content_type,
+            filename="resized.png",
+        )
+
+
 class BackfillTest(unittest.TestCase):
     def test_should_skip_bot_and_backlink_messages(self) -> None:
         self.assertTrue(should_skip_message(message(sender_open_id="ou_bot"), bot_open_id="ou_bot"))
@@ -258,6 +267,33 @@ class BackfillTest(unittest.TestCase):
 
         self.assertEqual(result.processed, 1)
         self.assertEqual(store.writes, [("om_1", "img_v2_abc", "redacted.png")])
+
+    def test_run_lark_backfill_applies_transformer_before_store(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkHistory(
+            [
+                message(
+                    msg_type="image",
+                    text="",
+                    raw_content=json.dumps({"image_key": "img_v2_abc"}),
+                )
+            ]
+        )
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        store = FakeResourceStore("https://assets/resized.png")
+
+        result = run_lark_backfill(
+            config=config,
+            lark=lark,
+            workflow=workflow,
+            limit=10,
+            resource_store=store,
+            resource_transformer=FakeResourceTransformer(),
+        )
+
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(store.writes, [("om_1", "img_v2_abc", "resized.png")])
 
     def test_run_lark_backfill_rejects_two_resource_stores(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

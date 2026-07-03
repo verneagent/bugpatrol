@@ -59,6 +59,7 @@ class WatcherTest(unittest.TestCase):
         workflow = IntakeWorkflow(config=config, github=github, lark=lark)
         store = object()
         describer = object()
+        transformer = object()
 
         with patch("bugpatrol.watcher.run_lark_backfill") as backfill:
             backfill.return_value = BackfillResult(scanned=1, processed=0, skipped=1, outcomes=())
@@ -71,11 +72,13 @@ class WatcherTest(unittest.TestCase):
                 dry_run=True,
                 resource_store=store,  # type: ignore[arg-type]
                 resource_describer=describer,  # type: ignore[arg-type]
+                resource_transformer=transformer,  # type: ignore[arg-type]
             )
 
         self.assertEqual(result.skipped, 1)
         self.assertIs(backfill.call_args.kwargs["resource_store"], store)
         self.assertIs(backfill.call_args.kwargs["resource_describer"], describer)
+        self.assertIs(backfill.call_args.kwargs["resource_transformer"], transformer)
 
     def test_run_polling_watcher_can_enqueue_and_dispatch_triage(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

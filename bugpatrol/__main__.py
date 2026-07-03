@@ -21,7 +21,13 @@ from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lark import LarkOpenApiMessengerClient
 from bugpatrol.ownership import load_codeowners, resolve_configured_owners, resolve_owners
 from bugpatrol.prd import load_prd_documents, search_prd_documents
-from bugpatrol.resources import CommandResourceDescriber, CommandResourceRedactor, GitHubAssetRepoStore, ResourcePolicy
+from bugpatrol.resources import (
+    CommandResourceDescriber,
+    CommandResourceRedactor,
+    GitHubAssetRepoStore,
+    ImageResourceResizer,
+    ResourcePolicy,
+)
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
 from bugpatrol.triage_result import apply_triage_result, build_triage_dry_run_report, parse_triage_result
 from bugpatrol.triage_runner import execute_triage_run, prepare_triage_run
@@ -57,6 +63,16 @@ def media_resource_redactor(config) -> CommandResourceRedactor | None:  # type: 
         command=config.media.redaction_command,
         timeout_seconds=config.media.redaction_timeout_seconds,
         temp_dir=temp_dir,
+    )
+
+
+def media_resource_transformer(config) -> ImageResourceResizer | None:  # type: ignore[no-untyped-def]
+    if not config.media.resize_max_image_width and not config.media.resize_max_image_height:
+        return None
+    return ImageResourceResizer(
+        max_width=config.media.resize_max_image_width,
+        max_height=config.media.resize_max_image_height,
+        quality=config.media.resize_image_quality,
     )
 
 
@@ -237,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         resource_describer = media_resource_describer(config)
         resource_redactor = media_resource_redactor(config)
+        resource_transformer = media_resource_transformer(config)
         resource_policy = media_resource_policy(config)
         result = run_lark_backfill(
             config=config,
@@ -249,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
             resource_describer=resource_describer,
             resource_policy=resource_policy,
             resource_redactor=resource_redactor,
+            resource_transformer=resource_transformer,
         )
         print(
             json.dumps(
@@ -319,6 +337,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         resource_describer = media_resource_describer(config)
         resource_redactor = media_resource_redactor(config)
+        resource_transformer = media_resource_transformer(config)
         resource_policy = media_resource_policy(config)
         result = run_polling_watcher(
             config=config,
@@ -333,6 +352,7 @@ def main(argv: list[str] | None = None) -> int:
             resource_describer=resource_describer,
             resource_policy=resource_policy,
             resource_redactor=resource_redactor,
+            resource_transformer=resource_transformer,
             event_log_path=args.event_log,
             processed_ledger_path=args.processed_ledger,
             lease_file=args.lease_file,
@@ -380,6 +400,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         resource_describer = media_resource_describer(config)
         resource_redactor = media_resource_redactor(config)
+        resource_transformer = media_resource_transformer(config)
         resource_policy = media_resource_policy(config)
         result = run_lark_event_watcher(
             config=config,
@@ -392,6 +413,7 @@ def main(argv: list[str] | None = None) -> int:
             resource_describer=resource_describer,
             resource_policy=resource_policy,
             resource_redactor=resource_redactor,
+            resource_transformer=resource_transformer,
             event_log_path=args.event_log,
             processed_ledger_path=args.processed_ledger,
             triage_queue_path=args.triage_queue,

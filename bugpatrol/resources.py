@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 import time
+from io import BytesIO
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
@@ -40,6 +41,11 @@ class ResourceDescriber(Protocol):
 class ResourceRedactor(Protocol):
     def redact(self, *, ref: "LarkResourceRef", resource: DownloadedLarkResource) -> DownloadedLarkResource:
         """Return a redacted resource before upload or vision."""
+
+
+class ResourceTransformer(Protocol):
+    def transform(self, *, ref: "LarkResourceRef", resource: DownloadedLarkResource) -> DownloadedLarkResource:
+        """Return a normalized resource before policy, upload, and vision."""
 
 
 @dataclass(frozen=True)
@@ -263,6 +269,51 @@ class CommandResourceRedactor:
         )
 
 
+class ImageResourceResizer:
+    def __init__(
+        self,
+        *,
+        max_width: int = 0,
+        max_height: int = 0,
+        quality: int = 85,
+    ) -> None:
+        self._max_width = max(0, max_width)
+        self._max_height = max(0, max_height)
+        self._quality = min(100, max(1, quality))
+
+    def transform(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> DownloadedLarkResource:
+        if not self._max_width and not self._max_height:
+            return resource
+        if not _is_image_resource(ref=ref, resource=resource):
+            return resource
+
+        try:
+            from PIL import Image
+        except ImportError as exc:  # pragma: no cover - dependency is declared, but keep runner error explicit.
+            raise RuntimeError("image resizing requires Pillow to be installed") from exc
+
+        with Image.open(BytesIO(resource.content)) as image:
+            target = _scaled_image_size(
+                width=image.width,
+                height=image.height,
+                max_width=self._max_width,
+                max_height=self._max_height,
+            )
+            if target == (image.width, image.height):
+                return resource
+            resized = image.resize(target, Image.Resampling.LANCZOS)
+            output = BytesIO()
+            format_name = _pillow_format_for_resource(resource)
+            if format_name == "JPEG" and resized.mode not in {"RGB", "L"}:
+                resized = resized.convert("RGB")
+            resized.save(output, format=format_name, quality=self._quality, optimize=True)
+        return DownloadedLarkResource(
+            content=output.getvalue(),
+            content_type=resource.content_type,
+            filename=resource.filename,
+        )
+
+
 def materialize_lark_attachments(
     *,
     record: IntakeRecord,
@@ -271,6 +322,7 @@ def materialize_lark_attachments(
     describer: ResourceDescriber | None = None,
     policy: ResourcePolicy | None = None,
     redactor: ResourceRedactor | None = None,
+    transformer: ResourceTransformer | None = None,
 ) -> IntakeRecord:
     attachments = tuple(
         materialize_attachment(
@@ -280,6 +332,7 @@ def materialize_lark_attachments(
             describer=describer,
             policy=policy,
             redactor=redactor,
+            transformer=transformer,
         )
         for attachment in record.attachments
     )
@@ -294,6 +347,7 @@ def materialize_attachment(
     describer: ResourceDescriber | None = None,
     policy: ResourcePolicy | None = None,
     redactor: ResourceRedactor | None = None,
+    transformer: ResourceTransformer | None = None,
 ) -> Attachment:
     ref = parse_lark_resource_url(attachment.url)
     if ref is None:
@@ -305,6 +359,8 @@ def materialize_attachment(
     )
     if redactor is not None:
         resource = redactor.redact(ref=ref, resource=resource)
+    if transformer is not None:
+        resource = transformer.transform(ref=ref, resource=resource)
     if policy is not None:
         rejection = policy.rejection_reason(ref=ref, resource=resource)
         if rejection:
@@ -356,6 +412,37 @@ def _extension_for_content_type(content_type: str) -> str:
         "video/mp4": ".mp4",
         "video/quicktime": ".mov",
     }.get(media_type, "")
+
+
+def _is_image_resource(*, ref: LarkResourceRef, resource: DownloadedLarkResource) -> bool:
+    content_type = resource.content_type.split(";", 1)[0].strip().lower()
+    return ref.kind == "image" or content_type.startswith("image/")
+
+
+def _scaled_image_size(
+    *,
+    width: int,
+    height: int,
+    max_width: int,
+    max_height: int,
+) -> tuple[int, int]:
+    if width <= 0 or height <= 0:
+        return width, height
+    width_ratio = max_width / width if max_width > 0 else 1.0
+    height_ratio = max_height / height if max_height > 0 else 1.0
+    ratio = min(1.0, width_ratio, height_ratio)
+    return max(1, round(width * ratio)), max(1, round(height * ratio))
+
+
+def _pillow_format_for_resource(resource: DownloadedLarkResource) -> str:
+    media_type = resource.content_type.split(";", 1)[0].strip().lower()
+    if media_type in {"image/jpeg", "image/jpg"}:
+        return "JPEG"
+    if media_type == "image/webp":
+        return "WEBP"
+    if media_type == "image/gif":
+        return "GIF"
+    return "PNG"
 
 
 def _download_resource_type(kind: str) -> str:

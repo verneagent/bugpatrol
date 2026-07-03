@@ -55,6 +55,9 @@ class MediaConfig:
     description_temp_dir: str = ""
     redaction_command: tuple[str, ...] = ()
     redaction_timeout_seconds: int = 300
+    resize_max_image_width: int = 0
+    resize_max_image_height: int = 0
+    resize_image_quality: int = 85
     max_image_bytes: int = 0
     max_video_bytes: int = 0
     max_file_bytes: int = 0
@@ -188,6 +191,9 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             description_temp_dir=str(media.get("description_temp_dir") or ""),
             redaction_command=tuple(_optional_str_list(media, "redaction_command")),
             redaction_timeout_seconds=int(media.get("redaction_timeout_seconds") or 300),
+            resize_max_image_width=int(media.get("resize_max_image_width") or 0),
+            resize_max_image_height=int(media.get("resize_max_image_height") or 0),
+            resize_image_quality=int(media.get("resize_image_quality") or 85),
             max_image_bytes=int(media.get("max_image_bytes") or 0),
             max_video_bytes=int(media.get("max_video_bytes") or 0),
             max_file_bytes=int(media.get("max_file_bytes") or 0),

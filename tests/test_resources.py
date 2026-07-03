@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -11,6 +12,7 @@ from bugpatrol.resources import (
     CommandResourceDescriber,
     CommandResourceRedactor,
     GitHubAssetRepoStore,
+    ImageResourceResizer,
     LocalResourceStore,
     ResourcePolicy,
     materialize_attachment,
@@ -36,6 +38,15 @@ class FakeDownloader:
             content_type="image/png",
             filename="bug screenshot.png",
         )
+
+
+def png_bytes(*, width: int, height: int) -> bytes:
+    from PIL import Image
+
+    image = Image.new("RGB", (width, height), color=(255, 0, 0))
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
 
 
 class ResourcesTest(unittest.TestCase):
@@ -227,6 +238,54 @@ class ResourcesTest(unittest.TestCase):
             path = Path(materialized.attachments[0].url)
             self.assertEqual(path.read_bytes(), b"redacted-image")
             self.assertEqual(materialized.attachments[0].description, "visual: redacted-image")
+
+    def test_image_resizer_scales_before_store_and_description(self) -> None:
+        class ImageDownloader(FakeDownloader):
+            def download_message_resource(self, *, message_id: str, resource_key: str, resource_type: str = "") -> DownloadedLarkResource:
+                self.calls.append((message_id, resource_key, resource_type))
+                return DownloadedLarkResource(
+                    content=png_bytes(width=80, height=40),
+                    content_type="image/png",
+                    filename="wide.png",
+                )
+
+        record = IntakeRecord(
+            reporter_name="Reporter",
+            reporter_open_id="ou_1",
+            created_at="2026-07-01T00:00:00Z",
+            chat_id="oc_1",
+            root_id="om_1",
+            message_id="om_1",
+            original_text="bug",
+            attachments=(Attachment(kind="image", url="lark://message/om_1/image/img_v2_abc"),),
+        )
+        describer = CommandResourceDescriber(
+            command=(
+                "python3",
+                "-c",
+                (
+                    "from PIL import Image; import sys; "
+                    "im=Image.open(sys.argv[1]); print('size: ' + str(im.width) + 'x' + str(im.height))"
+                ),
+                "{path}",
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            materialized = materialize_lark_attachments(
+                record=record,
+                lark=ImageDownloader(),
+                store=LocalResourceStore(Path(tmp)),
+                describer=describer,
+                transformer=ImageResourceResizer(max_width=20, max_height=20),
+            )
+
+            path = Path(materialized.attachments[0].url)
+            from PIL import Image
+
+            with Image.open(path) as stored:
+                self.assertEqual((stored.width, stored.height), (20, 10))
+            self.assertEqual(materialized.attachments[0].description, "size: 20x10")
 
     def test_materialize_skips_resource_when_policy_rejects_size(self) -> None:
         attachment = Attachment(kind="image", url="lark://message/om_1/image/img_v2_abc")

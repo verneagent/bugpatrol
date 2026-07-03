@@ -25,6 +25,7 @@ from bugpatrol.resources import (
     ResourcePolicy,
     ResourceRedactor,
     ResourceStore,
+    ResourceTransformer,
     materialize_lark_attachments,
 )
 from bugpatrol.triage_queue import CommandTriageDispatcher, TriageRequestQueue
@@ -60,6 +61,7 @@ def run_lark_event_watcher(
     resource_describer: ResourceDescriber | None = None,
     resource_policy: ResourcePolicy | None = None,
     resource_redactor: ResourceRedactor | None = None,
+    resource_transformer: ResourceTransformer | None = None,
     event_log_path: Path | None = None,
     event_log: JsonlEventLog | None = None,
     processed_ledger_path: Path | None = None,
@@ -133,6 +135,7 @@ def run_lark_event_watcher(
                 describer=resource_describer,
                 policy=resource_policy,
                 redactor=resource_redactor,
+                transformer=resource_transformer,
             )
         outcome = workflow.process(record)
         outcomes.append(outcome)
