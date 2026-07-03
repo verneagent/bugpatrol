@@ -242,6 +242,13 @@ It uses an OpenAI-compatible multimodal API configured by:
 - `BUGPATROL_VISION_*` environment variables
 - `~/.lark-bug-watcher/vision.json` as a compatibility fallback
 
+Asset cleanup is dry-run by default:
+
+```bash
+python -m bugpatrol cleanup-assets projects/example.toml --message-id-prefix om_live_test
+python -m bugpatrol cleanup-assets projects/example.toml --message-id-prefix om_live_test --delete --push
+```
+
 ## Development
 
 Operational guides:

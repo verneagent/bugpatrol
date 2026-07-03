@@ -7,10 +7,6 @@ media, and fix-notification slices.
 
 - Add reconnect/backoff and heartbeat handling for WebSocket mode.
 
-## Media Handling
-
-- Add attachment cleanup/reconcile command for test assets.
-
 ## Fix Notifications
 
 - Add scheduled reconcile for missed PR/commit events.

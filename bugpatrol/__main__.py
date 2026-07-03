@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from bugpatrol.agents import build_triage_agent_invocation
+from bugpatrol.asset_cleanup import cleanup_asset_repo
 from bugpatrol.backfill import run_lark_backfill
 from bugpatrol.config import load_project_config
 from bugpatrol.doctor import run_doctor
@@ -224,6 +225,12 @@ def main(argv: list[str] | None = None) -> int:
     notify_fix.add_argument("--pr", default="")
     notify_fix.add_argument("--commit", default="")
     notify_fix.add_argument("--write", action="store_true", help="send Lark notification and write metadata")
+
+    cleanup_assets = sub.add_parser("cleanup-assets", help="dry-run or delete materialized asset repo files")
+    cleanup_assets.add_argument("project_config", type=Path)
+    cleanup_assets.add_argument("--message-id-prefix", default="", help="only match asset paths with this prefix")
+    cleanup_assets.add_argument("--delete", action="store_true", help="delete matching files or directories")
+    cleanup_assets.add_argument("--push", action="store_true", help="commit and push after --delete")
 
     args = parser.parse_args(argv)
 
@@ -632,6 +639,23 @@ def main(argv: list[str] | None = None) -> int:
             lark=lark,
         )
         print(json.dumps(summary.__dict__, ensure_ascii=False))
+        return 0
+
+    if args.command == "cleanup-assets":
+        config = load_project_config(args.project_config)
+        if not config.assets.checkout_path:
+            print("missing [assets] checkout_path", file=sys.stderr)
+            return 2
+        result = cleanup_asset_repo(
+            checkout_path=Path(config.assets.checkout_path),
+            base_path=config.assets.base_path,
+            message_id_prefix=args.message_id_prefix,
+            delete=args.delete,
+            push=args.push,
+            branch=config.assets.branch,
+            remote_url=config.assets.remote_url or "origin",
+        )
+        print(json.dumps(result.__dict__, ensure_ascii=False))
         return 0
 
     parser.print_help(file=sys.stderr)
