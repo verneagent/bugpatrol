@@ -31,7 +31,6 @@ media, and fix-notification slices.
 
 - Extend `doctor` to validate:
   - `codex` or `claude` provider auth on the runner
-- Add examples for a minimal project config and a full project config.
 
 ## Documentation
 

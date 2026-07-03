@@ -1,0 +1,33 @@
+github_repo = "example-org/example-app"
+
+[lark]
+chat_id = "oc_example"
+app_id = "cli_example"
+app_secret_env = "EXAMPLE_LARK_APP_SECRET"
+bot_open_id = "ou_example_bot"
+
+[triage_agent]
+provider = "codex"
+runner_labels = ["self-hosted"]
+
+[prd]
+root_wiki_node = "LOCAL_PRD_DOCS"
+cache_path = "docs/prd"
+
+[intake]
+language = "zh-CN"
+
+[issue_field_names]
+Priority = "Priority"
+"Triage status" = "Triage status"
+Source = "Source"
+"Intake version" = "Intake version"
+"Triage verdict" = "Triage verdict"
+Platform = "Platform"
+Reproducibility = "Reproducibility"
+"Other platforms" = "Other platforms"
+Capability = "Capability"
+Evidence = "Evidence"
+"PRD status" = "PRD status"
+"Triage confidence" = "Triage confidence"
+"Owner reason" = "Owner reason"

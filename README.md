@@ -6,6 +6,9 @@ runs deterministic triage and fix-notification steps around that state.
 
 Project-specific values live in `projects/*.toml`. Product-specific migration
 plans, credentials, group IDs, and rollout notes should not live in this repo.
+Use `projects/minimal.example.toml` for the smallest valid config and
+`projects/full.example.toml` for optional assets, media, owners, and classifier
+settings.
 
 ## Principles
 

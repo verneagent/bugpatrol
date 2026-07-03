@@ -43,6 +43,12 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.assets.remote_url, "https://github.com/TheCloverLab/bugpatrol-todo-sandbox-assets.git")
         self.assertEqual(config.media.description_command[:3], ("python3", "-m", "bugpatrol.media_vision"))
 
+    def test_minimal_and_full_examples_validate(self) -> None:
+        for path in (Path("projects/minimal.example.toml"), Path("projects/full.example.toml")):
+            with self.subTest(path=path):
+                config = load_project_config(path)
+                config.validate_against(default_field_specs())
+
     def test_validation_rejects_missing_field(self) -> None:
         config = load_project_config(Path("projects/example.toml"))
         broken = parse_project_config(

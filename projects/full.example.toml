@@ -1,0 +1,69 @@
+github_repo = "example-org/example-app"
+
+[lark]
+chat_id = "oc_example"
+app_id = "cli_example"
+app_secret_env = "EXAMPLE_LARK_APP_SECRET"
+bot_open_id = "ou_example_bot"
+
+[triage_agent]
+provider = "codex"
+runner_labels = ["self-hosted", "bugpatrol-example-triage"]
+model = ""
+effort = ""
+
+[prd]
+root_wiki_node = "LOCAL_PRD_DOCS"
+cache_path = "docs/prd"
+include_globs = ["specs/**/spec.md", "changes/**/prd-snapshot.md"]
+
+[intake]
+language = "zh-CN"
+
+[assets]
+github_repo = "example-org/example-assets"
+checkout_path = "~/example-assets"
+base_path = ".github/issue-assets"
+branch = "main"
+remote_url = "https://github.com/example-org/example-assets.git"
+
+[media]
+description_command = [
+  "python3",
+  "-m",
+  "bugpatrol.media_vision",
+  "{path}",
+  "Describe the bug-relevant UI state, actions, error messages, and abnormal behavior.",
+]
+description_timeout_seconds = 300
+max_image_bytes = 10485760
+max_video_bytes = 104857600
+max_file_bytes = 52428800
+
+[owners]
+default = ["@example-triage"]
+
+[owners.paths]
+"src/auth/**" = ["@example-auth-owner"]
+
+[owners.capabilities]
+Quest = ["@example-quest-owner"]
+
+[followup_classifier]
+acknowledgement_texts = ["received"]
+fix_status_keywords = ["released"]
+
+[issue_field_names]
+Priority = "Priority"
+"Triage status" = "Triage status"
+Source = "Source"
+"Intake version" = "Intake version"
+"Triage verdict" = "Triage verdict"
+Platform = "Platform"
+Reproducibility = "Reproducibility"
+"Other platforms" = "Other platforms"
+Capability = "Capability"
+Evidence = "Evidence"
+"PRD status" = "PRD status"
+"Triage confidence" = "Triage confidence"
+"Owner reason" = "Owner reason"
