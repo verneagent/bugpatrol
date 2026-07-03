@@ -21,7 +21,7 @@ from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lark import LarkOpenApiMessengerClient
 from bugpatrol.ownership import load_codeowners, resolve_configured_owners, resolve_owners
 from bugpatrol.prd import load_prd_documents, search_prd_documents
-from bugpatrol.resources import CommandResourceDescriber, GitHubAssetRepoStore, ResourcePolicy
+from bugpatrol.resources import CommandResourceDescriber, CommandResourceRedactor, GitHubAssetRepoStore, ResourcePolicy
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
 from bugpatrol.triage_result import apply_triage_result, build_triage_dry_run_report, parse_triage_result
 from bugpatrol.triage_runner import execute_triage_run, prepare_triage_run
@@ -33,6 +33,30 @@ def media_resource_policy(config) -> ResourcePolicy:  # type: ignore[no-untyped-
         max_image_bytes=config.media.max_image_bytes,
         max_video_bytes=config.media.max_video_bytes,
         max_file_bytes=config.media.max_file_bytes,
+    )
+
+
+def media_resource_describer(config) -> CommandResourceDescriber | None:  # type: ignore[no-untyped-def]
+    if not config.media.description_command:
+        return None
+    temp_dir = Path(config.media.description_temp_dir) if config.media.description_temp_dir else None
+    return CommandResourceDescriber(
+        command=config.media.description_command,
+        timeout_seconds=config.media.description_timeout_seconds,
+        temp_dir=temp_dir,
+        retries=config.media.description_retries,
+        retry_backoff_seconds=config.media.description_retry_backoff_seconds,
+    )
+
+
+def media_resource_redactor(config) -> CommandResourceRedactor | None:  # type: ignore[no-untyped-def]
+    if not config.media.redaction_command:
+        return None
+    temp_dir = Path(config.media.description_temp_dir) if config.media.description_temp_dir else None
+    return CommandResourceRedactor(
+        command=config.media.redaction_command,
+        timeout_seconds=config.media.redaction_timeout_seconds,
+        temp_dir=temp_dir,
     )
 
 
@@ -211,16 +235,8 @@ def main(argv: list[str] | None = None) -> int:
                 branch=config.assets.branch,
                 remote_url=config.assets.remote_url,
             )
-        resource_describer = None
-        if config.media.description_command:
-            temp_dir = Path(config.media.description_temp_dir) if config.media.description_temp_dir else None
-            resource_describer = CommandResourceDescriber(
-                command=config.media.description_command,
-                timeout_seconds=config.media.description_timeout_seconds,
-                temp_dir=temp_dir,
-                retries=config.media.description_retries,
-                retry_backoff_seconds=config.media.description_retry_backoff_seconds,
-            )
+        resource_describer = media_resource_describer(config)
+        resource_redactor = media_resource_redactor(config)
         resource_policy = media_resource_policy(config)
         result = run_lark_backfill(
             config=config,
@@ -232,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
             resource_store=resource_store,
             resource_describer=resource_describer,
             resource_policy=resource_policy,
+            resource_redactor=resource_redactor,
         )
         print(
             json.dumps(
@@ -300,16 +317,8 @@ def main(argv: list[str] | None = None) -> int:
                 branch=config.assets.branch,
                 remote_url=config.assets.remote_url,
             )
-        resource_describer = None
-        if config.media.description_command:
-            temp_dir = Path(config.media.description_temp_dir) if config.media.description_temp_dir else None
-            resource_describer = CommandResourceDescriber(
-                command=config.media.description_command,
-                timeout_seconds=config.media.description_timeout_seconds,
-                temp_dir=temp_dir,
-                retries=config.media.description_retries,
-                retry_backoff_seconds=config.media.description_retry_backoff_seconds,
-            )
+        resource_describer = media_resource_describer(config)
+        resource_redactor = media_resource_redactor(config)
         resource_policy = media_resource_policy(config)
         result = run_polling_watcher(
             config=config,
@@ -323,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
             resource_store=resource_store,
             resource_describer=resource_describer,
             resource_policy=resource_policy,
+            resource_redactor=resource_redactor,
             event_log_path=args.event_log,
             processed_ledger_path=args.processed_ledger,
             lease_file=args.lease_file,
@@ -368,16 +378,8 @@ def main(argv: list[str] | None = None) -> int:
                 branch=config.assets.branch,
                 remote_url=config.assets.remote_url,
             )
-        resource_describer = None
-        if config.media.description_command:
-            temp_dir = Path(config.media.description_temp_dir) if config.media.description_temp_dir else None
-            resource_describer = CommandResourceDescriber(
-                command=config.media.description_command,
-                timeout_seconds=config.media.description_timeout_seconds,
-                temp_dir=temp_dir,
-                retries=config.media.description_retries,
-                retry_backoff_seconds=config.media.description_retry_backoff_seconds,
-            )
+        resource_describer = media_resource_describer(config)
+        resource_redactor = media_resource_redactor(config)
         resource_policy = media_resource_policy(config)
         result = run_lark_event_watcher(
             config=config,
@@ -389,6 +391,7 @@ def main(argv: list[str] | None = None) -> int:
             resource_store=resource_store,
             resource_describer=resource_describer,
             resource_policy=resource_policy,
+            resource_redactor=resource_redactor,
             event_log_path=args.event_log,
             processed_ledger_path=args.processed_ledger,
             triage_queue_path=args.triage_queue,

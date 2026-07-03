@@ -37,6 +37,11 @@ class ResourceDescriber(Protocol):
         """Return a textual media description for triage."""
 
 
+class ResourceRedactor(Protocol):
+    def redact(self, *, ref: "LarkResourceRef", resource: DownloadedLarkResource) -> DownloadedLarkResource:
+        """Return a redacted resource before upload or vision."""
+
+
 @dataclass(frozen=True)
 class ResourcePolicy:
     max_image_bytes: int = 0
@@ -211,6 +216,53 @@ class CommandResourceDescriber:
         return f"vision description unavailable: {detail[:300]}"
 
 
+class CommandResourceRedactor:
+    def __init__(
+        self,
+        *,
+        command: tuple[str, ...],
+        timeout_seconds: int = 300,
+        temp_dir: Path | None = None,
+    ) -> None:
+        self._command = command
+        self._timeout_seconds = timeout_seconds
+        self._temp_dir = temp_dir
+
+    def redact(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> DownloadedLarkResource:
+        if not self._command:
+            return resource
+        temp_root = self._temp_dir
+        if temp_root is not None:
+            temp_root.mkdir(parents=True, exist_ok=True)
+        filename = _resource_filename(resource=resource, fallback=ref.resource_key)
+        with tempfile.TemporaryDirectory(dir=temp_root) as tmp:
+            path = Path(tmp) / filename
+            path.write_bytes(resource.content)
+            command = tuple(
+                _format_command_part(part, path=path, ref=ref, resource=resource)
+                for part in self._command
+            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=self._timeout_seconds,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(f"redaction command timed out after {self._timeout_seconds}s") from exc
+            if completed.returncode != 0:
+                detail = (completed.stderr or completed.stdout or f"exit {completed.returncode}").strip()
+                raise RuntimeError(f"redaction command failed: {detail[:300]}")
+            redacted = path.read_bytes()
+        return DownloadedLarkResource(
+            content=redacted,
+            content_type=resource.content_type,
+            filename=resource.filename,
+        )
+
+
 def materialize_lark_attachments(
     *,
     record: IntakeRecord,
@@ -218,6 +270,7 @@ def materialize_lark_attachments(
     store: ResourceStore,
     describer: ResourceDescriber | None = None,
     policy: ResourcePolicy | None = None,
+    redactor: ResourceRedactor | None = None,
 ) -> IntakeRecord:
     attachments = tuple(
         materialize_attachment(
@@ -226,6 +279,7 @@ def materialize_lark_attachments(
             store=store,
             describer=describer,
             policy=policy,
+            redactor=redactor,
         )
         for attachment in record.attachments
     )
@@ -239,6 +293,7 @@ def materialize_attachment(
     store: ResourceStore,
     describer: ResourceDescriber | None = None,
     policy: ResourcePolicy | None = None,
+    redactor: ResourceRedactor | None = None,
 ) -> Attachment:
     ref = parse_lark_resource_url(attachment.url)
     if ref is None:
@@ -248,6 +303,8 @@ def materialize_attachment(
         resource_key=ref.resource_key,
         resource_type=_download_resource_type(ref.kind),
     )
+    if redactor is not None:
+        resource = redactor.redact(ref=ref, resource=resource)
     if policy is not None:
         rejection = policy.rejection_reason(ref=ref, resource=resource)
         if rejection:

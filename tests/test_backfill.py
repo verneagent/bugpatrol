@@ -67,6 +67,15 @@ class FakeResourceStore:
         return self.url
 
 
+class FakeResourceRedactor:
+    def redact(self, *, ref, resource):  # type: ignore[no-untyped-def]
+        return DownloadedLarkResource(
+            content=b"redacted",
+            content_type=resource.content_type,
+            filename="redacted.png",
+        )
+
+
 class BackfillTest(unittest.TestCase):
     def test_should_skip_bot_and_backlink_messages(self) -> None:
         self.assertTrue(should_skip_message(message(sender_open_id="ou_bot"), bot_open_id="ou_bot"))
@@ -222,6 +231,33 @@ class BackfillTest(unittest.TestCase):
         self.assertEqual(store.writes, [("om_1", "img_v2_abc", "bug.png")])
         self.assertIn(store.url, github.created[0].issue.body)
         self.assertNotIn("lark://message/om_1/image/img_v2_abc", github.created[0].issue.body)
+
+    def test_run_lark_backfill_applies_redactor_before_store(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkHistory(
+            [
+                message(
+                    msg_type="image",
+                    text="",
+                    raw_content=json.dumps({"image_key": "img_v2_abc"}),
+                )
+            ]
+        )
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        store = FakeResourceStore("https://assets/redacted.png")
+
+        result = run_lark_backfill(
+            config=config,
+            lark=lark,
+            workflow=workflow,
+            limit=10,
+            resource_store=store,
+            resource_redactor=FakeResourceRedactor(),
+        )
+
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(store.writes, [("om_1", "img_v2_abc", "redacted.png")])
 
     def test_run_lark_backfill_rejects_two_resource_stores(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

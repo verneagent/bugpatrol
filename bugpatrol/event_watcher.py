@@ -23,6 +23,7 @@ from bugpatrol.resources import (
     LocalResourceStore,
     ResourceDescriber,
     ResourcePolicy,
+    ResourceRedactor,
     ResourceStore,
     materialize_lark_attachments,
 )
@@ -58,6 +59,7 @@ def run_lark_event_watcher(
     resource_store: ResourceStore | None = None,
     resource_describer: ResourceDescriber | None = None,
     resource_policy: ResourcePolicy | None = None,
+    resource_redactor: ResourceRedactor | None = None,
     event_log_path: Path | None = None,
     event_log: JsonlEventLog | None = None,
     processed_ledger_path: Path | None = None,
@@ -130,6 +132,7 @@ def run_lark_event_watcher(
                 store=store,
                 describer=resource_describer,
                 policy=resource_policy,
+                redactor=resource_redactor,
             )
         outcome = workflow.process(record)
         outcomes.append(outcome)

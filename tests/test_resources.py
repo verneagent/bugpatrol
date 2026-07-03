@@ -9,6 +9,7 @@ from bugpatrol.intake import Attachment, IntakeRecord
 from bugpatrol.lark import DownloadedLarkResource
 from bugpatrol.resources import (
     CommandResourceDescriber,
+    CommandResourceRedactor,
     GitHubAssetRepoStore,
     LocalResourceStore,
     ResourcePolicy,
@@ -186,6 +187,47 @@ class ResourcesTest(unittest.TestCase):
 
         self.assertEqual(materialized.attachments[0].description, "visual: image-bytes")
 
+    def test_materialize_redacts_before_store_and_description(self) -> None:
+        record = IntakeRecord(
+            reporter_name="Reporter",
+            reporter_open_id="ou_1",
+            created_at="2026-07-01T00:00:00Z",
+            chat_id="oc_1",
+            root_id="om_1",
+            message_id="om_1",
+            original_text="bug",
+            attachments=(Attachment(kind="image", url="lark://message/om_1/image/img_v2_abc"),),
+        )
+        redactor = CommandResourceRedactor(
+            command=(
+                "python3",
+                "-c",
+                "from pathlib import Path; import sys; Path(sys.argv[1]).write_bytes(b'redacted-image')",
+                "{path}",
+            )
+        )
+        describer = CommandResourceDescriber(
+            command=(
+                "python3",
+                "-c",
+                "from pathlib import Path; import sys; print('visual: ' + Path(sys.argv[1]).read_text())",
+                "{path}",
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            materialized = materialize_lark_attachments(
+                record=record,
+                lark=FakeDownloader(),
+                store=LocalResourceStore(Path(tmp)),
+                describer=describer,
+                redactor=redactor,
+            )
+
+            path = Path(materialized.attachments[0].url)
+            self.assertEqual(path.read_bytes(), b"redacted-image")
+            self.assertEqual(materialized.attachments[0].description, "visual: redacted-image")
+
     def test_materialize_skips_resource_when_policy_rejects_size(self) -> None:
         attachment = Attachment(kind="image", url="lark://message/om_1/image/img_v2_abc")
         downloader = FakeDownloader()
@@ -204,6 +246,18 @@ class ResourcesTest(unittest.TestCase):
         self.assertIn("resource skipped", materialized.description)
         store.write.assert_not_called()
         describer.describe.assert_not_called()
+
+    def test_redaction_failure_blocks_materialization(self) -> None:
+        ref = parse_lark_resource_url("lark://message/om_1/image/img_v2_abc")
+        assert ref is not None
+
+        with self.assertRaisesRegex(RuntimeError, "redaction command failed"):
+            CommandResourceRedactor(
+                command=("python3", "-c", "import sys; print('secret detector failed', file=sys.stderr); raise SystemExit(2)")
+            ).redact(
+                ref=ref,
+                resource=DownloadedLarkResource(content=b"x", content_type="image/png", filename="bug.png"),
+            )
 
     def test_command_description_failure_is_non_blocking(self) -> None:
         ref = parse_lark_resource_url("lark://message/om_1/image/img_v2_abc")

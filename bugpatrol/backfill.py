@@ -15,6 +15,7 @@ from bugpatrol.resources import (
     LocalResourceStore,
     ResourceDescriber,
     ResourcePolicy,
+    ResourceRedactor,
     ResourceStore,
     materialize_lark_attachments,
 )
@@ -48,6 +49,7 @@ def run_lark_backfill(
     resource_store: ResourceStore | None = None,
     resource_describer: ResourceDescriber | None = None,
     resource_policy: ResourcePolicy | None = None,
+    resource_redactor: ResourceRedactor | None = None,
     processed_ledger: MessageLedger | None = None,
 ) -> BackfillResult:
     if resource_dir is not None and resource_store is not None:
@@ -98,6 +100,7 @@ def run_lark_backfill(
                 store=store,
                 describer=resource_describer,
                 policy=resource_policy,
+                redactor=resource_redactor,
             )
         outcome = workflow.process(record)
         outcomes.append(outcome)
