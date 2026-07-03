@@ -10,7 +10,7 @@ from typing import Protocol
 from bugpatrol.clients import GitHubIssue, GitHubIssuesClient, LarkMessengerClient
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import NATIVE_ISSUE_TYPES, validate_field_value
-from bugpatrol.intake import Attachment, IntakeRecord, render_issue_body
+from bugpatrol.intake import Attachment, IntakeRecord, format_created_at, render_issue_body
 from bugpatrol.triage_queue import TriageSignal, classify_triage_signal
 
 INTAKE_REPLY_META_MARKER = "BUGPATROL_INTAKE_REPLY_META"
@@ -198,7 +198,7 @@ def render_followup_comment(record: IntakeRecord, *, language: str = "en-US") ->
             f"## {copy['topic_update']}",
             "",
             f"- {copy['reporter']}: {record.reporter_name} ({record.reporter_open_id})",
-            f"- {copy['created_at']}: {record.created_at}",
+            f"- {copy['created_at']}: {format_created_at(record.created_at)}",
             f"- {copy['message_id']}: {record.message_id}",
             "",
             f"## {copy['message']}",

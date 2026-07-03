@@ -17,6 +17,7 @@ class LarkConfig:
     app_id: str
     app_secret_env: str
     bot_open_id: str
+    sender_names: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -163,6 +164,11 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
     include_globs = prd.get("include_globs") or ("**/*.md",)
     if not isinstance(include_globs, (list, tuple)) or not all(isinstance(item, str) for item in include_globs):
         raise ValueError("prd.include_globs must be a string list")
+    sender_names = lark.get("sender_names") or {}
+    if not isinstance(sender_names, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in sender_names.items()
+    ):
+        raise ValueError("lark.sender_names must be a string map")
 
     return ProjectConfig(
         github_repo=_required_str(data, "github_repo"),
@@ -171,6 +177,7 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             app_id=_required_str(lark, "app_id"),
             app_secret_env=_required_str(lark, "app_secret_env"),
             bot_open_id=_required_str(lark, "bot_open_id"),
+            sender_names=dict(sender_names),
         ),
         triage_agent=TriageAgentConfig(
             runner_labels=tuple(_required_list(triage_agent, "runner_labels")),

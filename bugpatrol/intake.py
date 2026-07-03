@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from bugpatrol.clients import GitHubIssue
@@ -85,7 +86,7 @@ def render_issue_body(record: IntakeRecord, *, language: str = "en-US") -> str:
             f"## {copy['lark_intake']}",
             "",
             f"- {copy['reporter']}: {record.reporter_name} ({record.reporter_open_id})",
-            f"- {copy['created_at']}: {record.created_at}",
+            f"- {copy['created_at']}: {format_created_at(record.created_at)}",
             f"- {copy['lark_topic']}: {record.lark_topic_url or record.root_id}",
             f"- {copy['message_id']}: {record.message_id}",
             "",
@@ -143,6 +144,24 @@ def _required_dict(value: Any, name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{name} must be an object")
     return value
+
+
+def format_created_at(value: str) -> str:
+    raw = value.strip()
+    if not raw:
+        return value
+    try:
+        timestamp = int(raw)
+    except ValueError:
+        return value
+    if timestamp <= 0:
+        return value
+    seconds = timestamp / 1000 if timestamp > 10_000_000_000 else timestamp
+    try:
+        readable = datetime.fromtimestamp(seconds, tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except (OSError, OverflowError, ValueError):
+        return value
+    return f"{readable} ({value})"
 
 
 def _copy(language: str) -> dict[str, str]:

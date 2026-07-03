@@ -10,6 +10,10 @@ Use `projects/minimal.example.toml` for the smallest valid config and
 `projects/full.example.toml` for optional assets, media, owners, and classifier
 settings.
 
+Use `[lark.sender_names]` in project config to render human-readable reporter
+names for known Lark `app_id` or `open_id` values. BugPatrol keeps the raw ID
+visible next to the display name for auditability.
+
 ## Principles
 
 - Intake records what the reporter said. It does not triage.

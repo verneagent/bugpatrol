@@ -145,7 +145,16 @@ class BackfillTest(unittest.TestCase):
             message(sender_open_id="", sender_type="app", sender_id="cli_reporter", sender_id_type="app_id")
         )
 
-        self.assertEqual(record.reporter_name, "Lark app cli_reporter")
+        self.assertEqual(record.reporter_name, "Lark app")
+        self.assertEqual(record.reporter_open_id, "cli_reporter")
+
+    def test_intake_record_from_lark_app_message_uses_configured_sender_name(self) -> None:
+        record = intake_record_from_lark_message(
+            message(sender_open_id="", sender_type="app", sender_id="cli_reporter", sender_id_type="app_id"),
+            sender_names={"cli_reporter": "Reporter Bot"},
+        )
+
+        self.assertEqual(record.reporter_name, "Reporter Bot (Lark app)")
         self.assertEqual(record.reporter_open_id, "cli_reporter")
 
     def test_image_message_extracts_attachment(self) -> None:

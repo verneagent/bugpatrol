@@ -226,7 +226,7 @@ class AttachmentIntakeLoopE2ETest(unittest.TestCase):
         self.assertEqual(second.outcomes[0].triage_signal.reason, "material_followup")
         self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Needs review"})
         self.assertEqual(len(github.created), 1)
-        self.assertIn("Lark app cli_external_reporter", github.created[0].issue.body)
+        self.assertIn("Lark app (cli_external_reporter)", github.created[0].issue.body)
         self.assertEqual(len(github.created[0].comments), 2)
         self.assertIn("补充：iOS 和 Android 都能复现。", github.created[0].comments[0])
         self.assertIn(

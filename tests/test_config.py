@@ -15,6 +15,13 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.github_repo, "example-org/example-app")
         self.assertEqual(config.intake.language, "zh-CN")
         self.assertEqual(
+            config.lark.sender_names,
+            {
+                "cli_external_reporter": "External Reporter Bot",
+                "ou_example_user": "Example QA",
+            },
+        )
+        self.assertEqual(
             config.prd.include_globs,
             ("**/*.md",),
         )

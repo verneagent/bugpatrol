@@ -158,7 +158,7 @@ def run_lark_event_watcher(
             skipped += 1
             events.append(BackfillEvent(message_id=message.message_id, action="skipped", reason="processed_ledger"))
             continue
-        record = intake_record_from_lark_message(message)
+        record = intake_record_from_lark_message(message, sender_names=config.lark.sender_names or {})
         if dry_run:
             skipped += 1
             events.append(BackfillEvent(message_id=message.message_id, action="skipped", reason="dry_run"))

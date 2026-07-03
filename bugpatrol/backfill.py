@@ -81,7 +81,7 @@ def run_lark_backfill(
                 )
             )
             continue
-        record = intake_record_from_lark_message(message)
+        record = intake_record_from_lark_message(message, sender_names=config.lark.sender_names or {})
         if dry_run:
             skipped += 1
             events.append(
@@ -171,9 +171,10 @@ def _is_template_system_message(message: LarkMessage) -> bool:
     return "template" in content and "text" not in content
 
 
-def intake_record_from_lark_message(message: LarkMessage) -> IntakeRecord:
+def intake_record_from_lark_message(message: LarkMessage, *, sender_names: dict[str, str] | None = None) -> IntakeRecord:
+    names = sender_names or {}
     reporter_id = message.sender_open_id or message.sender_id
-    reporter_name = message.sender_open_id or _app_reporter_name(message) or "Lark user"
+    reporter_name = _reporter_name(message, sender_names=names)
     return IntakeRecord(
         reporter_name=reporter_name,
         reporter_open_id=reporter_id,
@@ -186,10 +187,20 @@ def intake_record_from_lark_message(message: LarkMessage) -> IntakeRecord:
     )
 
 
-def _app_reporter_name(message: LarkMessage) -> str:
+def _app_reporter_name(message: LarkMessage, *, display_name: str = "") -> str:
     if message.sender_type == "app" and message.sender_id:
-        return f"Lark app {message.sender_id}"
+        if display_name:
+            return f"{display_name} (Lark app)"
+        return "Lark app"
     return ""
+
+
+def _reporter_name(message: LarkMessage, *, sender_names: dict[str, str]) -> str:
+    if message.sender_type == "app":
+        return _app_reporter_name(message, display_name=sender_names.get(message.sender_id, ""))
+    if message.sender_open_id:
+        return sender_names.get(message.sender_open_id) or message.sender_open_id
+    return "Lark user"
 
 
 def attachments_from_lark_message(message: LarkMessage) -> tuple[Attachment, ...]:
