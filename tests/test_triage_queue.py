@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from bugpatrol.config import FollowupClassifierConfig
 from bugpatrol.intake import Attachment, IntakeRecord
 from bugpatrol.triage_queue import (
     CommandTriageDispatcher,
@@ -41,6 +42,26 @@ class TriageQueueTest(unittest.TestCase):
 
         self.assertFalse(signal.should_enqueue)
         self.assertEqual(signal.reason, "acknowledgement")
+
+    def test_classifies_project_configured_acknowledgement(self) -> None:
+        signal = classify_triage_signal(
+            "updated",
+            make_record(original_text="已收到"),
+            FollowupClassifierConfig(acknowledgement_texts=("已收到",)),
+        )
+
+        self.assertFalse(signal.should_enqueue)
+        self.assertEqual(signal.reason, "acknowledgement")
+
+    def test_classifies_project_configured_fix_status_keyword(self) -> None:
+        signal = classify_triage_signal(
+            "updated",
+            make_record(original_text="这个已经发版了"),
+            FollowupClassifierConfig(fix_status_keywords=("发版",)),
+        )
+
+        self.assertFalse(signal.should_enqueue)
+        self.assertEqual(signal.reason, "fix_status_chatter")
 
     def test_classifies_attachment_followup_as_material(self) -> None:
         signal = classify_triage_signal(

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from bugpatrol.config import FollowupClassifierConfig
 from bugpatrol.intake import IntakeRecord
 
 
@@ -69,7 +70,11 @@ FIX_STATUS_KEYWORDS = (
 )
 
 
-def classify_triage_signal(action: str, record: IntakeRecord) -> TriageSignal:
+def classify_triage_signal(
+    action: str,
+    record: IntakeRecord,
+    config: FollowupClassifierConfig | None = None,
+) -> TriageSignal:
     asset_urls = tuple(item.url for item in record.attachments if item.url)
     if action == "created":
         return TriageSignal(
@@ -91,11 +96,17 @@ def classify_triage_signal(action: str, record: IntakeRecord) -> TriageSignal:
     if not text:
         return TriageSignal(should_enqueue=False, reason="empty_followup")
 
-    if text.lower() in ACK_TEXTS:
+    ack_texts = set(ACK_TEXTS)
+    if config is not None:
+        ack_texts.update(item.lower() for item in config.acknowledgement_texts)
+    if text.lower() in ack_texts:
         return TriageSignal(should_enqueue=False, reason="acknowledgement")
 
     lowered = f" {text.lower()} "
-    if any(keyword in lowered for keyword in FIX_STATUS_KEYWORDS):
+    fix_keywords = list(FIX_STATUS_KEYWORDS)
+    if config is not None:
+        fix_keywords.extend(item.lower() for item in config.fix_status_keywords)
+    if any(keyword in lowered for keyword in fix_keywords):
         return TriageSignal(should_enqueue=False, reason="fix_status_chatter")
 
     return TriageSignal(

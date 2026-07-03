@@ -61,7 +61,7 @@ class IntakeWorkflow:
                 action="updated",
                 issue=existing,
                 lark_reply=reply,
-                triage_signal=classify_triage_signal("updated", record),
+                triage_signal=classify_triage_signal("updated", record, self._config.followup_classifier),
             )
 
         fields = initial_intake_fields(record)
@@ -94,7 +94,7 @@ class IntakeWorkflow:
             action="created",
             issue=issue,
             lark_reply=reply,
-            triage_signal=classify_triage_signal("created", record),
+            triage_signal=classify_triage_signal("created", record, self._config.followup_classifier),
         )
 
 

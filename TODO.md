@@ -7,8 +7,6 @@ media, and fix-notification slices.
 
 - When material evidence arrives after `Done` or `Skipped`, move status to
   `Needs review`.
-- Improve the deterministic follow-up classifier with configurable project
-  keyword rules while keeping the default classifier project-neutral.
 
 ## Watcher Robustness
 

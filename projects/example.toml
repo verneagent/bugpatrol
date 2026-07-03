@@ -49,6 +49,10 @@ default = ["@example-triage"]
 [owners.capabilities]
 Quest = ["@example-quest-owner"]
 
+[followup_classifier]
+acknowledgement_texts = ["已收到"]
+fix_status_keywords = ["已发版"]
+
 [issue_field_names]
 Priority = "Priority"
 "Triage status" = "Triage status"

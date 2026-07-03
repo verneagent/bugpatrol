@@ -66,6 +66,12 @@ class OwnersConfig:
 
 
 @dataclass(frozen=True)
+class FollowupClassifierConfig:
+    acknowledgement_texts: tuple[str, ...] = ()
+    fix_status_keywords: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     github_repo: str
     lark: LarkConfig
@@ -75,6 +81,7 @@ class ProjectConfig:
     assets: AssetsConfig
     media: MediaConfig
     owners: OwnersConfig
+    followup_classifier: FollowupClassifierConfig
     issue_field_names: dict[str, str]
 
     @property
@@ -132,6 +139,9 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
     owners = data.get("owners") or {}
     if not isinstance(owners, dict):
         raise ValueError("[owners] must be a table")
+    followup_classifier = data.get("followup_classifier") or {}
+    if not isinstance(followup_classifier, dict):
+        raise ValueError("[followup_classifier] must be a table")
     field_names = _required_table(data, "issue_field_names")
     language = _required_str(intake, "language")
     if language not in {"zh-CN", "en-US"}:
@@ -180,6 +190,10 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             default=tuple(_optional_str_list(owners, "default")),
             paths=_optional_owner_map(owners, "paths"),
             capabilities=_optional_owner_map(owners, "capabilities"),
+        ),
+        followup_classifier=FollowupClassifierConfig(
+            acknowledgement_texts=tuple(_optional_str_list(followup_classifier, "acknowledgement_texts")),
+            fix_status_keywords=tuple(_optional_str_list(followup_classifier, "fix_status_keywords")),
         ),
         issue_field_names={
             str(name): str(value)

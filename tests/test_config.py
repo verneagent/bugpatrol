@@ -30,6 +30,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.owners.default, ("@example-triage",))
         self.assertEqual(config.owners.paths, {"src/auth/**": ("@example-auth-owner",)})
         self.assertEqual(config.owners.capabilities, {"Quest": ("@example-quest-owner",)})
+        self.assertEqual(config.followup_classifier.acknowledgement_texts, ("已收到",))
+        self.assertEqual(config.followup_classifier.fix_status_keywords, ("已发版",))
         self.assertIn("bugpatrol-example-triage", config.triage_agent.runner_labels)
         config.validate_against(default_field_specs())
 
