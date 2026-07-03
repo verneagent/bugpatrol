@@ -132,6 +132,14 @@ class BackfillTest(unittest.TestCase):
         self.assertEqual(result.processed, 2)
         self.assertEqual(result.outcomes[0].action, "created")
         self.assertEqual(result.outcomes[1].action, "updated")
+        self.assertEqual(
+            [(event.message_id, event.action, event.reason) for event in result.events],
+            [
+                ("om_bot", "skipped", "bot_message"),
+                ("om_old", "processed", "created"),
+                ("om_new", "processed", "updated"),
+            ],
+        )
         self.assertIn("首次上报", github.created[0].issue.body)
         self.assertIn("补充信息", github.created[0].comments[0])
 
@@ -241,6 +249,7 @@ class BackfillTest(unittest.TestCase):
 
         self.assertEqual(result.processed, 0)
         self.assertEqual(result.skipped, 1)
+        self.assertEqual(result.events[0].reason, "dry_run")
         self.assertEqual(github.created, [])
 
     def test_processed_ledger_skips_previously_processed_messages(self) -> None:

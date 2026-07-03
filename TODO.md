@@ -16,7 +16,6 @@ media, and fix-notification slices.
 
 ## Watcher Robustness
 
-- Add structured logs for scanned/skipped/processed messages.
 - Add a WebSocket event watcher while keeping polling as fallback.
 - Add reconnect/backoff and heartbeat handling for WebSocket mode.
 

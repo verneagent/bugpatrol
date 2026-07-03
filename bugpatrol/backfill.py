@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from bugpatrol.config import ProjectConfig
@@ -15,11 +15,20 @@ from bugpatrol.resources import LocalResourceStore, ResourceDescriber, ResourceS
 
 
 @dataclass(frozen=True)
+class BackfillEvent:
+    message_id: str
+    action: str
+    reason: str
+    issue_number: int | None = None
+
+
+@dataclass(frozen=True)
 class BackfillResult:
     scanned: int
     processed: int
     skipped: int
     outcomes: tuple[IntakeOutcome, ...]
+    events: tuple[BackfillEvent, ...] = field(default_factory=tuple)
 
 
 def run_lark_backfill(
@@ -38,17 +47,39 @@ def run_lark_backfill(
         raise ValueError("resource_dir and resource_store are mutually exclusive")
     messages = lark.list_chat_messages(chat_id=config.lark.chat_id, limit=limit)
     outcomes: list[IntakeOutcome] = []
+    events: list[BackfillEvent] = []
     skipped = 0
     for message in reversed(messages):
         if should_skip_message(message, bot_open_id=config.lark.bot_open_id):
             skipped += 1
+            events.append(
+                BackfillEvent(
+                    message_id=message.message_id,
+                    action="skipped",
+                    reason=skip_reason(message, bot_open_id=config.lark.bot_open_id),
+                )
+            )
             continue
         if processed_ledger is not None and processed_ledger.is_processed(message.message_id):
             skipped += 1
+            events.append(
+                BackfillEvent(
+                    message_id=message.message_id,
+                    action="skipped",
+                    reason="processed_ledger",
+                )
+            )
             continue
         record = intake_record_from_lark_message(message)
         if dry_run:
             skipped += 1
+            events.append(
+                BackfillEvent(
+                    message_id=message.message_id,
+                    action="skipped",
+                    reason="dry_run",
+                )
+            )
             continue
         store = resource_store
         if store is None and resource_dir is not None:
@@ -60,7 +91,16 @@ def run_lark_backfill(
                 store=store,
                 describer=resource_describer,
             )
-        outcomes.append(workflow.process(record))
+        outcome = workflow.process(record)
+        outcomes.append(outcome)
+        events.append(
+            BackfillEvent(
+                message_id=message.message_id,
+                action="processed",
+                reason=outcome.action,
+                issue_number=outcome.issue.number,
+            )
+        )
         if processed_ledger is not None:
             processed_ledger.mark_processed(message.message_id)
     return BackfillResult(
@@ -68,25 +108,30 @@ def run_lark_backfill(
         processed=len(outcomes),
         skipped=skipped,
         outcomes=tuple(outcomes),
+        events=tuple(events),
     )
 
 
 def should_skip_message(message: LarkMessage, *, bot_open_id: str) -> bool:
+    return skip_reason(message, bot_open_id=bot_open_id) != ""
+
+
+def skip_reason(message: LarkMessage, *, bot_open_id: str) -> str:
     if not message.message_id:
-        return True
+        return "missing_message_id"
     if message.sender_open_id == bot_open_id:
-        return True
+        return "bot_message"
     text = message.text.strip()
     attachments = attachments_from_lark_message(message)
     if not text and not attachments:
-        return True
+        return "empty_message"
     if text.startswith("已创建 GitHub issue #") or text.startswith("已追加到 GitHub issue #"):
-        return True
+        return "bugpatrol_backlink"
     if "BugPatrol live e2e seed" in text:
-        return True
+        return "live_e2e_seed"
     if "BugPatrol live test" in text:
-        return True
-    return False
+        return "live_test_message"
+    return ""
 
 
 def intake_record_from_lark_message(message: LarkMessage) -> IntakeRecord:

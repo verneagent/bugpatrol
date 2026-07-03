@@ -9,6 +9,7 @@ from typing import Protocol, Sequence
 
 from bugpatrol.backfill import BackfillResult, run_lark_backfill
 from bugpatrol.config import ProjectConfig
+from bugpatrol.event_log import JsonlEventLog
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.ledger import JsonMessageLedger, MessageLedger
 from bugpatrol.lease import FileLease
@@ -45,6 +46,8 @@ def run_polling_watcher(
     resource_dir: Path | None = None,
     resource_store: ResourceStore | None = None,
     resource_describer: ResourceDescriber | None = None,
+    event_log_path: Path | None = None,
+    event_log: JsonlEventLog | None = None,
     processed_ledger_path: Path | None = None,
     processed_ledger: MessageLedger | None = None,
     lease_file: Path | None = None,
@@ -55,6 +58,8 @@ def run_polling_watcher(
     triage_dispatch_command: str | Sequence[str] | None = None,
     triage_dispatcher: TriageDispatcher | None = None,
 ) -> WatchResult:
+    if event_log is not None and event_log_path is not None:
+        raise ValueError("event_log and event_log_path are mutually exclusive")
     if processed_ledger is not None and processed_ledger_path is not None:
         raise ValueError("processed_ledger and processed_ledger_path are mutually exclusive")
     if triage_queue is not None and triage_queue_path is not None:
@@ -70,6 +75,9 @@ def run_polling_watcher(
     ledger = processed_ledger
     if ledger is None and processed_ledger_path is not None:
         ledger = JsonMessageLedger.load(processed_ledger_path)
+    logger = event_log
+    if logger is None and event_log_path is not None:
+        logger = JsonlEventLog(event_log_path)
     lease = FileLease(lease_file, ttl_seconds=lease_ttl_seconds) if lease_file is not None else None
 
     iterations = 0
@@ -97,6 +105,27 @@ def run_polling_watcher(
             scanned += result.scanned
             processed += result.processed
             skipped += result.skipped
+            if logger is not None:
+                logger.write(
+                    {
+                        "event": "watch_scan",
+                        "iteration": iterations,
+                        "scanned": result.scanned,
+                        "processed": result.processed,
+                        "skipped": result.skipped,
+                    }
+                )
+                for event in result.events:
+                    logger.write(
+                        {
+                            "event": "lark_message",
+                            "iteration": iterations,
+                            "message_id": event.message_id,
+                            "action": event.action,
+                            "reason": event.reason,
+                            "issue_number": event.issue_number,
+                        }
+                    )
             if queue is not None:
                 for outcome in result.outcomes:
                     request = queue.enqueue(

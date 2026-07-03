@@ -64,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     watch.add_argument("--dry-run", action="store_true", help="scan without GitHub writes")
     watch.add_argument("--resource-dir", type=Path, help="download Lark resources before writing issues")
     watch.add_argument("--asset-repo", action="store_true", help="upload Lark resources to configured assets repo")
+    watch.add_argument("--event-log", type=Path, help="append structured watcher events to a JSONL file")
     watch.add_argument("--processed-ledger", type=Path, help="persist processed Lark message ids in this JSON file")
     watch.add_argument("--lease-file", type=Path, help="single-writer lease file for this watcher")
     watch.add_argument("--lease-ttl-seconds", type=float, default=120)
@@ -186,6 +187,7 @@ def main(argv: list[str] | None = None) -> int:
             resource_dir=args.resource_dir,
             resource_store=resource_store,
             resource_describer=resource_describer,
+            event_log_path=args.event_log,
             processed_ledger_path=args.processed_ledger,
             lease_file=args.lease_file,
             lease_ttl_seconds=args.lease_ttl_seconds,

@@ -54,6 +54,7 @@ python -m bugpatrol watch-lark projects/example.toml \
   --interval 30 \
   --limit 20 \
   --asset-repo \
+  --event-log .bugpatrol/watch-events.jsonl \
   --lease-file .bugpatrol/watch-lark.lock \
   --processed-ledger .bugpatrol/processed-messages.json \
   --triage-queue .bugpatrol/triage-queue.json \

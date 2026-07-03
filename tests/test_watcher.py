@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import unittest
+import json
 import tempfile
+import unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -140,6 +141,30 @@ class WatcherTest(unittest.TestCase):
                     interval_seconds=0,
                     lease_file=lease_file,
                 )
+
+    def test_run_polling_watcher_writes_event_log(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeHistoryLark()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        with tempfile.TemporaryDirectory() as temp:
+            event_log = Path(temp) / "watch-events.jsonl"
+            run_polling_watcher(
+                config=config,
+                lark=lark,  # type: ignore[arg-type]
+                workflow=workflow,
+                once=True,
+                interval_seconds=0,
+                event_log_path=event_log,
+            )
+            events = [json.loads(line) for line in event_log.read_text().splitlines()]
+
+        self.assertEqual(events[0]["event"], "watch_scan")
+        self.assertEqual(events[0]["processed"], 1)
+        self.assertEqual(events[1]["event"], "lark_message")
+        self.assertEqual(events[1]["action"], "processed")
+        self.assertEqual(events[1]["reason"], "created")
 
 
 class RecordingDispatcher:
