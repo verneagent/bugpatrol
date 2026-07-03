@@ -168,6 +168,33 @@ class FixNotifyTest(unittest.TestCase):
         self.assertEqual(len(lark.replies), 2)
         self.assertEqual(len(github.created[0].comments), 1)
 
+    def test_reconcile_fix_notifications_skips_unmanaged_issue(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        issue = github.create_issue(
+            repo=config.github_repo,
+            title="Legacy issue",
+            body="created before BugPatrol",
+            issue_type="Bug",
+            fields={},
+        )
+
+        result = reconcile_fix_notifications(
+            repo=config.github_repo,
+            candidates=(FixEventCandidate(event="pr_opened", issue_number=issue.number, pr="123"),),
+            dry_run=False,
+            github=github,  # type: ignore[arg-type]
+            lark=lark,
+        )
+
+        self.assertEqual(result.attempted, 1)
+        self.assertEqual(result.sent, 0)
+        self.assertEqual(result.skipped, 1)
+        self.assertIn("no BugPatrol Lark intake metadata", result.errors[0])
+        self.assertEqual(lark.replies, [])
+        self.assertEqual(github.created[0].comments, [])
+
     def test_reconcile_fix_notifications_resolves_issue_from_pr_timeline(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGitHubIssuesClient()

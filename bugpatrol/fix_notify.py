@@ -277,16 +277,21 @@ def reconcile_fix_notifications(
                 skipped += 1
                 errors.append(str(error))
                 continue
-        summary = apply_fix_notification(
-            repo=repo,
-            issue_number=issue_number,
-            event=candidate.event,
-            pr=candidate.pr,
-            commit=candidate.commit,
-            github=github,
-            lark=lark,
-            dry_run=dry_run,
-        )
+        try:
+            summary = apply_fix_notification(
+                repo=repo,
+                issue_number=issue_number,
+                event=candidate.event,
+                pr=candidate.pr,
+                commit=candidate.commit,
+                github=github,
+                lark=lark,
+                dry_run=dry_run,
+            )
+        except ValueError as error:
+            skipped += 1
+            errors.append(str(error))
+            continue
         summaries.append(summary)
     return FixReconcileResult(
         attempted=len(candidates),

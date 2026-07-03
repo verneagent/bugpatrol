@@ -15,6 +15,7 @@ from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import TRIAGE_OUTPUT_SCHEMA
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
+from bugpatrol.intake import require_bugpatrol_managed_issue
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
 from bugpatrol.triage_result import TriageResult, apply_triage_result, parse_triage_result
 
@@ -41,8 +42,9 @@ def prepare_triage_run(
     github: GitHubCliIssuesClient,
     prompt_path: Path = Path("prompts/triage.zh.md"),
 ) -> TriageRunPlan:
-    output_dir.mkdir(parents=True, exist_ok=True)
     issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
+    require_bugpatrol_managed_issue(issue)
+    output_dir.mkdir(parents=True, exist_ok=True)
     comments = github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)
     context = build_triage_context(
         issue=issue,
@@ -80,6 +82,8 @@ def execute_triage_run(
     github: GitHubCliIssuesClient,
     issue_fields: GitHubIssueFieldsClient,
 ) -> None:
+    issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
+    require_bugpatrol_managed_issue(issue)
     run_id = str(uuid4())
     mark_triage_running(
         config=config,

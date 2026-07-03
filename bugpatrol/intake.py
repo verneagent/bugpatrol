@@ -10,6 +10,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from bugpatrol.clients import GitHubIssue
+
 INTAKE_META_MARKER = "BUGPATROL_INTAKE_META"
 
 
@@ -114,6 +116,20 @@ def parse_intake_metadata(body: str) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         raise ValueError("intake metadata must be a JSON object")
     return data
+
+
+def is_bugpatrol_managed_issue(issue: GitHubIssue) -> bool:
+    """Return true when an issue was created by BugPatrol intake."""
+    return parse_intake_metadata(issue.body or "") is not None
+
+
+def require_bugpatrol_managed_issue(issue: GitHubIssue) -> dict[str, Any]:
+    metadata = parse_intake_metadata(issue.body or "")
+    if metadata is None:
+        raise ValueError(
+            f"issue #{issue.number} is not managed by BugPatrol: missing {INTAKE_META_MARKER}"
+        )
+    return metadata
 
 
 def _required_str(data: dict[str, Any], key: str) -> str:

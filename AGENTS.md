@@ -32,5 +32,6 @@ called and the result was read back.
 - Triage is a separate workflow.
 - Fixing is out of scope until intake and triage are stable.
 - GitHub issues and fields are the durable workflow surface.
-- Hidden metadata is only for idempotency and backlinks.
-
+- Intake metadata is the worker ownership boundary. Triage and notification
+  workers must only write issues that contain `BUGPATROL_INTAKE_META`.
+- Other hidden metadata is for idempotency and backlinks.

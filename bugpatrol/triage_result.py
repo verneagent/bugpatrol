@@ -13,7 +13,7 @@ from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import NATIVE_ISSUE_TYPES, default_field_specs, validate_field_value
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
-from bugpatrol.intake import parse_intake_metadata
+from bugpatrol.intake import parse_intake_metadata, require_bugpatrol_managed_issue
 
 
 @dataclass(frozen=True)
@@ -103,6 +103,8 @@ def apply_triage_result(
     issue_fields: GitHubIssueFieldsClient,
     lark: LarkMessengerClient | None = None,
 ) -> TriageApplySummary:
+    issue = github.get_issue(repo=repo, issue_number=issue_number)
+    require_bugpatrol_managed_issue(issue)
     fingerprint = triage_result_fingerprint(result)
     github.set_issue_type(repo=repo, issue_number=issue_number, issue_type=result.issue_type)
     issue_fields.add_issue_field_values(

@@ -18,7 +18,9 @@ settings.
 - Fix notification is separate from triage.
 - GitHub issues, comments, native Issue Type, Issue Fields, assignees, PRs, and
   commits are the durable workflow surface.
-- Hidden metadata is used only for idempotency and backlinks.
+- `BUGPATROL_INTAKE_META` is the worker ownership boundary. Triage and notify
+  workers only write issues that contain it.
+- Other hidden metadata is used for idempotency and backlinks.
 - Lark is the reporter interaction surface, not the durable source of truth.
 
 ## Architecture
@@ -92,6 +94,9 @@ lark-cli event listen --format ndjson \
 `triage` is a one-shot job. It reads an issue, comments, local PRD/docs, media
 evidence, and owner data; invokes the configured agent provider; validates the
 JSON result; then writes GitHub fields, assignee, and a triage comment.
+It only writes issues that contain `BUGPATROL_INTAKE_META`; older project issues
+without that metadata are rejected before status fields, comments, or output
+files are written.
 
 Typical command:
 
@@ -114,6 +119,8 @@ workflow template. Copy it into the target app repo and set
 
 `notify` is a one-shot job. It reports fix progress from PRs, merges, linked
 commits, or issue closure back to the original Lark topic, with idempotency.
+It only sends notifications for issues that contain `BUGPATROL_INTAKE_META`;
+reconcile skips older project issues without that metadata.
 
 Typical command:
 
@@ -220,9 +227,11 @@ Project configs map these logical names to the actual GitHub Issue Field names.
 
 ## Metadata
 
-`bugpatrol` writes hidden HTML comments for idempotency and backlinks:
+`bugpatrol` writes hidden HTML comments for worker ownership, idempotency, and
+backlinks:
 
-- `BUGPATROL_INTAKE_META`: source Lark chat/root/message and attachment URLs.
+- `BUGPATROL_INTAKE_META`: marks an issue as BugPatrol-managed and records the
+  source Lark chat/root/message and attachment URLs.
 - `BUGPATROL_INTAKE_REPLY_META`: later Lark follow-up message references.
 - `BUGPATROL_TRIAGE_META`: applied triage result fingerprint.
 - `BUGPATROL_FIX_META`: sent fix notification keys.

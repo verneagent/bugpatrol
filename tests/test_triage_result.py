@@ -41,7 +41,7 @@ class FakeGithub:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
         self.comments: list[str] = []
-        self.issue_body = ""
+        self.issue_body = managed_issue_body()
 
     def set_issue_type(self, **kwargs: object) -> None:
         self.calls.append(("set_issue_type", kwargs))
@@ -127,12 +127,37 @@ class TriageResultTest(unittest.TestCase):
 
         self.assertEqual(
             [name for name, _ in github.calls],
-            ["set_issue_type", "list_issue_comments", "add_issue_comment", "add_assignee"],
+            ["get_issue", "set_issue_type", "list_issue_comments", "add_issue_comment", "add_assignee"],
         )
         self.assertEqual(issue_fields.calls[0][0], "add_issue_field_values")
         self.assertTrue(summary.comment_added)
         self.assertFalse(summary.duplicate_comment_skipped)
         self.assertIn("BUGPATROL_TRIAGE_META", github.comments[0])
+
+    def test_apply_triage_result_rejects_unmanaged_issue_before_writes(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.issue_body = "legacy issue"
+        issue_fields = FakeIssueFields()
+        result = TriageResult(
+            issue_type="Bug",
+            fields={"Source": "Lark"},
+            assignee="garlanddiego",
+            comment_markdown="done",
+        )
+
+        with self.assertRaisesRegex(ValueError, "missing BUGPATROL_INTAKE_META"):
+            apply_triage_result(
+                repo=config.github_repo,
+                issue_number=1,
+                config=config,
+                result=result,
+                github=github,  # type: ignore[arg-type]
+                issue_fields=issue_fields,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual([name for name, _ in github.calls], ["get_issue"])
+        self.assertEqual(issue_fields.calls, [])
 
     def test_build_triage_dry_run_report_shows_field_changes_without_writes(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
@@ -279,6 +304,20 @@ class TriageResultTest(unittest.TestCase):
         self.assertIn("#7", message)
         self.assertIn("1. 问题一", message)
         self.assertIn("2. 问题二", message)
+
+
+def managed_issue_body() -> str:
+    return render_issue_body(
+        IntakeRecord(
+            reporter_name="Reporter",
+            reporter_open_id="ou_1",
+            created_at="2026-07-01T00:00:00Z",
+            chat_id="oc_1",
+            root_id="om_root",
+            message_id="om_1",
+            original_text="bug",
+        )
+    )
 
 
 if __name__ == "__main__":

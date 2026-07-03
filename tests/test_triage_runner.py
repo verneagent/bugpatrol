@@ -9,6 +9,7 @@ from unittest.mock import patch
 from bugpatrol.agents import AgentInvocation
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment
 from bugpatrol.config import load_project_config
+from bugpatrol.intake import IntakeRecord, render_issue_body
 from bugpatrol.triage_runner import (
     TriageRunPlan,
     append_triage_run_metadata,
@@ -20,17 +21,18 @@ from bugpatrol.triage_runner import (
 
 
 class FakeGithub:
-    def __init__(self) -> None:
+    def __init__(self, *, issue_body: str | None = None) -> None:
         self.comments: list[str] = ["Follow-up comment"]
         self.issue_types: list[str] = []
         self.assignees: list[str] = []
+        self.issue_body = issue_body if issue_body is not None else managed_issue_body()
 
     def get_issue(self, *, repo: str, issue_number: int) -> GitHubIssue:
         return GitHubIssue(
             number=issue_number,
             url=f"https://github.test/{repo}/issues/{issue_number}",
             title="Todo empty state missing",
-            body="Deleting all todos does not show empty state.",
+            body=self.issue_body,
         )
 
     def add_issue_comment(self, *, repo: str, issue_number: int, body: str) -> None:
@@ -83,6 +85,23 @@ class TriageRunnerTest(unittest.TestCase):
             self.assertIn("Follow-up comment", plan.context_path.read_text())
             self.assertIn("triage-context.md", plan.invocation.command[-1])
 
+    def test_prepare_triage_run_rejects_unmanaged_issue(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "run"
+
+            with self.assertRaisesRegex(ValueError, "missing BUGPATROL_INTAKE_META"):
+                prepare_triage_run(
+                    config=config,
+                    issue_number=7,
+                    repo_path=root,
+                    output_dir=output_dir,
+                    github=FakeGithub(issue_body="legacy issue"),  # type: ignore[arg-type]
+                )
+
+            self.assertFalse(output_dir.exists())
+
     def test_comment_ids_ignore_triage_run_metadata_comments(self) -> None:
         comments = (
             GitHubIssueComment(id="1", body="Reporter follow-up"),
@@ -118,6 +137,31 @@ class TriageRunnerTest(unittest.TestCase):
         self.assertEqual(issue_fields.writes[0]["values"], {"Triage status": "Running"})
         self.assertEqual(issue_fields.writes[1]["values"], {"Triage status": "Failed"})
         self.assertIn("exited with code `42`", github.comments[-1])
+
+    def test_execute_triage_run_rejects_unmanaged_issue_before_writes(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub(issue_body="legacy issue")
+        issue_fields = FakeIssueFields()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=root / "output.json",
+                invocation=AgentInvocation(provider="codex", command=["false"]),
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing BUGPATROL_INTAKE_META"):
+                execute_triage_run(
+                    config=config,
+                    issue_number=7,
+                    plan=plan,
+                    github=github,  # type: ignore[arg-type]
+                    issue_fields=issue_fields,  # type: ignore[arg-type]
+                )
+
+        self.assertEqual(issue_fields.writes, [])
+        self.assertEqual(github.comments, ["Follow-up comment"])
 
     def test_execute_triage_run_marks_needs_review_when_comments_changed(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
@@ -235,6 +279,20 @@ def valid_triage_output() -> str:
       "comment_markdown": "## Triage Analysis\\n\\nLooks like a code bug."
     }
     """
+
+
+def managed_issue_body() -> str:
+    return render_issue_body(
+        IntakeRecord(
+            reporter_name="Reporter",
+            reporter_open_id="ou_1",
+            created_at="2026-07-01T00:00:00Z",
+            chat_id="oc_1",
+            root_id="om_root",
+            message_id="om_1",
+            original_text="Deleting all todos does not show empty state.",
+        )
+    )
 
 
 if __name__ == "__main__":
