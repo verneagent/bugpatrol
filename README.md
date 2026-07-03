@@ -207,6 +207,46 @@ The four project entry points are:
 - `bugpatrol-reconcile.yml`: scheduled GitHub scan that backfills missed triage
   and notification work.
 
+## Smoke Testing
+
+Use local e2e tests for the product contract before calling real systems:
+
+```bash
+python -m pytest tests/e2e/test_intake_loop.py
+python -m pytest tests/e2e/test_attachment_intake_loop.py
+python -m pytest tests/e2e/test_fix_notify_loop.py
+```
+
+The project-neutral intake/media smoke should cover:
+
+- a non-BugPatrol Lark app or user creates a topic
+- a text follow-up in the same topic appends a GitHub issue comment
+- an image or video follow-up is copied to the configured asset store
+- media description is written into the issue comment
+- material follow-up after `Done` or `Skipped` marks `Triage status` as
+  `Needs review`
+- the watcher replies back to the same Lark topic with create/update backlinks
+- repeated scans skip already-processed messages through the ledger
+
+Live smoke is opt-in. Run it only against a sandbox group/repo or a real project
+that has explicitly approved the test artifacts. A minimal live run is:
+
+1. Start one watcher daemon with `--asset-repo`, `--processed-ledger`, and
+   `--triage-queue`.
+2. Send a root Lark topic from a non-BugPatrol sender.
+3. Send a text reply in the same topic before the quiet window expires.
+4. Verify one GitHub issue is created and the reply becomes one issue comment.
+5. Verify the watcher sends `已创建 GitHub issue` and `已追加到 GitHub issue`
+   backlinks into the original Lark topic.
+6. Wait for the coalesced triage dispatch and verify the triage workflow writes
+   fields, assignee, and triage comment.
+7. Send an image or video reply after triage is `Done`.
+8. Verify the issue gets a new media comment, the asset URL points at the
+   configured asset repo, media description is present, and `Triage status`
+   becomes `Needs review`.
+9. Verify the queue dispatches one follow-up triage run after the quiet window
+   and repeated watcher scans do not duplicate comments or Lark replies.
+
 ## Issue State
 
 ### Native Issue Type
