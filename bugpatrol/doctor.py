@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 from dataclasses import dataclass
 
 from bugpatrol.config import ProjectConfig
@@ -35,6 +36,7 @@ def run_doctor(
     checks.append(_check("media_vision_command", lambda: _check_media_command(config)))
     checks.append(_check("ffmpeg", lambda: _check_ffmpeg(config)))
     checks.append(_check("triage_agent", lambda: _check_triage_agent(config)))
+    checks.append(_check("triage_agent_auth", lambda: _check_triage_agent_auth(config)))
     if lark is not None:
         checks.append(_check("lark_history", lambda: _check_lark(config, lark)))
     return tuple(checks)
@@ -104,6 +106,33 @@ def _check_triage_agent(config: ProjectConfig) -> str:
     if not config.triage_agent.runner_labels:
         raise ValueError("missing runner labels")
     return config.triage_agent.provider
+
+
+def _check_triage_agent_auth(config: ProjectConfig) -> str:
+    command = _triage_agent_auth_command(config)
+    executable = command[0]
+    if shutil.which(executable) is None:
+        raise ValueError(f"{executable} not found")
+    completed = subprocess.run(
+        list(command),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or f"exit {completed.returncode}").strip()
+        raise ValueError(f"{config.triage_agent.provider} auth check failed: {detail[:300]}")
+    detail = (completed.stdout or completed.stderr).strip().splitlines()
+    return detail[0] if detail else config.triage_agent.provider
+
+
+def _triage_agent_auth_command(config: ProjectConfig) -> tuple[str, ...]:
+    if config.triage_agent.provider == "codex":
+        return ("codex", "login", "status")
+    if config.triage_agent.provider == "claude":
+        return ("claude", "auth", "status")
+    raise ValueError(f"unsupported provider: {config.triage_agent.provider}")
 
 
 def _check_lark(config: ProjectConfig, lark: LarkOpenApiMessengerClient) -> str:

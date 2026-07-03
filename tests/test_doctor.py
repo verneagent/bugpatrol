@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import unittest
+import subprocess
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from bugpatrol.config import load_project_config
-from bugpatrol.doctor import run_doctor
+from bugpatrol.doctor import _triage_agent_auth_command, run_doctor
 from bugpatrol.github_fields import IssueField
 
 
@@ -30,11 +33,19 @@ class DoctorTest(unittest.TestCase):
     def test_run_doctor_reports_all_checks_ok(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
 
-        checks = run_doctor(
-            config=config,
-            github=FakeGithub(),  # type: ignore[arg-type]
-            issue_fields=FakeIssueFields(),  # type: ignore[arg-type]
-        )
+        with patch("bugpatrol.doctor.shutil.which", return_value="/usr/bin/tool"):
+            with patch("bugpatrol.doctor.subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(
+                    ["codex", "login", "status"],
+                    0,
+                    "Logged in using ChatGPT\n",
+                    "",
+                )
+                checks = run_doctor(
+                    config=config,
+                    github=FakeGithub(),  # type: ignore[arg-type]
+                    issue_fields=FakeIssueFields(),  # type: ignore[arg-type]
+                )
 
         self.assertTrue(all(check.ok for check in checks))
         self.assertEqual(
@@ -48,8 +59,44 @@ class DoctorTest(unittest.TestCase):
                 "media_vision_command",
                 "ffmpeg",
                 "triage_agent",
+                "triage_agent_auth",
             ],
         )
+        run.assert_called_once_with(
+            ["codex", "login", "status"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+
+    def test_triage_agent_auth_command_matches_provider(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        claude = replace(config, triage_agent=replace(config.triage_agent, provider="claude"))
+
+        self.assertEqual(_triage_agent_auth_command(config), ("codex", "login", "status"))
+        self.assertEqual(_triage_agent_auth_command(claude), ("claude", "auth", "status"))
+
+    def test_doctor_reports_agent_auth_failure(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+
+        with patch("bugpatrol.doctor.shutil.which", return_value="/usr/bin/tool"):
+            with patch("bugpatrol.doctor.subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(
+                    ["codex", "login", "status"],
+                    1,
+                    "",
+                    "not logged in",
+                )
+                checks = run_doctor(
+                    config=config,
+                    github=FakeGithub(),  # type: ignore[arg-type]
+                    issue_fields=FakeIssueFields(),  # type: ignore[arg-type]
+                )
+
+        auth = next(check for check in checks if check.name == "triage_agent_auth")
+        self.assertFalse(auth.ok)
+        self.assertIn("not logged in", auth.detail)
 
 
 if __name__ == "__main__":

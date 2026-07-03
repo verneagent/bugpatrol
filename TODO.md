@@ -7,11 +7,6 @@ media, and fix-notification slices.
 
 - Add reconnect/backoff and heartbeat handling for WebSocket mode.
 
-## Configuration And Doctor
-
-- Extend `doctor` to validate:
-  - `codex` or `claude` provider auth on the runner
-
 ## Documentation
 
 - Keep `README.md` project-neutral.
