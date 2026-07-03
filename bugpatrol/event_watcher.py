@@ -144,13 +144,13 @@ def run_lark_event_watcher(
             skipped += 1
             events.append(BackfillEvent(message_id=message.message_id, action="skipped", reason="wrong_chat"))
             continue
-        if should_skip_message(message, bot_open_id=config.lark.bot_open_id):
+        if should_skip_message(message, bot_open_id=config.lark.bot_open_id, bot_app_id=config.lark.app_id):
             skipped += 1
             events.append(
                 BackfillEvent(
                     message_id=message.message_id,
                     action="skipped",
-                    reason=skip_reason(message, bot_open_id=config.lark.bot_open_id),
+                    reason=skip_reason(message, bot_open_id=config.lark.bot_open_id, bot_app_id=config.lark.app_id),
                 )
             )
             continue

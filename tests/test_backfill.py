@@ -90,6 +90,20 @@ class BackfillTest(unittest.TestCase):
         self.assertTrue(should_skip_message(message(sender_open_id="ou_bot"), bot_open_id="ou_bot"))
         self.assertTrue(
             should_skip_message(
+                message(sender_open_id="", sender_type="app", sender_id="cli_bugpatrol", sender_id_type="app_id"),
+                bot_open_id="ou_bot",
+                bot_app_id="cli_bugpatrol",
+            )
+        )
+        self.assertFalse(
+            should_skip_message(
+                message(sender_open_id="", sender_type="app", sender_id="cli_reporter", sender_id_type="app_id"),
+                bot_open_id="ou_bot",
+                bot_app_id="cli_bugpatrol",
+            )
+        )
+        self.assertTrue(
+            should_skip_message(
                 message(text="已创建 GitHub issue #1: https://github.com/x/y/issues/1"),
                 bot_open_id="ou_bot",
             )
@@ -125,6 +139,14 @@ class BackfillTest(unittest.TestCase):
         self.assertEqual(record.root_id, "om_root")
         self.assertEqual(record.message_id, "om_1")
         self.assertEqual(record.original_text, "Todo 删除最后一项后空状态没出现")
+
+    def test_intake_record_from_lark_app_message_uses_app_reporter(self) -> None:
+        record = intake_record_from_lark_message(
+            message(sender_open_id="", sender_type="app", sender_id="cli_reporter", sender_id_type="app_id")
+        )
+
+        self.assertEqual(record.reporter_name, "Lark app cli_reporter")
+        self.assertEqual(record.reporter_open_id, "cli_reporter")
 
     def test_image_message_extracts_attachment(self) -> None:
         msg = message(

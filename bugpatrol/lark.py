@@ -30,6 +30,8 @@ class LarkMessage:
     msg_type: str
     text: str
     raw_content: str = ""
+    sender_id: str = ""
+    sender_id_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -266,25 +268,44 @@ def parse_lark_message(item: dict[str, object], *, default_chat_id: str) -> Lark
         if isinstance(raw_content, str):
             content = raw_content
     sender = item.get("sender")
-    sender_id = ""
+    sender_open_id = ""
+    sender_raw_id = ""
+    sender_id_type = ""
     sender_type = ""
     if isinstance(sender, dict):
         sender_type = str(sender.get("sender_type") or "")
+        sender_id_type = str(sender.get("id_type") or "")
         sender_id_data = sender.get("id")
         if isinstance(sender_id_data, dict):
-            sender_id = str(sender_id_data.get("open_id") or "")
+            sender_open_id = str(sender_id_data.get("open_id") or "")
+            if sender_open_id:
+                sender_raw_id = sender_open_id
+                sender_id_type = sender_id_type or "open_id"
+            else:
+                for key in ("app_id", "user_id", "union_id"):
+                    value = sender_id_data.get(key)
+                    if isinstance(value, str) and value:
+                        sender_raw_id = value
+                        sender_id_type = sender_id_type or key
+                        break
+        elif isinstance(sender_id_data, str):
+            sender_raw_id = sender_id_data
+            if sender_id_type in {"open_id", "user_open_id"}:
+                sender_open_id = sender_id_data
     chat_id = str(item.get("chat_id") or default_chat_id)
     message_id = str(item.get("message_id") or "")
     return LarkMessage(
         message_id=message_id,
         chat_id=chat_id,
         root_id=str(item.get("root_id") or item.get("parent_id") or message_id),
-        sender_open_id=sender_id,
+        sender_open_id=sender_open_id,
         sender_type=sender_type,
         create_time=str(item.get("create_time") or ""),
         msg_type=str(item.get("msg_type") or ""),
         text=_extract_text(content),
         raw_content=content,
+        sender_id=sender_raw_id,
+        sender_id_type=sender_id_type,
     )
 
 

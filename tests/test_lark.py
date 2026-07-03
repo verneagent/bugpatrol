@@ -199,6 +199,36 @@ class LarkOpenApiMessengerClientTest(unittest.TestCase):
         self.assertEqual(parsed.sender_open_id, "")
         self.assertEqual(parsed.text, "拨打之前在手机上登录过的账号，会收到通话邀请")
 
+    def test_parse_lark_app_sender_string_id(self) -> None:
+        parsed = parse_lark_message(
+            {
+                "message_id": "om_1",
+                "msg_type": "text",
+                "sender": {"sender_type": "app", "id_type": "app_id", "id": "cli_reporter"},
+                "body": {"content": json.dumps({"text": "app reporter"})},
+            },
+            default_chat_id="oc_1",
+        )
+
+        self.assertEqual(parsed.sender_type, "app")
+        self.assertEqual(parsed.sender_open_id, "")
+        self.assertEqual(parsed.sender_id, "cli_reporter")
+        self.assertEqual(parsed.sender_id_type, "app_id")
+
+    def test_parse_lark_app_sender_dict_id(self) -> None:
+        parsed = parse_lark_message(
+            {
+                "message_id": "om_1",
+                "msg_type": "text",
+                "sender": {"sender_type": "app", "id": {"app_id": "cli_reporter"}},
+                "body": {"content": json.dumps({"text": "app reporter"})},
+            },
+            default_chat_id="oc_1",
+        )
+
+        self.assertEqual(parsed.sender_id, "cli_reporter")
+        self.assertEqual(parsed.sender_id_type, "app_id")
+
     def test_get_message_parses_single_message_items_shape(self) -> None:
         client = LarkOpenApiMessengerClient(app_id="app", app_secret="secret")
 

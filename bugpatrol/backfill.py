@@ -61,13 +61,13 @@ def run_lark_backfill(
     events: list[BackfillEvent] = []
     skipped = 0
     for message in reversed(messages):
-        if should_skip_message(message, bot_open_id=config.lark.bot_open_id):
+        if should_skip_message(message, bot_open_id=config.lark.bot_open_id, bot_app_id=config.lark.app_id):
             skipped += 1
             events.append(
                 BackfillEvent(
                     message_id=message.message_id,
                     action="skipped",
-                    reason=skip_reason(message, bot_open_id=config.lark.bot_open_id),
+                    reason=skip_reason(message, bot_open_id=config.lark.bot_open_id, bot_app_id=config.lark.app_id),
                 )
             )
             continue
@@ -126,16 +126,18 @@ def run_lark_backfill(
     )
 
 
-def should_skip_message(message: LarkMessage, *, bot_open_id: str) -> bool:
-    return skip_reason(message, bot_open_id=bot_open_id) != ""
+def should_skip_message(message: LarkMessage, *, bot_open_id: str, bot_app_id: str = "") -> bool:
+    return skip_reason(message, bot_open_id=bot_open_id, bot_app_id=bot_app_id) != ""
 
 
-def skip_reason(message: LarkMessage, *, bot_open_id: str) -> str:
+def skip_reason(message: LarkMessage, *, bot_open_id: str, bot_app_id: str = "") -> str:
     if not message.message_id:
         return "missing_message_id"
     if message.sender_open_id == bot_open_id:
         return "bot_message"
-    if not message.sender_open_id and message.sender_type != "user":
+    if bot_app_id and message.sender_type == "app" and message.sender_id == bot_app_id:
+        return "bot_message"
+    if not _has_reporter_identity(message):
         return "missing_sender"
     if message.msg_type not in {"text", "image", "file", "media", "post"}:
         return "unsupported_msg_type"
@@ -154,15 +156,27 @@ def skip_reason(message: LarkMessage, *, bot_open_id: str) -> str:
     return ""
 
 
+def _has_reporter_identity(message: LarkMessage) -> bool:
+    if message.sender_open_id:
+        return True
+    if message.sender_type == "user":
+        return True
+    if message.sender_type == "app" and message.sender_id_type == "app_id" and message.sender_id:
+        return True
+    return False
+
+
 def _is_template_system_message(message: LarkMessage) -> bool:
     content = _parse_content(message.raw_content)
     return "template" in content and "text" not in content
 
 
 def intake_record_from_lark_message(message: LarkMessage) -> IntakeRecord:
+    reporter_id = message.sender_open_id or message.sender_id
+    reporter_name = message.sender_open_id or _app_reporter_name(message) or "Lark user"
     return IntakeRecord(
-        reporter_name=message.sender_open_id or "Lark user",
-        reporter_open_id=message.sender_open_id,
+        reporter_name=reporter_name,
+        reporter_open_id=reporter_id,
         created_at=message.create_time,
         chat_id=message.chat_id,
         root_id=message.root_id,
@@ -170,6 +184,12 @@ def intake_record_from_lark_message(message: LarkMessage) -> IntakeRecord:
         original_text=message.text,
         attachments=attachments_from_lark_message(message),
     )
+
+
+def _app_reporter_name(message: LarkMessage) -> str:
+    if message.sender_type == "app" and message.sender_id:
+        return f"Lark app {message.sender_id}"
+    return ""
 
 
 def attachments_from_lark_message(message: LarkMessage) -> tuple[Attachment, ...]:
