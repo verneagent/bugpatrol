@@ -48,16 +48,33 @@ class ResourceTransformer(Protocol):
         """Return a normalized resource before policy, upload, and vision."""
 
 
+class VideoDurationProbe(Protocol):
+    def duration_seconds(self, *, ref: "LarkResourceRef", resource: DownloadedLarkResource) -> float:
+        """Return video duration in seconds."""
+
+
 @dataclass(frozen=True)
 class ResourcePolicy:
     max_image_bytes: int = 0
     max_video_bytes: int = 0
     max_file_bytes: int = 0
+    max_video_duration_seconds: float = 0.0
+    video_duration_probe: VideoDurationProbe | None = None
 
     def rejection_reason(self, *, ref: "LarkResourceRef", resource: DownloadedLarkResource) -> str:
         limit = self._limit_for(ref=ref, resource=resource)
         if limit > 0 and len(resource.content) > limit:
             return f"resource skipped: {ref.kind} is {len(resource.content)} bytes, limit is {limit} bytes"
+        if self.max_video_duration_seconds > 0 and _is_video_resource(ref=ref, resource=resource):
+            try:
+                duration = self._duration_probe().duration_seconds(ref=ref, resource=resource)
+            except RuntimeError as exc:
+                return f"resource skipped: video duration unavailable: {exc}"
+            if duration > self.max_video_duration_seconds:
+                return (
+                    f"resource skipped: video duration is {duration:.1f}s, "
+                    f"limit is {self.max_video_duration_seconds:.1f}s"
+                )
         return ""
 
     def _limit_for(self, *, ref: "LarkResourceRef", resource: DownloadedLarkResource) -> int:
@@ -67,6 +84,9 @@ class ResourcePolicy:
         if ref.kind in {"video", "media"} or content_type.startswith("video/"):
             return self.max_video_bytes
         return self.max_file_bytes
+
+    def _duration_probe(self) -> VideoDurationProbe:
+        return self.video_duration_probe or FfprobeVideoDurationProbe()
 
 
 @dataclass(frozen=True)
@@ -269,6 +289,62 @@ class CommandResourceRedactor:
         )
 
 
+class FfprobeVideoDurationProbe:
+    DEFAULT_COMMAND = (
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        "{path}",
+    )
+
+    def __init__(
+        self,
+        *,
+        command: tuple[str, ...] = DEFAULT_COMMAND,
+        timeout_seconds: int = 30,
+        temp_dir: Path | None = None,
+    ) -> None:
+        self._command = command
+        self._timeout_seconds = timeout_seconds
+        self._temp_dir = temp_dir
+
+    def duration_seconds(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> float:
+        temp_root = self._temp_dir
+        if temp_root is not None:
+            temp_root.mkdir(parents=True, exist_ok=True)
+        filename = _resource_filename(resource=resource, fallback=ref.resource_key)
+        with tempfile.TemporaryDirectory(dir=temp_root) as tmp:
+            path = Path(tmp) / filename
+            path.write_bytes(resource.content)
+            command = tuple(
+                _format_command_part(part, path=path, ref=ref, resource=resource)
+                for part in self._command
+            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=self._timeout_seconds,
+                )
+            except FileNotFoundError as exc:
+                raise RuntimeError(f"video probe command not found: {command[0]}") from exc
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(f"video probe timed out after {self._timeout_seconds}s") from exc
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or f"exit {completed.returncode}").strip()
+            raise RuntimeError(f"video probe failed: {detail[:300]}")
+        match = re.search(r"[-+]?\d+(?:\.\d+)?", completed.stdout)
+        if match is None:
+            raise RuntimeError("video probe returned no duration")
+        return float(match.group(0))
+
+
 class ImageResourceResizer:
     def __init__(
         self,
@@ -417,6 +493,11 @@ def _extension_for_content_type(content_type: str) -> str:
 def _is_image_resource(*, ref: LarkResourceRef, resource: DownloadedLarkResource) -> bool:
     content_type = resource.content_type.split(";", 1)[0].strip().lower()
     return ref.kind == "image" or content_type.startswith("image/")
+
+
+def _is_video_resource(*, ref: LarkResourceRef, resource: DownloadedLarkResource) -> bool:
+    content_type = resource.content_type.split(";", 1)[0].strip().lower()
+    return ref.kind in {"video", "media"} or content_type.startswith("video/")
 
 
 def _scaled_image_size(

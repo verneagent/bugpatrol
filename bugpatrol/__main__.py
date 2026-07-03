@@ -24,6 +24,7 @@ from bugpatrol.prd import load_prd_documents, search_prd_documents
 from bugpatrol.resources import (
     CommandResourceDescriber,
     CommandResourceRedactor,
+    FfprobeVideoDurationProbe,
     GitHubAssetRepoStore,
     ImageResourceResizer,
     ResourcePolicy,
@@ -35,10 +36,20 @@ from bugpatrol.watcher import GitHubTriageStatusReader, run_polling_watcher
 
 
 def media_resource_policy(config) -> ResourcePolicy:  # type: ignore[no-untyped-def]
+    video_duration_probe = None
+    if config.media.max_video_duration_seconds > 0:
+        temp_dir = Path(config.media.description_temp_dir) if config.media.description_temp_dir else None
+        video_duration_probe = FfprobeVideoDurationProbe(
+            command=config.media.video_probe_command or FfprobeVideoDurationProbe.DEFAULT_COMMAND,
+            timeout_seconds=config.media.video_probe_timeout_seconds,
+            temp_dir=temp_dir,
+        )
     return ResourcePolicy(
         max_image_bytes=config.media.max_image_bytes,
         max_video_bytes=config.media.max_video_bytes,
         max_file_bytes=config.media.max_file_bytes,
+        max_video_duration_seconds=config.media.max_video_duration_seconds,
+        video_duration_probe=video_duration_probe,
     )
 
 

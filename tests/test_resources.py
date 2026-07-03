@@ -11,6 +11,7 @@ from bugpatrol.lark import DownloadedLarkResource
 from bugpatrol.resources import (
     CommandResourceDescriber,
     CommandResourceRedactor,
+    FfprobeVideoDurationProbe,
     GitHubAssetRepoStore,
     ImageResourceResizer,
     LocalResourceStore,
@@ -38,6 +39,30 @@ class FakeDownloader:
             content_type="image/png",
             filename="bug screenshot.png",
         )
+
+
+class FakeVideoDownloader(FakeDownloader):
+    def download_message_resource(
+        self,
+        *,
+        message_id: str,
+        resource_key: str,
+        resource_type: str = "",
+    ) -> DownloadedLarkResource:
+        self.calls.append((message_id, resource_key, resource_type))
+        return DownloadedLarkResource(
+            content=b"video-bytes",
+            content_type="video/mp4",
+            filename="repro.mp4",
+        )
+
+
+class FakeVideoDurationProbe:
+    def __init__(self, duration: float) -> None:
+        self.duration = duration
+
+    def duration_seconds(self, *, ref, resource) -> float:  # type: ignore[no-untyped-def]
+        return self.duration
 
 
 def png_bytes(*, width: int, height: int) -> bytes:
@@ -305,6 +330,63 @@ class ResourcesTest(unittest.TestCase):
         self.assertIn("resource skipped", materialized.description)
         store.write.assert_not_called()
         describer.describe.assert_not_called()
+
+    def test_materialize_skips_video_when_policy_rejects_duration(self) -> None:
+        attachment = Attachment(kind="video", url="lark://message/om_1/media/file_v2_abc")
+        store = Mock()
+        describer = Mock()
+
+        materialized = materialize_attachment(
+            attachment=attachment,
+            lark=FakeVideoDownloader(),
+            store=store,
+            describer=describer,
+            policy=ResourcePolicy(
+                max_video_duration_seconds=10,
+                video_duration_probe=FakeVideoDurationProbe(12.5),
+            ),
+        )
+
+        self.assertEqual(materialized.url, attachment.url)
+        self.assertIn("video duration is 12.5s", materialized.description)
+        store.write.assert_not_called()
+        describer.describe.assert_not_called()
+
+    def test_materialize_keeps_video_when_duration_is_within_policy(self) -> None:
+        attachment = Attachment(kind="video", url="lark://message/om_1/media/file_v2_abc")
+        store = Mock()
+        store.write.return_value = "https://assets/repro.mp4"
+
+        materialized = materialize_attachment(
+            attachment=attachment,
+            lark=FakeVideoDownloader(),
+            store=store,
+            policy=ResourcePolicy(
+                max_video_duration_seconds=10,
+                video_duration_probe=FakeVideoDurationProbe(9.5),
+            ),
+        )
+
+        self.assertEqual(materialized.url, "https://assets/repro.mp4")
+        store.write.assert_called_once()
+
+    def test_ffprobe_video_duration_probe_parses_stdout(self) -> None:
+        ref = parse_lark_resource_url("lark://message/om_1/media/file_v2_abc")
+        assert ref is not None
+        completed = Mock(returncode=0, stdout="12.345\n", stderr="")
+
+        with patch("bugpatrol.resources.subprocess.run", return_value=completed) as run:
+            duration = FfprobeVideoDurationProbe(command=("ffprobe", "{path}")).duration_seconds(
+                ref=ref,
+                resource=DownloadedLarkResource(
+                    content=b"video-bytes",
+                    content_type="video/mp4",
+                    filename="repro.mp4",
+                ),
+            )
+
+        self.assertEqual(duration, 12.345)
+        self.assertEqual(run.call_args.kwargs["timeout"], 30)
 
     def test_redaction_failure_blocks_materialization(self) -> None:
         ref = parse_lark_resource_url("lark://message/om_1/image/img_v2_abc")

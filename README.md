@@ -225,9 +225,10 @@ fields and comments.
 ## Media
 
 Lark image, video, and file resources can be materialized locally or uploaded to
-a configured asset repository. When a media description command is configured,
-resources are described before issue/comment rendering so triage can read the
-generated text.
+a configured asset repository. Optional redaction, image resizing, byte limits,
+and video duration limits run before upload and vision. When a media description
+command is configured, resources are described before issue/comment rendering so
+triage can read the generated text.
 
 Default media command:
 

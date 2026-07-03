@@ -9,7 +9,6 @@ media, and fix-notification slices.
 
 ## Media Handling
 
-- Add video duration limits.
 - Add video frame extraction or clipping for large videos.
 - Add attachment cleanup/reconcile command for test assets.
 

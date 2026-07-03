@@ -9,7 +9,7 @@ from bugpatrol.config import load_project_config
 from bugpatrol.triage_context import build_triage_context
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lark import DownloadedLarkResource, LarkMessage
-from bugpatrol.resources import LarkResourceRef
+from bugpatrol.resources import LarkResourceRef, ResourcePolicy
 from bugpatrol.testing.fakes import FakeGitHubIssuesClient, FakeLarkMessengerClient
 
 
@@ -134,6 +134,62 @@ class AttachmentIntakeLoopE2ETest(unittest.TestCase):
                 context.media[0].description,
                 "Video shows tapping Export, then the progress spinner freezes at 80%.",
             )
+
+    def test_video_follow_up_over_duration_limit_records_skipped_evidence(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkHistory(
+            [
+                LarkMessage(
+                    message_id="om_video",
+                    chat_id=config.lark.chat_id,
+                    root_id="om_root",
+                    sender_open_id="ou_reporter",
+                    sender_type="user",
+                    create_time="2026-07-01T00:01:00Z",
+                    msg_type="media",
+                    text="",
+                    raw_content=json.dumps({"file_key": "file_v2_repro", "file_name": "repro.mp4"}),
+                ),
+                LarkMessage(
+                    message_id="om_text",
+                    chat_id=config.lark.chat_id,
+                    root_id="om_root",
+                    sender_open_id="ou_reporter",
+                    sender_type="user",
+                    create_time="2026-07-01T00:00:00Z",
+                    msg_type="text",
+                    text="导出卡住",
+                    raw_content=json.dumps({"text": "导出卡住"}),
+                ),
+            ]
+        )
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        result = run_lark_backfill(
+            config=config,
+            lark=lark,
+            workflow=workflow,
+            resource_store=FakeAssetStore(),
+            resource_describer=FakeDescriber(),
+            resource_policy=ResourcePolicy(
+                max_video_duration_seconds=10,
+                video_duration_probe=FakeDurationProbe(11),
+            ),
+        )
+
+        self.assertEqual(result.processed, 2)
+        self.assertEqual(len(github.created[0].comments), 1)
+        self.assertIn("resource skipped: video duration is 11.0s", github.created[0].comments[0])
+        self.assertNotIn("https://github.com/example-org/example-assets", github.created[0].comments[0])
+
+
+class FakeDurationProbe:
+    def __init__(self, duration: float) -> None:
+        self.duration = duration
+
+    def duration_seconds(self, *, ref, resource) -> float:  # type: ignore[no-untyped-def]
+        return self.duration
 
 
 if __name__ == "__main__":
