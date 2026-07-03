@@ -80,3 +80,5 @@ Evidence = "Evidence"
 "PRD status" = "PRD status"
 "Triage confidence" = "Triage confidence"
 "Owner reason" = "Owner reason"
+# Optional text field for best-effort regression blame suggestions.
+# Blame = "Blame"

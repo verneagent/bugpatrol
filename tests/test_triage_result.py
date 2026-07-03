@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from bugpatrol.config import load_project_config
@@ -15,6 +16,8 @@ from bugpatrol.triage_result import (
     parse_triage_metadata,
     parse_triage_result,
     render_needs_info_lark_message,
+    render_triage_comment,
+    triage_field_values_for_write,
     triage_result_fingerprint,
 )
 
@@ -33,6 +36,7 @@ VALID = {
     "triage_confidence": "高",
     "assignee": "@garlanddiego",
     "owner_reason": "CODEOWNERS",
+    "blame_suggestion": "",
     "comment_markdown": "## Triage Analysis\n\n是代码 Bug。",
 }
 
@@ -90,6 +94,7 @@ class TriageResultTest(unittest.TestCase):
         self.assertEqual(result.issue_type, "Bug")
         self.assertEqual(result.assignee, "garlanddiego")
         self.assertEqual(result.fields["Triage verdict"], "代码 Bug")
+        self.assertEqual(result.blame_suggestion, "")
 
     def test_parse_triage_result_rejects_invalid_enum(self) -> None:
         data = dict(VALID)
@@ -112,6 +117,22 @@ class TriageResultTest(unittest.TestCase):
         result = parse_triage_result(data)
 
         self.assertEqual(result.follow_up_questions, ())
+
+    def test_blame_suggestion_is_visible_and_written_when_field_is_mapped(self) -> None:
+        base_config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = replace(
+            base_config,
+            issue_field_names={**base_config.issue_field_names, "Blame": "Blame"},
+        )
+        data = dict(VALID)
+        data["blame_suggestion"] = "可能由 PR #123 的 push token 绑定改动引入"
+        result = parse_triage_result(data)
+
+        values = triage_field_values_for_write(result, config=config)
+        comment = render_triage_comment(result)
+
+        self.assertEqual(values["Blame"], "可能由 PR #123 的 push token 绑定改动引入")
+        self.assertIn("Blame 建议：可能由 PR #123", comment)
 
     def test_apply_triage_result_writes_type_fields_comment_and_assignee(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

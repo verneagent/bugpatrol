@@ -75,6 +75,7 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
         "prd_refs",
         "likely_locations",
         "summary_cn",
+        "blame_suggestion",
         "follow_up_questions",
         "comment_markdown",
     ],
@@ -119,6 +120,10 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
             },
         },
         "summary_cn": {"type": "string", "minLength": 1},
+        "blame_suggestion": {
+            "type": "string",
+            "description": "Best-effort person, team, PR, commit, or code area that may have introduced the issue. Use an empty string when unknown.",
+        },
         "follow_up_questions": {"type": "array", "items": {"type": "string"}},
         "comment_markdown": {"type": "string", "minLength": 1},
     },

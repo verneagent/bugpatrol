@@ -22,6 +22,7 @@ class TriageResult:
     fields: dict[str, str]
     assignee: str
     comment_markdown: str
+    blame_suggestion: str = ""
     follow_up_questions: tuple[str, ...] = ()
 
 
@@ -91,6 +92,7 @@ def parse_triage_result(data: dict[str, Any]) -> TriageResult:
         raise ValueError("Needs info triage requires follow_up_questions")
     if fields["Triage status"] != "Needs info":
         follow_up_questions = ()
+    blame_suggestion = str(data.get("blame_suggestion") or "").strip()
     assignee = _required_str(data, "assignee").lstrip("@")
     comment = _required_str(data, "comment_markdown")
     return TriageResult(
@@ -98,6 +100,7 @@ def parse_triage_result(data: dict[str, Any]) -> TriageResult:
         fields=fields,
         assignee=assignee,
         comment_markdown=comment,
+        blame_suggestion=blame_suggestion,
         follow_up_questions=follow_up_questions,
     )
 
@@ -133,7 +136,7 @@ def apply_triage_result(
     issue_fields.add_issue_field_values(
         repo=repo,
         issue_number=issue_number,
-        values=result.fields,
+        values=triage_field_values_for_write(result, config=config),
         config=config,
     )
     if not duplicate:
@@ -149,12 +152,13 @@ def apply_triage_result(
             repo=repo,
             issue_number=issue_number,
             body=append_triage_metadata(
-                result.comment_markdown,
+                render_triage_comment(result),
                 {
                     "version": 1,
                     "issue": issue_number,
                     "result_fingerprint": fingerprint,
                     "decision_key": decision_key,
+                    "blame_suggestion": result.blame_suggestion,
                 },
             ),
         )
@@ -179,7 +183,7 @@ def build_triage_dry_run_report(
 ) -> TriageDryRunReport:
     live_values = issue_fields.get_issue_field_values(repo=repo, issue_number=issue_number)
     changes: list[TriageFieldChange] = []
-    for logical_name, proposed in result.fields.items():
+    for logical_name, proposed in triage_field_values_for_write(result, config=config).items():
         github_name = config.issue_field_names.get(logical_name, logical_name)
         current = live_values.get(github_name, "")
         if current != proposed:
@@ -195,7 +199,7 @@ def build_triage_dry_run_report(
         issue_type=result.issue_type,
         assignee=result.assignee,
         field_changes=tuple(changes),
-        comment_markdown=result.comment_markdown,
+        comment_markdown=render_triage_comment(result),
         result_fingerprint=triage_result_fingerprint(result),
     )
 
@@ -230,6 +234,26 @@ def append_triage_metadata(comment_markdown: str, metadata: dict[str, Any]) -> s
         f"{json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2)}\n"
         f"{TRIAGE_META_END}"
     )
+
+
+def render_triage_comment(result: TriageResult) -> str:
+    body = result.comment_markdown.rstrip()
+    if not result.blame_suggestion:
+        return body
+    if "Blame" in body or "归因" in body:
+        return body
+    return f"{body}\n\nBlame 建议：{result.blame_suggestion}"
+
+
+def triage_field_values_for_write(
+    result: TriageResult,
+    *,
+    config: ProjectConfig,
+) -> dict[str, str]:
+    values = dict(result.fields)
+    if result.blame_suggestion and "Blame" in config.issue_field_names:
+        values["Blame"] = result.blame_suggestion
+    return values
 
 
 def parse_triage_metadata(comment_body: str) -> dict[str, Any] | None:

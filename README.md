@@ -272,6 +272,7 @@ Canonical logical fields:
 | `PRD status` | `已对齐`, `PRD 错误`, `PRD 缺失`, `未校验` |
 | `Triage confidence` | `高`, `中`, `低` |
 | `Owner reason` | `CODEOWNERS`, `Lark @mention`, `Git history`, `Capability fallback`, `Manual` |
+| `Blame` | optional text field for a best-effort person, PR, commit, or code-area regression blame suggestion |
 
 Project configs map these logical names to the actual GitHub Issue Field names.
 
