@@ -1,0 +1,55 @@
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from bugpatrol.__main__ import main
+from bugpatrol.clients import GitHubIssue
+from bugpatrol.config import load_project_config
+
+
+class FakeGithub:
+    def get_issue(self, *, repo: str, issue_number: int) -> GitHubIssue:
+        return GitHubIssue(
+            number=issue_number,
+            url=f"https://github.test/{repo}/issues/{issue_number}",
+            title="Legacy issue",
+            body="created before BugPatrol",
+        )
+
+    def list_issue_comments(self, **kwargs: object) -> tuple[object, ...]:
+        return ()
+
+
+class CliTest(unittest.TestCase):
+    def test_notify_fix_skips_unmanaged_issue_without_failing(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        stdout = io.StringIO()
+
+        with patch("bugpatrol.__main__.load_project_config", return_value=config):
+            with patch("bugpatrol.__main__.GitHubCliIssuesClient", return_value=FakeGithub()):
+                with contextlib.redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            "notify-fix",
+                            "projects/todo-sandbox.toml",
+                            "--issue",
+                            "7",
+                            "--event",
+                            "issue_fixed",
+                        ]
+                    )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["skipped"])
+        self.assertFalse(payload["lark_sent"])
+        self.assertIn("no BugPatrol Lark intake metadata", payload["error"])
+
+
+if __name__ == "__main__":
+    unittest.main()

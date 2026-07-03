@@ -639,16 +639,36 @@ def main(argv: list[str] | None = None) -> int:
             except ValueError as error:
                 print(str(error), file=sys.stderr)
                 return 2
-        summary = apply_fix_notification(
-            repo=config.github_repo,
-            issue_number=issue_number,
-            event=args.event,
-            pr=args.pr,
-            commit=args.commit,
-            dry_run=not args.write,
-            github=github,
-            lark=lark,
-        )
+        try:
+            summary = apply_fix_notification(
+                repo=config.github_repo,
+                issue_number=issue_number,
+                event=args.event,
+                pr=args.pr,
+                commit=args.commit,
+                dry_run=not args.write,
+                github=github,
+                lark=lark,
+            )
+        except ValueError as error:
+            if "BugPatrol Lark intake metadata" not in str(error):
+                raise
+            print(
+                json.dumps(
+                    {
+                        "key": "",
+                        "event": args.event,
+                        "dry_run": not args.write,
+                        "duplicate_skipped": False,
+                        "lark_sent": False,
+                        "metadata_written": False,
+                        "skipped": True,
+                        "error": str(error),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 0
         print(json.dumps(summary.__dict__, ensure_ascii=False))
         return 0
 
