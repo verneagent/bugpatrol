@@ -64,6 +64,16 @@ def main(argv: list[str] | None = None) -> int:
     watch.add_argument("--dry-run", action="store_true", help="scan without GitHub writes")
     watch.add_argument("--resource-dir", type=Path, help="download Lark resources before writing issues")
     watch.add_argument("--asset-repo", action="store_true", help="upload Lark resources to configured assets repo")
+    watch.add_argument("--triage-queue", type=Path, help="persist debounced triage requests in this JSON file")
+    watch.add_argument("--triage-quiet-seconds", type=float, default=60)
+    watch.add_argument(
+        "--triage-dispatch-command",
+        nargs="+",
+        help=(
+            "command used for due triage requests; supports {issue_number}, "
+            "{trigger_fingerprint}, and {reason}"
+        ),
+    )
 
     owner = sub.add_parser("resolve-owner", help="resolve owners for paths using CODEOWNERS")
     owner.add_argument("repo_path", type=Path)
@@ -173,6 +183,9 @@ def main(argv: list[str] | None = None) -> int:
             resource_dir=args.resource_dir,
             resource_store=resource_store,
             resource_describer=resource_describer,
+            triage_queue_path=args.triage_queue,
+            triage_quiet_seconds=args.triage_quiet_seconds,
+            triage_dispatch_command=args.triage_dispatch_command,
         )
         print(
             json.dumps(

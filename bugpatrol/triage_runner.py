@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import json
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from bugpatrol.agents import AgentInvocation, build_triage_agent_invocation
+from bugpatrol.clients import GitHubIssueComment
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import TRIAGE_OUTPUT_SCHEMA
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
-from bugpatrol.triage_result import apply_triage_result, parse_triage_result
+from bugpatrol.triage_result import TriageResult, apply_triage_result, parse_triage_result
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class TriageRunPlan:
     schema_path: Path
     output_path: Path
     invocation: AgentInvocation
+    context_comment_ids: tuple[str, ...] = ()
 
 
 def prepare_triage_run(
@@ -59,6 +61,7 @@ def prepare_triage_run(
         context_path=context_path,
         schema_path=schema_path,
         output_path=output_path,
+        context_comment_ids=comment_ids(comments),
         invocation=invocation,
     )
 
@@ -71,6 +74,11 @@ def execute_triage_run(
     github: GitHubCliIssuesClient,
     issue_fields: GitHubIssueFieldsClient,
 ) -> None:
+    mark_triage_running(
+        config=config,
+        issue_number=issue_number,
+        issue_fields=issue_fields,
+    )
     completed = subprocess.run(plan.invocation.command, check=False)
     if completed.returncode != 0:
         mark_triage_failed(
@@ -82,6 +90,9 @@ def execute_triage_run(
         )
         raise RuntimeError(f"triage agent failed with exit {completed.returncode}")
     result = parse_triage_result(json.loads(plan.output_path.read_text()))
+    current_comments = github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)
+    if comment_ids(current_comments) != plan.context_comment_ids:
+        result = mark_result_needs_review(result)
     apply_triage_result(
         repo=config.github_repo,
         issue_number=issue_number,
@@ -89,6 +100,20 @@ def execute_triage_run(
         result=result,
         github=github,
         issue_fields=issue_fields,
+    )
+
+
+def mark_triage_running(
+    *,
+    config: ProjectConfig,
+    issue_number: int,
+    issue_fields: GitHubIssueFieldsClient,
+) -> None:
+    issue_fields.add_issue_field_values(
+        repo=config.github_repo,
+        issue_number=issue_number,
+        values={"Triage status": "Running"},
+        config=config,
     )
 
 
@@ -111,6 +136,23 @@ def mark_triage_failed(
         issue_number=issue_number,
         body=render_triage_failed_comment(exit_code=exit_code),
     )
+
+
+def comment_ids(comments: tuple[GitHubIssueComment, ...]) -> tuple[str, ...]:
+    return tuple(comment.id for comment in comments)
+
+
+def mark_result_needs_review(result: TriageResult) -> TriageResult:
+    fields = dict(result.fields)
+    fields["Triage status"] = "Needs review"
+    comment = "\n".join(
+        [
+            result.comment_markdown.rstrip(),
+            "",
+            "> BugPatrol note: new issue comments arrived after this triage context was generated. Review before treating this result as final.",
+        ]
+    )
+    return replace(result, fields=fields, comment_markdown=comment)
 
 
 def render_triage_failed_comment(*, exit_code: int) -> str:

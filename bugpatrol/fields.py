@@ -21,7 +21,7 @@ def default_field_specs() -> dict[str, FieldSpec]:
         FieldSpec("Priority", ("Urgent", "High", "Medium", "Low"), "Impact and urgency."),
         FieldSpec(
             "Triage status",
-            ("Pending", "Running", "Needs info", "Done", "Failed", "Skipped"),
+            ("Pending", "Running", "Needs info", "Needs review", "Done", "Failed", "Skipped"),
             "Automation state for triage.",
         ),
         FieldSpec("Source", ("Lark", "GitHub", "Manual", "Import"), "Where the issue came from."),
@@ -130,4 +130,3 @@ def validate_field_value(field_name: str, value: str, specs: dict[str, FieldSpec
         raise ValueError(f"unknown field: {field_name}")
     if value not in spec.values:
         raise ValueError(f"invalid value for {field_name}: {value}")
-

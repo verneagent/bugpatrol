@@ -53,11 +53,21 @@ Typical command:
 python -m bugpatrol watch-lark projects/example.toml \
   --interval 30 \
   --limit 20 \
-  --asset-repo
+  --asset-repo \
+  --triage-queue .bugpatrol/triage-queue.json \
+  --triage-dispatch-command \
+    gh workflow run bugpatrol-triage.yml \
+      -f issue_number={issue_number} \
+      -f trigger_fingerprint={trigger_fingerprint} \
+      -f reason={reason}
 ```
 
 Run exactly one active watcher writer per Lark group. Multiple watcher writers
 against the same group can race and create duplicate issues or comments.
+
+When `--triage-queue` is set, watcher coalesces triage requests per issue. The
+default quiet period is 60 seconds. Additional material Lark follow-ups during
+that window extend the request instead of dispatching duplicate triage jobs.
 
 ### triage
 
@@ -77,6 +87,10 @@ python -m bugpatrol run-triage projects/example.toml \
 
 This is a good fit for GitHub Actions self-hosted runners because it needs local
 repo context and pre-authenticated agent tooling such as `codex login`.
+
+See `examples/github-actions/bugpatrol-triage.yml` for a project-neutral
+workflow template. Copy it into the target app repo and set
+`BUGPATROL_PROJECT_CONFIG` to the local project config path on the runner.
 
 ### notify
 
@@ -124,12 +138,11 @@ Current `Triage status` values:
 - `Pending`: intake created or updated the issue; triage has not completed.
 - `Running`: triage is executing.
 - `Needs info`: triage needs more reporter information.
+- `Needs review`: material new evidence arrived after triage completed, or while
+  the active triage run was using an older context.
 - `Done`: triage completed and wrote fields/comment/assignee.
 - `Failed`: triage execution failed.
 - `Skipped`: triage was intentionally skipped.
-
-Planned: add `Needs review` for material Lark follow-up received after triage
-has already completed, or while a triage run was in progress.
 
 ### State flow
 
@@ -146,7 +159,7 @@ stateDiagram-v2
   NeedsInfo --> Pending: reporter follow-up
 
   state "Needs info" as NeedsInfo
-  state "Needs review (planned)" as NeedsReview
+  state "Needs review" as NeedsReview
 ```
 
 Follow-up Lark messages always append to the existing GitHub issue when the
@@ -161,7 +174,7 @@ Canonical logical fields:
 | Field | Values |
 | --- | --- |
 | `Priority` | `Urgent`, `High`, `Medium`, `Low` |
-| `Triage status` | `Pending`, `Running`, `Needs info`, `Done`, `Failed`, `Skipped` |
+| `Triage status` | `Pending`, `Running`, `Needs info`, `Needs review`, `Done`, `Failed`, `Skipped` |
 | `Source` | `Lark`, `GitHub`, `Manual`, `Import` |
 | `Intake version` | `v2`, `manual`, `unknown` |
 | `Triage verdict` | `代码 Bug`, `PRD 错误`, `PRD 缺失`, `Case 错误`, `信息不足`, `预期行为` |

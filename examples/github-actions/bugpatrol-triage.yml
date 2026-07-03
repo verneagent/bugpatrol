@@ -1,0 +1,45 @@
+name: BugPatrol triage
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: GitHub issue number to triage
+        required: true
+      trigger_fingerprint:
+        description: Debounce/idempotency fingerprint from the watcher
+        required: false
+        default: ""
+      reason:
+        description: Why this triage was requested
+        required: false
+        default: "manual"
+
+concurrency:
+  group: bugpatrol-triage-${{ github.repository }}-${{ inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    runs-on: ${{ vars.BUGPATROL_TRIAGE_RUNNER_LABEL || 'self-hosted' }}
+    steps:
+      - name: Checkout app repo
+        uses: actions/checkout@v5
+
+      - name: Checkout BugPatrol
+        uses: actions/checkout@v5
+        with:
+          repository: verneagent/bugpatrol
+          path: .bugpatrol/tool
+
+      - name: Run triage
+        env:
+          GH_TOKEN: ${{ secrets.BUGPATROL_GH_TOKEN || github.token }}
+          BUGPATROL_PROJECT_CONFIG: ${{ vars.BUGPATROL_PROJECT_CONFIG }}
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/.bugpatrol/tool" \
+          python3 -m bugpatrol run-triage "$BUGPATROL_PROJECT_CONFIG" \
+            --issue "${{ inputs.issue_number }}" \
+            --repo-path "$GITHUB_WORKSPACE" \
+            --output-dir ".bugpatrol/runs/issue-${{ inputs.issue_number }}" \
+            --execute

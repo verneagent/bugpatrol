@@ -14,7 +14,9 @@ from bugpatrol.triage_runner import TriageRunPlan, execute_triage_run, prepare_t
 
 class FakeGithub:
     def __init__(self) -> None:
-        self.comments: list[str] = []
+        self.comments: list[str] = ["Follow-up comment"]
+        self.issue_types: list[str] = []
+        self.assignees: list[str] = []
 
     def get_issue(self, *, repo: str, issue_number: int) -> GitHubIssue:
         return GitHubIssue(
@@ -28,7 +30,16 @@ class FakeGithub:
         self.comments.append(body)
 
     def list_issue_comments(self, *, repo: str, issue_number: int) -> tuple[GitHubIssueComment, ...]:
-        return (GitHubIssueComment(id="1", body="Follow-up comment"),)
+        return tuple(
+            GitHubIssueComment(id=str(index + 1), body=body)
+            for index, body in enumerate(self.comments)
+        )
+
+    def set_issue_type(self, *, repo: str, issue_number: int, issue_type: str) -> None:
+        self.issue_types.append(issue_type)
+
+    def add_assignee(self, *, repo: str, issue_number: int, assignee: str) -> None:
+        self.assignees.append(assignee)
 
 
 class FakeIssueFields:
@@ -89,8 +100,61 @@ class TriageRunnerTest(unittest.TestCase):
                         issue_fields=issue_fields,  # type: ignore[arg-type]
                     )
 
-        self.assertEqual(issue_fields.writes[0]["values"], {"Triage status": "Failed"})
-        self.assertIn("exited with code `42`", github.comments[0])
+        self.assertEqual(issue_fields.writes[0]["values"], {"Triage status": "Running"})
+        self.assertEqual(issue_fields.writes[1]["values"], {"Triage status": "Failed"})
+        self.assertIn("exited with code `42`", github.comments[-1])
+
+    def test_execute_triage_run_marks_needs_review_when_comments_changed(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "output.json"
+            output.write_text(
+                """
+                {
+                  "issue_type": "Bug",
+                  "priority": "High",
+                  "triage_status": "Done",
+                  "triage_verdict": "代码 Bug",
+                  "platform": "Web",
+                  "reproducibility": "必现",
+                  "other_platforms": "未验证",
+                  "capability": "Quest",
+                  "evidence": "文字描述",
+                  "prd_status": "已对齐",
+                  "triage_confidence": "高",
+                  "assignee": "octocat",
+                  "owner_reason": "Manual",
+                  "summary_cn": "空状态缺失",
+                  "follow_up_questions": [],
+                  "comment_markdown": "## Triage Analysis\\n\\nLooks like a code bug."
+                }
+                """
+            )
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=output,
+                invocation=AgentInvocation(provider="codex", command=["true"]),
+                context_comment_ids=("1",),
+            )
+            github.comments.append("New material after context generation")
+
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["true"], 0)
+                execute_triage_run(
+                    config=config,
+                    issue_number=7,
+                    plan=plan,
+                    github=github,  # type: ignore[arg-type]
+                    issue_fields=issue_fields,  # type: ignore[arg-type]
+                )
+
+        self.assertEqual(issue_fields.writes[0]["values"], {"Triage status": "Running"})
+        self.assertEqual(issue_fields.writes[1]["values"]["Triage status"], "Needs review")
+        self.assertIn("new issue comments arrived", github.comments[-1])
 
     def test_render_triage_failed_comment_is_actionable(self) -> None:
         comment = render_triage_failed_comment(exit_code=2)

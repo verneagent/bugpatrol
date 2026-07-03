@@ -10,6 +10,7 @@ from bugpatrol.clients import GitHubIssue, GitHubIssuesClient, LarkMessengerClie
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import NATIVE_ISSUE_TYPES, validate_field_value
 from bugpatrol.intake import Attachment, IntakeRecord, render_issue_body
+from bugpatrol.triage_queue import TriageSignal, classify_triage_signal
 
 INTAKE_REPLY_META_MARKER = "BUGPATROL_INTAKE_REPLY_META"
 
@@ -19,6 +20,7 @@ class IntakeOutcome:
     action: str
     issue: GitHubIssue
     lark_reply: str
+    triage_signal: TriageSignal
 
 
 class IntakeWorkflow:
@@ -55,7 +57,12 @@ class IntakeWorkflow:
                 message_id=record.message_id,
                 text=reply,
             )
-            return IntakeOutcome(action="updated", issue=existing, lark_reply=reply)
+            return IntakeOutcome(
+                action="updated",
+                issue=existing,
+                lark_reply=reply,
+                triage_signal=classify_triage_signal("updated", record),
+            )
 
         fields = initial_intake_fields(record)
         title = build_issue_title(record)
@@ -69,7 +76,12 @@ class IntakeWorkflow:
         )
         reply = f"已创建 GitHub issue #{issue.number}: {issue.url}"
         self._lark.reply_to_message(chat_id=record.chat_id, message_id=record.message_id, text=reply)
-        return IntakeOutcome(action="created", issue=issue, lark_reply=reply)
+        return IntakeOutcome(
+            action="created",
+            issue=issue,
+            lark_reply=reply,
+            triage_signal=classify_triage_signal("created", record),
+        )
 
 
 def build_issue_title(record: IntakeRecord) -> str:
