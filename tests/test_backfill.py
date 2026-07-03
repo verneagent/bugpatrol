@@ -97,6 +97,28 @@ class BackfillTest(unittest.TestCase):
         self.assertTrue(should_skip_message(message(msg_type="image", text=""), bot_open_id="ou_bot"))
         self.assertFalse(should_skip_message(message(), bot_open_id="ou_bot"))
 
+    def test_should_skip_lark_system_messages(self) -> None:
+        self.assertTrue(
+            should_skip_message(
+                message(
+                    sender_open_id="",
+                    text='{"template":"{from_user} created a topic group."}',
+                    raw_content=json.dumps({"template": "{from_user} created a topic group."}),
+                ),
+                bot_open_id="ou_bot",
+            )
+        )
+        self.assertTrue(
+            should_skip_message(
+                message(
+                    text='{"template":"{from_user} created a topic group."}',
+                    raw_content=json.dumps({"template": "{from_user} created a topic group."}),
+                ),
+                bot_open_id="ou_bot",
+            )
+        )
+        self.assertTrue(should_skip_message(message(msg_type="system"), bot_open_id="ou_bot"))
+
     def test_intake_record_from_lark_message_maps_topic_root(self) -> None:
         record = intake_record_from_lark_message(message())
 

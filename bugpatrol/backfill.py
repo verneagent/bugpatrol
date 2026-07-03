@@ -135,6 +135,12 @@ def skip_reason(message: LarkMessage, *, bot_open_id: str) -> str:
         return "missing_message_id"
     if message.sender_open_id == bot_open_id:
         return "bot_message"
+    if not message.sender_open_id:
+        return "missing_sender"
+    if message.msg_type not in {"text", "image", "file", "media"}:
+        return "unsupported_msg_type"
+    if _is_template_system_message(message):
+        return "system_template"
     text = message.text.strip()
     attachments = attachments_from_lark_message(message)
     if not text and not attachments:
@@ -146,6 +152,11 @@ def skip_reason(message: LarkMessage, *, bot_open_id: str) -> str:
     if "BugPatrol live test" in text:
         return "live_test_message"
     return ""
+
+
+def _is_template_system_message(message: LarkMessage) -> bool:
+    content = _parse_content(message.raw_content)
+    return "template" in content and "text" not in content
 
 
 def intake_record_from_lark_message(message: LarkMessage) -> IntakeRecord:
