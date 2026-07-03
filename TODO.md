@@ -30,8 +30,6 @@ media, and fix-notification slices.
 
 ## Fix Notifications
 
-- Add GitHub Actions workflow examples for PR opened, PR merged, and issue
-  closed events.
 - Add scheduled reconcile for missed PR/commit events.
 - Add timeline-event based issue association, not only PR body/title parsing.
 - Add duplicate notification tests for multiple workflow reruns.

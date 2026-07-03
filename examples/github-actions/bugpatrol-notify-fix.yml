@@ -1,0 +1,84 @@
+name: BugPatrol fix notification
+
+on:
+  pull_request:
+    types: [opened, closed]
+  issues:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      event:
+        description: Fix event
+        required: true
+        type: choice
+        options:
+          - pr_opened
+          - pr_merged
+          - issue_closed
+      issue_number:
+        description: Issue number for issue_closed, optional for PR events
+        required: false
+        default: ""
+      pr_number:
+        description: Pull request number for PR events
+        required: false
+        default: ""
+
+concurrency:
+  group: bugpatrol-notify-${{ github.repository }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number || inputs.issue_number || inputs.pr_number }}
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout BugPatrol
+        uses: actions/checkout@v5
+        with:
+          repository: verneagent/bugpatrol
+          path: .bugpatrol/tool
+
+      - name: Resolve event
+        id: event
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "event=${{ inputs.event }}" >> "$GITHUB_OUTPUT"
+            echo "issue=${{ inputs.issue_number }}" >> "$GITHUB_OUTPUT"
+            echo "pr=${{ inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "issues" ]]; then
+            echo "event=issue_closed" >> "$GITHUB_OUTPUT"
+            echo "issue=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+            echo "pr=" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event.action }}" == "opened" ]]; then
+            echo "event=pr_opened" >> "$GITHUB_OUTPUT"
+            echo "issue=" >> "$GITHUB_OUTPUT"
+            echo "pr=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event.pull_request.merged }}" == "true" ]]; then
+            echo "event=pr_merged" >> "$GITHUB_OUTPUT"
+            echo "issue=" >> "$GITHUB_OUTPUT"
+            echo "pr=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "event=skip" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Notify Lark
+        if: steps.event.outputs.event != 'skip'
+        env:
+          GH_TOKEN: ${{ secrets.BUGPATROL_GH_TOKEN || github.token }}
+          BUGPATROL_PROJECT_CONFIG: ${{ vars.BUGPATROL_PROJECT_CONFIG }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+        run: |
+          args=(
+            "$BUGPATROL_PROJECT_CONFIG"
+            --event "${{ steps.event.outputs.event }}"
+            --write
+          )
+          if [[ -n "${{ steps.event.outputs.issue }}" ]]; then
+            args+=(--issue "${{ steps.event.outputs.issue }}")
+          fi
+          if [[ -n "${{ steps.event.outputs.pr }}" ]]; then
+            args+=(--pr "${{ steps.event.outputs.pr }}")
+          fi
+          PYTHONPATH="$GITHUB_WORKSPACE/.bugpatrol/tool" \
+          python3 -m bugpatrol notify-fix "${args[@]}"

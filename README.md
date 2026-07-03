@@ -124,6 +124,9 @@ python -m bugpatrol notify-fix projects/example.toml \
 This can run on GitHub-hosted or self-hosted runners, depending on where the
 required GitHub and Lark credentials are available.
 
+See `examples/github-actions/bugpatrol-notify-fix.yml` for a workflow template
+covering PR opened, PR merged, issue closed, and manual notification runs.
+
 ## Runner vs Daemon
 
 | Workflow | Form | Recommended runtime | Multiplicity |
