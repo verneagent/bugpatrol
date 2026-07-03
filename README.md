@@ -54,6 +54,7 @@ python -m bugpatrol watch-lark projects/example.toml \
   --interval 30 \
   --limit 20 \
   --asset-repo \
+  --processed-ledger .bugpatrol/processed-messages.json \
   --triage-queue .bugpatrol/triage-queue.json \
   --triage-dispatch-command \
     gh workflow run bugpatrol-triage.yml \

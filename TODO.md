@@ -16,7 +16,6 @@ media, and fix-notification slices.
 
 ## Watcher Robustness
 
-- Add a durable processed-message ledger.
 - Add a watcher lease/lock so one Lark group has one active writer.
 - Add a second create-race check around GitHub issue creation.
 - Add structured logs for scanned/skipped/processed messages.

@@ -9,6 +9,7 @@ from pathlib import Path
 from bugpatrol.config import ProjectConfig
 from bugpatrol.intake import Attachment, IntakeRecord
 from bugpatrol.intake_workflow import IntakeOutcome, IntakeWorkflow
+from bugpatrol.ledger import MessageLedger
 from bugpatrol.lark import LarkMessage, LarkOpenApiMessengerClient
 from bugpatrol.resources import LocalResourceStore, ResourceDescriber, ResourceStore, materialize_lark_attachments
 
@@ -31,6 +32,7 @@ def run_lark_backfill(
     resource_dir: Path | None = None,
     resource_store: ResourceStore | None = None,
     resource_describer: ResourceDescriber | None = None,
+    processed_ledger: MessageLedger | None = None,
 ) -> BackfillResult:
     if resource_dir is not None and resource_store is not None:
         raise ValueError("resource_dir and resource_store are mutually exclusive")
@@ -39,6 +41,9 @@ def run_lark_backfill(
     skipped = 0
     for message in reversed(messages):
         if should_skip_message(message, bot_open_id=config.lark.bot_open_id):
+            skipped += 1
+            continue
+        if processed_ledger is not None and processed_ledger.is_processed(message.message_id):
             skipped += 1
             continue
         record = intake_record_from_lark_message(message)
@@ -56,6 +61,8 @@ def run_lark_backfill(
                 describer=resource_describer,
             )
         outcomes.append(workflow.process(record))
+        if processed_ledger is not None:
+            processed_ledger.mark_processed(message.message_id)
     return BackfillResult(
         scanned=len(messages),
         processed=len(outcomes),

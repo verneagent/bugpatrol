@@ -10,6 +10,7 @@ from typing import Protocol, Sequence
 from bugpatrol.backfill import BackfillResult, run_lark_backfill
 from bugpatrol.config import ProjectConfig
 from bugpatrol.intake_workflow import IntakeWorkflow
+from bugpatrol.ledger import JsonMessageLedger, MessageLedger
 from bugpatrol.lark import LarkOpenApiMessengerClient
 from bugpatrol.resources import ResourceDescriber, ResourceStore
 from bugpatrol.triage_queue import CommandTriageDispatcher, TriageRequest, TriageRequestQueue
@@ -43,12 +44,16 @@ def run_polling_watcher(
     resource_dir: Path | None = None,
     resource_store: ResourceStore | None = None,
     resource_describer: ResourceDescriber | None = None,
+    processed_ledger_path: Path | None = None,
+    processed_ledger: MessageLedger | None = None,
     triage_queue_path: Path | None = None,
     triage_queue: TriageRequestQueue | None = None,
     triage_quiet_seconds: float = 60,
     triage_dispatch_command: str | Sequence[str] | None = None,
     triage_dispatcher: TriageDispatcher | None = None,
 ) -> WatchResult:
+    if processed_ledger is not None and processed_ledger_path is not None:
+        raise ValueError("processed_ledger and processed_ledger_path are mutually exclusive")
     if triage_queue is not None and triage_queue_path is not None:
         raise ValueError("triage_queue and triage_queue_path are mutually exclusive")
     if triage_dispatcher is not None and triage_dispatch_command is not None:
@@ -59,6 +64,9 @@ def run_polling_watcher(
     dispatcher = triage_dispatcher
     if dispatcher is None and triage_dispatch_command is not None:
         dispatcher = CommandTriageDispatcher(triage_dispatch_command)
+    ledger = processed_ledger
+    if ledger is None and processed_ledger_path is not None:
+        ledger = JsonMessageLedger.load(processed_ledger_path)
 
     iterations = 0
     scanned = 0
@@ -76,6 +84,7 @@ def run_polling_watcher(
             resource_dir=resource_dir,
             resource_store=resource_store,
             resource_describer=resource_describer,
+            processed_ledger=ledger,
         )
         iterations += 1
         scanned += result.scanned

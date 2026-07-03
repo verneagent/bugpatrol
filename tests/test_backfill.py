@@ -13,6 +13,7 @@ from bugpatrol.backfill import (
 )
 from bugpatrol.config import load_project_config
 from bugpatrol.intake_workflow import IntakeWorkflow
+from bugpatrol.ledger import JsonMessageLedger
 from bugpatrol.lark import DownloadedLarkResource, LarkMessage
 from bugpatrol.testing.fakes import FakeGitHubIssuesClient, FakeLarkMessengerClient
 
@@ -241,6 +242,48 @@ class BackfillTest(unittest.TestCase):
         self.assertEqual(result.processed, 0)
         self.assertEqual(result.skipped, 1)
         self.assertEqual(github.created, [])
+
+    def test_processed_ledger_skips_previously_processed_messages(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkHistory([message(message_id="om_seen"), message(message_id="om_new")])
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = JsonMessageLedger.load(Path(tmp) / "processed.json")
+            ledger.mark_processed("om_seen")
+            result = run_lark_backfill(
+                config=config,
+                lark=lark,
+                workflow=workflow,
+                processed_ledger=ledger,
+            )
+
+            loaded = JsonMessageLedger.load(Path(tmp) / "processed.json")
+
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(result.skipped, 1)
+        self.assertTrue(loaded.is_processed("om_seen"))
+        self.assertTrue(loaded.is_processed("om_new"))
+
+    def test_dry_run_does_not_mark_processed_ledger(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkHistory([message(message_id="om_dry")])
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = JsonMessageLedger.load(Path(tmp) / "processed.json")
+            result = run_lark_backfill(
+                config=config,
+                lark=lark,
+                workflow=workflow,
+                dry_run=True,
+                processed_ledger=ledger,
+            )
+
+        self.assertEqual(result.processed, 0)
+        self.assertFalse(ledger.is_processed("om_dry"))
 
     def test_dry_run_does_not_materialize_resources(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

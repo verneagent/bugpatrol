@@ -64,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     watch.add_argument("--dry-run", action="store_true", help="scan without GitHub writes")
     watch.add_argument("--resource-dir", type=Path, help="download Lark resources before writing issues")
     watch.add_argument("--asset-repo", action="store_true", help="upload Lark resources to configured assets repo")
+    watch.add_argument("--processed-ledger", type=Path, help="persist processed Lark message ids in this JSON file")
     watch.add_argument("--triage-queue", type=Path, help="persist debounced triage requests in this JSON file")
     watch.add_argument("--triage-quiet-seconds", type=float, default=60)
     watch.add_argument(
@@ -183,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
             resource_dir=args.resource_dir,
             resource_store=resource_store,
             resource_describer=resource_describer,
+            processed_ledger_path=args.processed_ledger,
             triage_queue_path=args.triage_queue,
             triage_quiet_seconds=args.triage_quiet_seconds,
             triage_dispatch_command=args.triage_dispatch_command,
