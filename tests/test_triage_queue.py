@@ -82,6 +82,25 @@ class TriageQueueTest(unittest.TestCase):
             loaded = TriageRequestQueue.load(queue_path)
             self.assertEqual(loaded.due_requests(now=180)[0].trigger_fingerprint, second.trigger_fingerprint)
 
+    def test_queue_marks_pending_review_and_defers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            queue = TriageRequestQueue.load(Path(temp) / "triage-queue.json")
+            request = queue.enqueue(
+                issue_number=7,
+                signal=classify_triage_signal("created", make_record(message_id="om_1")),
+                quiet_seconds=0,
+                now=100,
+            )
+            self.assertIsNotNone(request)
+
+            updated = queue.mark_pending_review(request=request, quiet_seconds=60, now=101)
+
+            self.assertTrue(updated.pending_review)
+            self.assertEqual(updated.due_at, 161)
+            self.assertIn("pending_review_running", updated.reasons)
+            self.assertEqual(queue.due_requests(now=160), ())
+            self.assertEqual(queue.due_requests(now=161), (updated,))
+
     def test_dispatcher_formats_command_placeholders(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             queue = TriageRequestQueue.load(Path(temp) / "triage-queue.json")

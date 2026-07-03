@@ -32,6 +32,7 @@ class TriageRequest:
     asset_urls: tuple[str, ...]
     trigger_fingerprint: str
     updated_at: float
+    pending_review: bool = False
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,7 @@ class TriageRequestQueue:
                 asset_urls=tuple(str(value) for value in item.get("asset_urls", ())),
                 trigger_fingerprint=str(item["trigger_fingerprint"]),
                 updated_at=float(item["updated_at"]),
+                pending_review=bool(item.get("pending_review") or False),
             )
             requests[request.issue_number] = request
         return cls(path, requests=requests)
@@ -166,10 +168,33 @@ class TriageRequestQueue:
                 asset_urls=asset_urls,
             ),
             updated_at=current_time,
+            pending_review=existing.pending_review if existing else False,
         )
         self._requests[issue_number] = request
         self.save()
         return request
+
+    def mark_pending_review(
+        self,
+        *,
+        request: TriageRequest,
+        quiet_seconds: float,
+        now: float | None = None,
+    ) -> TriageRequest:
+        current_time = time.time() if now is None else now
+        updated = TriageRequest(
+            issue_number=request.issue_number,
+            due_at=current_time + quiet_seconds,
+            reasons=_merge_unique(request.reasons, ("pending_review_running",)),
+            material_message_ids=request.material_message_ids,
+            asset_urls=request.asset_urls,
+            trigger_fingerprint=request.trigger_fingerprint,
+            updated_at=current_time,
+            pending_review=True,
+        )
+        self._requests[request.issue_number] = updated
+        self.save()
+        return updated
 
     def due_requests(self, *, now: float | None = None) -> tuple[TriageRequest, ...]:
         current_time = time.time() if now is None else now
@@ -198,6 +223,7 @@ class TriageRequestQueue:
                     "asset_urls": list(request.asset_urls),
                     "trigger_fingerprint": request.trigger_fingerprint,
                     "updated_at": request.updated_at,
+                    "pending_review": request.pending_review,
                 }
                 for request in sorted(self._requests.values(), key=lambda item: item.issue_number)
             ],

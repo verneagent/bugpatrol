@@ -21,7 +21,13 @@ from bugpatrol.lark import LarkOpenApiMessengerClient
 from bugpatrol.lark_events import lark_message_from_event
 from bugpatrol.resources import LocalResourceStore, ResourceDescriber, ResourceStore, materialize_lark_attachments
 from bugpatrol.triage_queue import CommandTriageDispatcher, TriageRequestQueue
-from bugpatrol.watcher import TriageDispatcher, dispatch_due_triage, enqueue_triage_outcomes, write_backfill_events
+from bugpatrol.watcher import (
+    TriageDispatcher,
+    TriageStatusReader,
+    dispatch_due_triage,
+    enqueue_triage_outcomes,
+    write_backfill_events,
+)
 
 
 def iter_json_event_lines(lines: Iterable[str]) -> Iterable[dict[str, object]]:
@@ -54,6 +60,7 @@ def run_lark_event_watcher(
     triage_quiet_seconds: float = 60,
     triage_dispatch_command: str | Sequence[str] | None = None,
     triage_dispatcher: TriageDispatcher | None = None,
+    triage_status_reader: TriageStatusReader | None = None,
 ) -> BackfillResult:
     if resource_dir is not None and resource_store is not None:
         raise ValueError("resource_dir and resource_store are mutually exclusive")
@@ -153,5 +160,10 @@ def run_lark_event_watcher(
             triage_quiet_seconds=triage_quiet_seconds,
         )
         if dispatcher is not None:
-            dispatch_due_triage(queue=queue, dispatcher=dispatcher)
+            dispatch_due_triage(
+                queue=queue,
+                dispatcher=dispatcher,
+                triage_quiet_seconds=triage_quiet_seconds,
+                status_reader=triage_status_reader,
+            )
     return result

@@ -13,7 +13,7 @@ from bugpatrol.lease import FileLease, LeaseHeldError
 from bugpatrol.lark import LarkMessage
 from bugpatrol.testing.fakes import FakeGitHubIssuesClient, FakeLarkMessengerClient
 from bugpatrol.triage_queue import TriageRequest, TriageRequestQueue
-from bugpatrol.watcher import run_polling_watcher
+from bugpatrol.watcher import dispatch_due_triage, run_polling_watcher
 
 
 class FakeHistoryLark(FakeLarkMessengerClient):
@@ -166,6 +166,31 @@ class WatcherTest(unittest.TestCase):
         self.assertEqual(events[1]["action"], "processed")
         self.assertEqual(events[1]["reason"], "created")
 
+    def test_dispatch_due_triage_defers_when_issue_is_running(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            queue = TriageRequestQueue(Path(temp) / "triage-queue.json")
+            request = queue.enqueue(
+                issue_number=7,
+                signal=FakeSignal(),
+                quiet_seconds=0,
+                now=100,
+            )
+            self.assertIsNotNone(request)
+            dispatcher = RecordingDispatcher()
+
+            dispatched = dispatch_due_triage(
+                queue=queue,
+                dispatcher=dispatcher,
+                triage_quiet_seconds=60,
+                status_reader=StaticStatusReader("Running"),
+            )
+
+            due = queue.due_requests(now=10**20)
+            self.assertEqual(dispatched, 0)
+            self.assertEqual(dispatcher.requests, [])
+            self.assertTrue(due[0].pending_review)
+            self.assertIn("pending_review_running", due[0].reasons)
+
 
 class RecordingDispatcher:
     def __init__(self) -> None:
@@ -174,6 +199,21 @@ class RecordingDispatcher:
     def dispatch(self, request: TriageRequest) -> object:
         self.requests.append(request)
         return object()
+
+
+class FakeSignal:
+    should_enqueue = True
+    reason = "material_followup"
+    material_message_ids = ("om_1",)
+    asset_urls = ()
+
+
+class StaticStatusReader:
+    def __init__(self, status: str) -> None:
+        self._status = status
+
+    def triage_status(self, issue_number: int) -> str:
+        return self._status
 
 
 if __name__ == "__main__":

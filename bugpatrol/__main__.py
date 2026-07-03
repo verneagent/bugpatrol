@@ -25,7 +25,7 @@ from bugpatrol.resources import CommandResourceDescriber, GitHubAssetRepoStore
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
 from bugpatrol.triage_result import apply_triage_result, build_triage_dry_run_report, parse_triage_result
 from bugpatrol.triage_runner import execute_triage_run, prepare_triage_run
-from bugpatrol.watcher import run_polling_watcher
+from bugpatrol.watcher import GitHubTriageStatusReader, run_polling_watcher
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -355,6 +355,12 @@ def main(argv: list[str] | None = None) -> int:
             triage_queue_path=args.triage_queue,
             triage_quiet_seconds=args.triage_quiet_seconds,
             triage_dispatch_command=args.triage_dispatch_command,
+            triage_status_reader=GitHubTriageStatusReader(
+                config=config,
+                issue_fields=GitHubIssueFieldsClient(),
+            )
+            if args.triage_dispatch_command
+            else None,
         )
         print(
             json.dumps(

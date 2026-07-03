@@ -10,6 +10,7 @@ from typing import Protocol, Sequence
 from bugpatrol.backfill import BackfillResult, run_lark_backfill
 from bugpatrol.config import ProjectConfig
 from bugpatrol.event_log import JsonlEventLog
+from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.ledger import JsonMessageLedger, MessageLedger
 from bugpatrol.lease import FileLease
@@ -31,6 +32,25 @@ class WatchResult:
 class TriageDispatcher(Protocol):
     def dispatch(self, request: TriageRequest) -> object:
         """Dispatch a due triage request."""
+
+
+class TriageStatusReader(Protocol):
+    def triage_status(self, issue_number: int) -> str:
+        """Return the current triage status for an issue."""
+
+
+class GitHubTriageStatusReader:
+    def __init__(self, *, config: ProjectConfig, issue_fields: GitHubIssueFieldsClient) -> None:
+        self._config = config
+        self._issue_fields = issue_fields
+
+    def triage_status(self, issue_number: int) -> str:
+        values = self._issue_fields.get_issue_field_values(
+            repo=self._config.github_repo,
+            issue_number=issue_number,
+        )
+        github_name = self._config.issue_field_names["Triage status"]
+        return values.get(github_name, "")
 
 
 def run_polling_watcher(
@@ -57,6 +77,7 @@ def run_polling_watcher(
     triage_quiet_seconds: float = 60,
     triage_dispatch_command: str | Sequence[str] | None = None,
     triage_dispatcher: TriageDispatcher | None = None,
+    triage_status_reader: TriageStatusReader | None = None,
 ) -> WatchResult:
     if event_log is not None and event_log_path is not None:
         raise ValueError("event_log and event_log_path are mutually exclusive")
@@ -123,7 +144,12 @@ def run_polling_watcher(
                     triage_quiet_seconds=triage_quiet_seconds,
                 )
                 if dispatcher is not None:
-                    dispatched_triage += dispatch_due_triage(queue=queue, dispatcher=dispatcher)
+                    dispatched_triage += dispatch_due_triage(
+                        queue=queue,
+                        dispatcher=dispatcher,
+                        triage_quiet_seconds=triage_quiet_seconds,
+                        status_reader=triage_status_reader,
+                    )
             if lease is not None:
                 lease.refresh()
             if once or (max_iterations is not None and iterations >= max_iterations):
@@ -173,9 +199,18 @@ def enqueue_triage_outcomes(
     return queued
 
 
-def dispatch_due_triage(*, queue: TriageRequestQueue, dispatcher: TriageDispatcher) -> int:
+def dispatch_due_triage(
+    *,
+    queue: TriageRequestQueue,
+    dispatcher: TriageDispatcher,
+    triage_quiet_seconds: float = 60,
+    status_reader: TriageStatusReader | None = None,
+) -> int:
     dispatched = 0
     for request in queue.due_requests():
+        if status_reader is not None and status_reader.triage_status(request.issue_number) == "Running":
+            queue.mark_pending_review(request=request, quiet_seconds=triage_quiet_seconds)
+            continue
         dispatcher.dispatch(request)
         queue.mark_dispatched(request)
         dispatched += 1

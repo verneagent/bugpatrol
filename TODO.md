@@ -7,10 +7,6 @@ media, and fix-notification slices.
 
 - When material evidence arrives after `Done` or `Skipped`, move status to
   `Needs review`.
-- Read current `Triage status` before dispatching due debounce requests:
-  - if the issue is already `Running`, do not dispatch another run
-  - record a pending-review marker and enqueue a follow-up review after the
-    active run finishes
 - Improve the deterministic follow-up classifier with configurable project
   keyword rules while keeping the default classifier project-neutral.
 
