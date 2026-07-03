@@ -115,31 +115,15 @@ def run_polling_watcher(
                         "skipped": result.skipped,
                     }
                 )
-                for event in result.events:
-                    logger.write(
-                        {
-                            "event": "lark_message",
-                            "iteration": iterations,
-                            "message_id": event.message_id,
-                            "action": event.action,
-                            "reason": event.reason,
-                            "issue_number": event.issue_number,
-                        }
-                    )
+                write_backfill_events(logger=logger, iteration=iterations, events=result.events)
             if queue is not None:
-                for outcome in result.outcomes:
-                    request = queue.enqueue(
-                        issue_number=outcome.issue.number,
-                        signal=outcome.triage_signal,
-                        quiet_seconds=triage_quiet_seconds,
-                    )
-                    if request is not None:
-                        queued_triage += 1
+                queued_triage += enqueue_triage_outcomes(
+                    outcomes=result.outcomes,
+                    queue=queue,
+                    triage_quiet_seconds=triage_quiet_seconds,
+                )
                 if dispatcher is not None:
-                    for request in queue.due_requests():
-                        dispatcher.dispatch(request)
-                        queue.mark_dispatched(request)
-                        dispatched_triage += 1
+                    dispatched_triage += dispatch_due_triage(queue=queue, dispatcher=dispatcher)
             if lease is not None:
                 lease.refresh()
             if once or (max_iterations is not None and iterations >= max_iterations):
@@ -155,3 +139,44 @@ def run_polling_watcher(
     finally:
         if lease is not None:
             lease.release()
+
+
+def write_backfill_events(*, logger: JsonlEventLog, iteration: int, events) -> None:  # type: ignore[no-untyped-def]
+    for event in events:
+        logger.write(
+            {
+                "event": "lark_message",
+                "iteration": iteration,
+                "message_id": event.message_id,
+                "action": event.action,
+                "reason": event.reason,
+                "issue_number": event.issue_number,
+            }
+        )
+
+
+def enqueue_triage_outcomes(
+    *,
+    outcomes,
+    queue: TriageRequestQueue,
+    triage_quiet_seconds: float,
+) -> int:  # type: ignore[no-untyped-def]
+    queued = 0
+    for outcome in outcomes:
+        request = queue.enqueue(
+            issue_number=outcome.issue.number,
+            signal=outcome.triage_signal,
+            quiet_seconds=triage_quiet_seconds,
+        )
+        if request is not None:
+            queued += 1
+    return queued
+
+
+def dispatch_due_triage(*, queue: TriageRequestQueue, dispatcher: TriageDispatcher) -> int:
+    dispatched = 0
+    for request in queue.due_requests():
+        dispatcher.dispatch(request)
+        queue.mark_dispatched(request)
+        dispatched += 1
+    return dispatched

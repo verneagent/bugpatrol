@@ -47,7 +47,7 @@ flowchart LR
 `watcher` is a long-running daemon. It polls or receives Lark messages, normalizes
 them into intake records, and creates or updates one GitHub issue per Lark topic.
 
-Typical command:
+Typical polling command:
 
 ```bash
 python -m bugpatrol watch-lark projects/example.toml \
@@ -71,6 +71,18 @@ against the same group can race and create duplicate issues or comments.
 When `--triage-queue` is set, watcher coalesces triage requests per issue. The
 default quiet period is 60 seconds. Additional material Lark follow-ups during
 that window extend the request instead of dispatching duplicate triage jobs.
+
+Event-stream mode consumes Lark event NDJSON from stdin. Use this behind a
+WebSocket event client while keeping polling as a fallback:
+
+```bash
+lark-cli event listen --format ndjson \
+  | python -m bugpatrol watch-lark-events projects/example.toml \
+      --asset-repo \
+      --event-log .bugpatrol/watch-events.jsonl \
+      --processed-ledger .bugpatrol/processed-messages.json \
+      --triage-queue .bugpatrol/triage-queue.json
+```
 
 ### triage
 

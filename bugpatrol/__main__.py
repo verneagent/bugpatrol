@@ -12,6 +12,7 @@ from bugpatrol.agents import build_triage_agent_invocation
 from bugpatrol.backfill import run_lark_backfill
 from bugpatrol.config import load_project_config
 from bugpatrol.doctor import run_doctor
+from bugpatrol.event_watcher import iter_json_event_lines, run_lark_event_watcher
 from bugpatrol.fields import TRIAGE_OUTPUT_SCHEMA, default_field_specs
 from bugpatrol.fix_notify import FIX_EVENTS, apply_fix_notification, resolve_single_issue_from_pr
 from bugpatrol.github import GitHubCliIssuesClient
@@ -71,6 +72,24 @@ def main(argv: list[str] | None = None) -> int:
     watch.add_argument("--triage-queue", type=Path, help="persist debounced triage requests in this JSON file")
     watch.add_argument("--triage-quiet-seconds", type=float, default=60)
     watch.add_argument(
+        "--triage-dispatch-command",
+        nargs="+",
+        help=(
+            "command used for due triage requests; supports {issue_number}, "
+            "{trigger_fingerprint}, and {reason}"
+        ),
+    )
+
+    event_watch = sub.add_parser("watch-lark-events", help="read Lark event NDJSON from stdin into GitHub")
+    event_watch.add_argument("project_config", type=Path)
+    event_watch.add_argument("--dry-run", action="store_true", help="scan without GitHub writes")
+    event_watch.add_argument("--resource-dir", type=Path, help="download Lark resources before writing issues")
+    event_watch.add_argument("--asset-repo", action="store_true", help="upload Lark resources to configured assets repo")
+    event_watch.add_argument("--event-log", type=Path, help="append structured watcher events to a JSONL file")
+    event_watch.add_argument("--processed-ledger", type=Path, help="persist processed Lark message ids in this JSON file")
+    event_watch.add_argument("--triage-queue", type=Path, help="persist debounced triage requests in this JSON file")
+    event_watch.add_argument("--triage-quiet-seconds", type=float, default=60)
+    event_watch.add_argument(
         "--triage-dispatch-command",
         nargs="+",
         help=(
@@ -282,6 +301,69 @@ def main(argv: list[str] | None = None) -> int:
             resource_describer=resource_describer,
         )
         print(json.dumps(result.__dict__, ensure_ascii=False))
+        return 0
+
+    if args.command == "watch-lark-events":
+        config = load_project_config(args.project_config)
+        app_secret = os.environ.get(config.lark.app_secret_env)
+        if not app_secret:
+            print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
+            return 2
+        lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
+        github = GitHubCliIssuesClient(
+            issue_fields=GitHubIssueFieldsClient(),
+            project_config=config,
+        )
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        if args.resource_dir and args.asset_repo:
+            print("--resource-dir and --asset-repo are mutually exclusive", file=sys.stderr)
+            return 2
+        resource_store = None
+        if args.asset_repo:
+            if not config.assets.github_repo or not config.assets.checkout_path:
+                print("missing [assets] github_repo or checkout_path", file=sys.stderr)
+                return 2
+            resource_store = GitHubAssetRepoStore(
+                repo=config.assets.github_repo,
+                checkout_path=Path(config.assets.checkout_path),
+                base_path=config.assets.base_path,
+                branch=config.assets.branch,
+                remote_url=config.assets.remote_url,
+            )
+        resource_describer = None
+        if config.media.description_command:
+            temp_dir = Path(config.media.description_temp_dir) if config.media.description_temp_dir else None
+            resource_describer = CommandResourceDescriber(
+                command=config.media.description_command,
+                timeout_seconds=config.media.description_timeout_seconds,
+                temp_dir=temp_dir,
+            )
+        result = run_lark_event_watcher(
+            config=config,
+            event_payloads=iter_json_event_lines(sys.stdin),
+            lark=lark,
+            workflow=workflow,
+            dry_run=args.dry_run,
+            resource_dir=args.resource_dir,
+            resource_store=resource_store,
+            resource_describer=resource_describer,
+            event_log_path=args.event_log,
+            processed_ledger_path=args.processed_ledger,
+            triage_queue_path=args.triage_queue,
+            triage_quiet_seconds=args.triage_quiet_seconds,
+            triage_dispatch_command=args.triage_dispatch_command,
+        )
+        print(
+            json.dumps(
+                {
+                    "dry_run": args.dry_run,
+                    "scanned": result.scanned,
+                    "processed": result.processed,
+                    "skipped": result.skipped,
+                },
+                ensure_ascii=False,
+            )
+        )
         return 0
 
     if args.command == "resolve-owner":
