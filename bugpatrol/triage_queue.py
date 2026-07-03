@@ -248,6 +248,8 @@ class CommandTriageDispatcher:
     def __init__(self, command_template: str | Sequence[str]) -> None:
         if isinstance(command_template, str):
             self._command_template = tuple(shlex.split(command_template))
+        elif len(command_template) == 1 and isinstance(command_template[0], str):
+            self._command_template = tuple(shlex.split(command_template[0]))
         else:
             self._command_template = tuple(command_template)
         if not self._command_template:

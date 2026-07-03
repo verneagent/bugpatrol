@@ -156,6 +156,32 @@ class TriageQueueTest(unittest.TestCase):
             self.assertEqual(run.call_args.args[0][7], f"trigger_fingerprint={request.trigger_fingerprint}")
             self.assertEqual(run.call_args.args[0][9], "reason=intake_created")
 
+    def test_dispatcher_splits_single_string_sequence_from_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            queue = TriageRequestQueue.load(Path(temp) / "triage-queue.json")
+            request = queue.enqueue(
+                issue_number=9,
+                signal=classify_triage_signal("created", make_record(message_id="om_9")),
+                quiet_seconds=0,
+                now=100,
+            )
+            self.assertIsNotNone(request)
+            dispatcher = CommandTriageDispatcher(
+                [
+                    "gh workflow run bugpatrol-triage.yml --repo TheCloverLab/fived "
+                    "-f issue_number={issue_number} "
+                    "-f trigger_fingerprint={trigger_fingerprint} "
+                    "-f reason={reason}"
+                ]
+            )
+
+            with patch("bugpatrol.triage_queue.subprocess.run") as run:
+                run.return_value.returncode = 0
+                dispatcher.dispatch(request)
+
+            self.assertEqual(run.call_args.args[0][0:4], ("gh", "workflow", "run", "bugpatrol-triage.yml"))
+            self.assertIn("issue_number=9", run.call_args.args[0])
+
 
 if __name__ == "__main__":
     unittest.main()
