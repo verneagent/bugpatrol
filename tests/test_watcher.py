@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from bugpatrol.backfill import BackfillResult
 from bugpatrol.config import load_project_config
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lark import LarkMessage
@@ -45,6 +47,31 @@ class WatcherTest(unittest.TestCase):
         self.assertEqual(result.scanned, 1)
         self.assertEqual(result.processed, 1)
         self.assertEqual(len(github.created), 1)
+
+    def test_run_polling_watcher_passes_resource_options_to_backfill(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeHistoryLark()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        store = object()
+        describer = object()
+
+        with patch("bugpatrol.watcher.run_lark_backfill") as backfill:
+            backfill.return_value = BackfillResult(scanned=1, processed=0, skipped=1, outcomes=())
+            result = run_polling_watcher(
+                config=config,
+                lark=lark,  # type: ignore[arg-type]
+                workflow=workflow,
+                once=True,
+                interval_seconds=0,
+                dry_run=True,
+                resource_store=store,  # type: ignore[arg-type]
+                resource_describer=describer,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(result.skipped, 1)
+        self.assertIs(backfill.call_args.kwargs["resource_store"], store)
+        self.assertIs(backfill.call_args.kwargs["resource_describer"], describer)
 
 
 if __name__ == "__main__":

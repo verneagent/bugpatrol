@@ -102,6 +102,11 @@ them, and closes the test issue in cleanup.
 The sandbox repository lives under `TheCloverLab` because GitHub Issue Fields
 are organization-scoped and are unavailable on user-owned repositories.
 
+FiveD migration notes live in `MIGRATION_PLAN.md`. The migration path keeps the
+current `~/clover/fived` bug pipeline as the only production writer until
+`bugpatrol` has passed shadow reads, sandbox media e2e, and one controlled FiveD
+pilot topic.
+
 Backfill recent Lark messages:
 
 ```bash

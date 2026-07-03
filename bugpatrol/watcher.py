@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from bugpatrol.backfill import BackfillResult, run_lark_backfill
 from bugpatrol.config import ProjectConfig
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lark import LarkOpenApiMessengerClient
+from bugpatrol.resources import ResourceDescriber, ResourceStore
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,9 @@ def run_polling_watcher(
     once: bool = False,
     dry_run: bool = False,
     max_iterations: int | None = None,
+    resource_dir: Path | None = None,
+    resource_store: ResourceStore | None = None,
+    resource_describer: ResourceDescriber | None = None,
 ) -> WatchResult:
     iterations = 0
     scanned = 0
@@ -41,6 +46,9 @@ def run_polling_watcher(
             workflow=workflow,
             limit=limit,
             dry_run=dry_run,
+            resource_dir=resource_dir,
+            resource_store=resource_store,
+            resource_describer=resource_describer,
         )
         iterations += 1
         scanned += result.scanned

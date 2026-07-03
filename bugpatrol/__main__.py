@@ -62,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
     watch.add_argument("--interval", type=float, default=30)
     watch.add_argument("--once", action="store_true")
     watch.add_argument("--dry-run", action="store_true", help="scan without GitHub writes")
+    watch.add_argument("--resource-dir", type=Path, help="download Lark resources before writing issues")
+    watch.add_argument("--asset-repo", action="store_true", help="upload Lark resources to configured assets repo")
 
     owner = sub.add_parser("resolve-owner", help="resolve owners for paths using CODEOWNERS")
     owner.add_argument("repo_path", type=Path)
@@ -223,6 +225,29 @@ def main(argv: list[str] | None = None) -> int:
             project_config=config,
         )
         workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        if args.resource_dir and args.asset_repo:
+            print("--resource-dir and --asset-repo are mutually exclusive", file=sys.stderr)
+            return 2
+        resource_store = None
+        if args.asset_repo:
+            if not config.assets.github_repo or not config.assets.checkout_path:
+                print("missing [assets] github_repo or checkout_path", file=sys.stderr)
+                return 2
+            resource_store = GitHubAssetRepoStore(
+                repo=config.assets.github_repo,
+                checkout_path=Path(config.assets.checkout_path),
+                base_path=config.assets.base_path,
+                branch=config.assets.branch,
+                remote_url=config.assets.remote_url,
+            )
+        resource_describer = None
+        if config.media.description_command:
+            temp_dir = Path(config.media.description_temp_dir) if config.media.description_temp_dir else None
+            resource_describer = CommandResourceDescriber(
+                command=config.media.description_command,
+                timeout_seconds=config.media.description_timeout_seconds,
+                temp_dir=temp_dir,
+            )
         result = run_polling_watcher(
             config=config,
             lark=lark,
@@ -231,6 +256,9 @@ def main(argv: list[str] | None = None) -> int:
             interval_seconds=args.interval,
             once=args.once,
             dry_run=args.dry_run,
+            resource_dir=args.resource_dir,
+            resource_store=resource_store,
+            resource_describer=resource_describer,
         )
         print(json.dumps(result.__dict__, ensure_ascii=False))
         return 0
