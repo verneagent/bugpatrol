@@ -35,6 +35,23 @@ class TriageApplySummary:
     result_fingerprint: str
 
 
+@dataclass(frozen=True)
+class TriageFieldChange:
+    field: str
+    current: str
+    proposed: str
+
+
+@dataclass(frozen=True)
+class TriageDryRunReport:
+    issue_number: int
+    issue_type: str
+    assignee: str
+    field_changes: tuple[TriageFieldChange, ...]
+    comment_markdown: str
+    result_fingerprint: str
+
+
 TRIAGE_META_START = "<!-- BUGPATROL_TRIAGE_META"
 TRIAGE_META_END = "BUGPATROL_TRIAGE_META -->"
 TRIAGE_META_RE = re.compile(
@@ -129,6 +146,37 @@ def apply_triage_result(
         comment_added=not duplicate,
         duplicate_comment_skipped=duplicate,
         result_fingerprint=fingerprint,
+    )
+
+
+def build_triage_dry_run_report(
+    *,
+    repo: str,
+    issue_number: int,
+    config: ProjectConfig,
+    result: TriageResult,
+    issue_fields: GitHubIssueFieldsClient,
+) -> TriageDryRunReport:
+    live_values = issue_fields.get_issue_field_values(repo=repo, issue_number=issue_number)
+    changes: list[TriageFieldChange] = []
+    for logical_name, proposed in result.fields.items():
+        github_name = config.issue_field_names.get(logical_name, logical_name)
+        current = live_values.get(github_name, "")
+        if current != proposed:
+            changes.append(
+                TriageFieldChange(
+                    field=logical_name,
+                    current=current,
+                    proposed=proposed,
+                )
+            )
+    return TriageDryRunReport(
+        issue_number=issue_number,
+        issue_type=result.issue_type,
+        assignee=result.assignee,
+        field_changes=tuple(changes),
+        comment_markdown=result.comment_markdown,
+        result_fingerprint=triage_result_fingerprint(result),
     )
 
 

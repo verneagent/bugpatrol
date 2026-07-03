@@ -23,7 +23,7 @@ from bugpatrol.ownership import load_codeowners, resolve_owners
 from bugpatrol.prd import load_prd_documents, search_prd_documents
 from bugpatrol.resources import CommandResourceDescriber, GitHubAssetRepoStore
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
-from bugpatrol.triage_result import apply_triage_result, parse_triage_result
+from bugpatrol.triage_result import apply_triage_result, build_triage_dry_run_report, parse_triage_result
 from bugpatrol.triage_runner import execute_triage_run, prepare_triage_run
 from bugpatrol.watcher import run_polling_watcher
 
@@ -118,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_result.add_argument("project_config", type=Path)
     apply_result.add_argument("--issue", type=int, required=True)
     apply_result.add_argument("--input", type=Path, required=True)
+    apply_result.add_argument("--dry-run", action="store_true", help="validate and report changes without writing")
 
     run_triage = sub.add_parser("run-triage", help="prepare and optionally execute triage")
     run_triage.add_argument("project_config", type=Path)
@@ -408,6 +409,30 @@ def main(argv: list[str] | None = None) -> int:
         config = load_project_config(args.project_config)
         data = json.loads(args.input.read_text())
         result = parse_triage_result(data)
+        if args.dry_run:
+            report = build_triage_dry_run_report(
+                repo=config.github_repo,
+                issue_number=args.issue,
+                config=config,
+                result=result,
+                issue_fields=GitHubIssueFieldsClient(),
+            )
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "dry_run": True,
+                        "issue": args.issue,
+                        "issue_type": report.issue_type,
+                        "assignee": report.assignee,
+                        "field_changes": [change.__dict__ for change in report.field_changes],
+                        "comment_markdown": report.comment_markdown,
+                        "result_fingerprint": report.result_fingerprint,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 0
         summary = apply_triage_result(
             repo=config.github_repo,
             issue_number=args.issue,

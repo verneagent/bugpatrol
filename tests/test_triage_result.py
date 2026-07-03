@@ -11,6 +11,7 @@ from bugpatrol.triage_result import (
     TriageResult,
     append_triage_metadata,
     apply_triage_result,
+    build_triage_dry_run_report,
     parse_triage_metadata,
     parse_triage_result,
     render_needs_info_lark_message,
@@ -72,9 +73,14 @@ class FakeGithub:
 class FakeIssueFields:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
+        self.current_values: dict[str, str] = {}
 
     def add_issue_field_values(self, **kwargs: object) -> None:
         self.calls.append(("add_issue_field_values", kwargs))
+
+    def get_issue_field_values(self, **kwargs: object) -> dict[str, str]:
+        self.calls.append(("get_issue_field_values", kwargs))
+        return self.current_values
 
 
 class TriageResultTest(unittest.TestCase):
@@ -127,6 +133,31 @@ class TriageResultTest(unittest.TestCase):
         self.assertTrue(summary.comment_added)
         self.assertFalse(summary.duplicate_comment_skipped)
         self.assertIn("BUGPATROL_TRIAGE_META", github.comments[0])
+
+    def test_build_triage_dry_run_report_shows_field_changes_without_writes(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        issue_fields = FakeIssueFields()
+        issue_fields.current_values = {
+            "Priority": "Low",
+            "Triage status": "Pending",
+            "Source": "Lark",
+        }
+        result = parse_triage_result(dict(VALID))
+
+        report = build_triage_dry_run_report(
+            repo=config.github_repo,
+            issue_number=7,
+            config=config,
+            result=result,
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+        )
+
+        changes = {change.field: (change.current, change.proposed) for change in report.field_changes}
+        self.assertEqual(changes["Priority"], ("Low", "High"))
+        self.assertEqual(changes["Triage status"], ("Pending", "Done"))
+        self.assertEqual(report.issue_type, "Bug")
+        self.assertEqual(report.assignee, "garlanddiego")
+        self.assertNotIn("add_issue_field_values", [name for name, _ in issue_fields.calls])
 
     def test_triage_metadata_round_trips(self) -> None:
         body = append_triage_metadata(

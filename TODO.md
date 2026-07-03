@@ -22,7 +22,6 @@ media, and fix-notification slices.
 
 - Add active-run metadata so concurrent triage jobs for the same issue do not
   overwrite each other.
-- Add a dry-run report that shows which fields would change.
 - Add owner override config for projects where CODEOWNERS is not enough.
 
 ## Media Handling
