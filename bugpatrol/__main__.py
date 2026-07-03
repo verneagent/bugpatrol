@@ -42,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
 
     validate = sub.add_parser("validate-config", help="validate a project TOML config")
     validate.add_argument("path", type=Path)
+    validate.add_argument("--live", action="store_true", help="also run external GitHub/tool checks")
 
     schema = sub.add_parser("schema", help="print the triage JSON schema")
     schema.add_argument("--pretty", action="store_true")
@@ -150,6 +151,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "validate-config":
         config = load_project_config(args.path)
         config.validate_against(default_field_specs())
+        if args.live:
+            checks = run_doctor(
+                config=config,
+                github=GitHubCliIssuesClient(),
+                issue_fields=GitHubIssueFieldsClient(),
+            )
+            if not all(check.ok for check in checks):
+                print(json.dumps([check.__dict__ for check in checks], ensure_ascii=False), file=sys.stderr)
+                return 1
         print(f"ok: {config.project}")
         return 0
 

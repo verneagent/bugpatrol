@@ -37,12 +37,7 @@ media, and fix-notification slices.
 ## Configuration And Doctor
 
 - Extend `doctor` to validate:
-  - asset repo write access
-  - media vision command availability
-  - `ffmpeg` when video tests or video processing are enabled
   - `codex` or `claude` provider auth on the runner
-  - GitHub Issue Field option drift
-- Add `validate-config --live` for optional external checks.
 - Add examples for a minimal project config and a full project config.
 
 ## Documentation

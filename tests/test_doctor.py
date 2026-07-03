@@ -37,7 +37,19 @@ class DoctorTest(unittest.TestCase):
         )
 
         self.assertTrue(all(check.ok for check in checks))
-        self.assertEqual([check.name for check in checks], ["config", "github_repo", "issue_types", "issue_fields"])
+        self.assertEqual(
+            [check.name for check in checks],
+            [
+                "config",
+                "github_repo",
+                "issue_types",
+                "issue_fields",
+                "asset_repo",
+                "media_vision_command",
+                "ffmpeg",
+                "triage_agent",
+            ],
+        )
 
 
 if __name__ == "__main__":
