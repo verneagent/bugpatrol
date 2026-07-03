@@ -37,6 +37,27 @@ class ResourceDescriber(Protocol):
 
 
 @dataclass(frozen=True)
+class ResourcePolicy:
+    max_image_bytes: int = 0
+    max_video_bytes: int = 0
+    max_file_bytes: int = 0
+
+    def rejection_reason(self, *, ref: "LarkResourceRef", resource: DownloadedLarkResource) -> str:
+        limit = self._limit_for(ref=ref, resource=resource)
+        if limit > 0 and len(resource.content) > limit:
+            return f"resource skipped: {ref.kind} is {len(resource.content)} bytes, limit is {limit} bytes"
+        return ""
+
+    def _limit_for(self, *, ref: "LarkResourceRef", resource: DownloadedLarkResource) -> int:
+        content_type = resource.content_type.split(";", 1)[0].strip().lower()
+        if ref.kind == "image" or content_type.startswith("image/"):
+            return self.max_image_bytes
+        if ref.kind in {"video", "media"} or content_type.startswith("video/"):
+            return self.max_video_bytes
+        return self.max_file_bytes
+
+
+@dataclass(frozen=True)
 class LarkResourceRef:
     message_id: str
     kind: str
@@ -182,9 +203,16 @@ def materialize_lark_attachments(
     lark: LarkResourceDownloader,
     store: ResourceStore,
     describer: ResourceDescriber | None = None,
+    policy: ResourcePolicy | None = None,
 ) -> IntakeRecord:
     attachments = tuple(
-        materialize_attachment(attachment=attachment, lark=lark, store=store, describer=describer)
+        materialize_attachment(
+            attachment=attachment,
+            lark=lark,
+            store=store,
+            describer=describer,
+            policy=policy,
+        )
         for attachment in record.attachments
     )
     return replace(record, attachments=attachments)
@@ -196,6 +224,7 @@ def materialize_attachment(
     lark: LarkResourceDownloader,
     store: ResourceStore,
     describer: ResourceDescriber | None = None,
+    policy: ResourcePolicy | None = None,
 ) -> Attachment:
     ref = parse_lark_resource_url(attachment.url)
     if ref is None:
@@ -205,6 +234,10 @@ def materialize_attachment(
         resource_key=ref.resource_key,
         resource_type=_download_resource_type(ref.kind),
     )
+    if policy is not None:
+        rejection = policy.rejection_reason(ref=ref, resource=resource)
+        if rejection:
+            return Attachment(kind=attachment.kind, url=attachment.url, description=rejection)
     path = store.write(ref=ref, resource=resource)
     description = attachment.description or resource.filename
     if describer is not None:

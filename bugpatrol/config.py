@@ -53,6 +53,9 @@ class MediaConfig:
     description_command: tuple[str, ...] = ()
     description_timeout_seconds: int = 300
     description_temp_dir: str = ""
+    max_image_bytes: int = 0
+    max_video_bytes: int = 0
+    max_file_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -169,6 +172,9 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             description_command=tuple(_optional_str_list(media, "description_command")),
             description_timeout_seconds=int(media.get("description_timeout_seconds") or 300),
             description_temp_dir=str(media.get("description_temp_dir") or ""),
+            max_image_bytes=int(media.get("max_image_bytes") or 0),
+            max_video_bytes=int(media.get("max_video_bytes") or 0),
+            max_file_bytes=int(media.get("max_file_bytes") or 0),
         ),
         owners=OwnersConfig(
             default=tuple(_optional_str_list(owners, "default")),

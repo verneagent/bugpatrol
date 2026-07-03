@@ -11,7 +11,13 @@ from bugpatrol.intake import Attachment, IntakeRecord
 from bugpatrol.intake_workflow import IntakeOutcome, IntakeWorkflow
 from bugpatrol.ledger import MessageLedger
 from bugpatrol.lark import LarkMessage, LarkOpenApiMessengerClient
-from bugpatrol.resources import LocalResourceStore, ResourceDescriber, ResourceStore, materialize_lark_attachments
+from bugpatrol.resources import (
+    LocalResourceStore,
+    ResourceDescriber,
+    ResourcePolicy,
+    ResourceStore,
+    materialize_lark_attachments,
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +47,7 @@ def run_lark_backfill(
     resource_dir: Path | None = None,
     resource_store: ResourceStore | None = None,
     resource_describer: ResourceDescriber | None = None,
+    resource_policy: ResourcePolicy | None = None,
     processed_ledger: MessageLedger | None = None,
 ) -> BackfillResult:
     if resource_dir is not None and resource_store is not None:
@@ -90,6 +97,7 @@ def run_lark_backfill(
                 lark=lark,
                 store=store,
                 describer=resource_describer,
+                policy=resource_policy,
             )
         outcome = workflow.process(record)
         outcomes.append(outcome)

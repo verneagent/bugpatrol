@@ -36,6 +36,9 @@ description_command = [
   "请描述这个媒体文件中和 bug 复现相关的界面、操作、错误提示、异常状态。视频请按时间顺序概括关键步骤。",
 ]
 description_timeout_seconds = 300
+max_image_bytes = 10485760
+max_video_bytes = 104857600
+max_file_bytes = 52428800
 
 [owners]
 default = ["@example-triage"]

@@ -22,7 +22,7 @@ media, and fix-notification slices.
 ## Media Handling
 
 - Add configurable image resizing before vision and upload.
-- Add video size limits and duration limits.
+- Add video duration limits.
 - Add video frame extraction or clipping for large videos.
 - Add retry policy for transient vision API failures.
 - Add media redaction hooks for sensitive screenshots.

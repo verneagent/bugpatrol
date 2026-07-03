@@ -15,7 +15,7 @@ from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.ledger import JsonMessageLedger, MessageLedger
 from bugpatrol.lease import FileLease
 from bugpatrol.lark import LarkOpenApiMessengerClient
-from bugpatrol.resources import ResourceDescriber, ResourceStore
+from bugpatrol.resources import ResourceDescriber, ResourcePolicy, ResourceStore
 from bugpatrol.triage_queue import CommandTriageDispatcher, TriageRequest, TriageRequestQueue
 
 
@@ -66,6 +66,7 @@ def run_polling_watcher(
     resource_dir: Path | None = None,
     resource_store: ResourceStore | None = None,
     resource_describer: ResourceDescriber | None = None,
+    resource_policy: ResourcePolicy | None = None,
     event_log_path: Path | None = None,
     event_log: JsonlEventLog | None = None,
     processed_ledger_path: Path | None = None,
@@ -120,6 +121,7 @@ def run_polling_watcher(
                 resource_dir=resource_dir,
                 resource_store=resource_store,
                 resource_describer=resource_describer,
+                resource_policy=resource_policy,
                 processed_ledger=ledger,
             )
             iterations += 1

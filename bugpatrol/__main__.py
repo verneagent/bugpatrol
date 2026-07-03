@@ -21,11 +21,19 @@ from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lark import LarkOpenApiMessengerClient
 from bugpatrol.ownership import load_codeowners, resolve_configured_owners, resolve_owners
 from bugpatrol.prd import load_prd_documents, search_prd_documents
-from bugpatrol.resources import CommandResourceDescriber, GitHubAssetRepoStore
+from bugpatrol.resources import CommandResourceDescriber, GitHubAssetRepoStore, ResourcePolicy
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
 from bugpatrol.triage_result import apply_triage_result, build_triage_dry_run_report, parse_triage_result
 from bugpatrol.triage_runner import execute_triage_run, prepare_triage_run
 from bugpatrol.watcher import GitHubTriageStatusReader, run_polling_watcher
+
+
+def media_resource_policy(config) -> ResourcePolicy:  # type: ignore[no-untyped-def]
+    return ResourcePolicy(
+        max_image_bytes=config.media.max_image_bytes,
+        max_video_bytes=config.media.max_video_bytes,
+        max_file_bytes=config.media.max_file_bytes,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -200,6 +208,7 @@ def main(argv: list[str] | None = None) -> int:
                 timeout_seconds=config.media.description_timeout_seconds,
                 temp_dir=temp_dir,
             )
+        resource_policy = media_resource_policy(config)
         result = run_lark_backfill(
             config=config,
             lark=lark,
@@ -209,13 +218,7 @@ def main(argv: list[str] | None = None) -> int:
             resource_dir=args.resource_dir,
             resource_store=resource_store,
             resource_describer=resource_describer,
-            event_log_path=args.event_log,
-            processed_ledger_path=args.processed_ledger,
-            lease_file=args.lease_file,
-            lease_ttl_seconds=args.lease_ttl_seconds,
-            triage_queue_path=args.triage_queue,
-            triage_quiet_seconds=args.triage_quiet_seconds,
-            triage_dispatch_command=args.triage_dispatch_command,
+            resource_policy=resource_policy,
         )
         print(
             json.dumps(
@@ -291,6 +294,7 @@ def main(argv: list[str] | None = None) -> int:
                 timeout_seconds=config.media.description_timeout_seconds,
                 temp_dir=temp_dir,
             )
+        resource_policy = media_resource_policy(config)
         result = run_polling_watcher(
             config=config,
             lark=lark,
@@ -302,6 +306,20 @@ def main(argv: list[str] | None = None) -> int:
             resource_dir=args.resource_dir,
             resource_store=resource_store,
             resource_describer=resource_describer,
+            resource_policy=resource_policy,
+            event_log_path=args.event_log,
+            processed_ledger_path=args.processed_ledger,
+            lease_file=args.lease_file,
+            lease_ttl_seconds=args.lease_ttl_seconds,
+            triage_queue_path=args.triage_queue,
+            triage_quiet_seconds=args.triage_quiet_seconds,
+            triage_dispatch_command=args.triage_dispatch_command,
+            triage_status_reader=GitHubTriageStatusReader(
+                config=config,
+                issue_fields=GitHubIssueFieldsClient(),
+            )
+            if args.triage_dispatch_command
+            else None,
         )
         print(json.dumps(result.__dict__, ensure_ascii=False))
         return 0
@@ -341,6 +359,7 @@ def main(argv: list[str] | None = None) -> int:
                 timeout_seconds=config.media.description_timeout_seconds,
                 temp_dir=temp_dir,
             )
+        resource_policy = media_resource_policy(config)
         result = run_lark_event_watcher(
             config=config,
             event_payloads=iter_json_event_lines(sys.stdin),
@@ -350,6 +369,7 @@ def main(argv: list[str] | None = None) -> int:
             resource_dir=args.resource_dir,
             resource_store=resource_store,
             resource_describer=resource_describer,
+            resource_policy=resource_policy,
             event_log_path=args.event_log,
             processed_ledger_path=args.processed_ledger,
             triage_queue_path=args.triage_queue,

@@ -11,6 +11,8 @@ from bugpatrol.resources import (
     CommandResourceDescriber,
     GitHubAssetRepoStore,
     LocalResourceStore,
+    ResourcePolicy,
+    materialize_attachment,
     materialize_lark_attachments,
     parse_lark_resource_url,
 )
@@ -183,6 +185,25 @@ class ResourcesTest(unittest.TestCase):
             )
 
         self.assertEqual(materialized.attachments[0].description, "visual: image-bytes")
+
+    def test_materialize_skips_resource_when_policy_rejects_size(self) -> None:
+        attachment = Attachment(kind="image", url="lark://message/om_1/image/img_v2_abc")
+        downloader = FakeDownloader()
+        store = Mock()
+        describer = Mock()
+
+        materialized = materialize_attachment(
+            attachment=attachment,
+            lark=downloader,
+            store=store,
+            describer=describer,
+            policy=ResourcePolicy(max_image_bytes=1),
+        )
+
+        self.assertEqual(materialized.url, attachment.url)
+        self.assertIn("resource skipped", materialized.description)
+        store.write.assert_not_called()
+        describer.describe.assert_not_called()
 
     def test_command_description_failure_is_non_blocking(self) -> None:
         ref = parse_lark_resource_url("lark://message/om_1/image/img_v2_abc")

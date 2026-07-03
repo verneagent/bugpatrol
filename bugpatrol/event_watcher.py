@@ -19,7 +19,13 @@ from bugpatrol.intake_workflow import IntakeOutcome, IntakeWorkflow
 from bugpatrol.ledger import JsonMessageLedger, MessageLedger
 from bugpatrol.lark import LarkOpenApiMessengerClient
 from bugpatrol.lark_events import lark_message_from_event
-from bugpatrol.resources import LocalResourceStore, ResourceDescriber, ResourceStore, materialize_lark_attachments
+from bugpatrol.resources import (
+    LocalResourceStore,
+    ResourceDescriber,
+    ResourcePolicy,
+    ResourceStore,
+    materialize_lark_attachments,
+)
 from bugpatrol.triage_queue import CommandTriageDispatcher, TriageRequestQueue
 from bugpatrol.watcher import (
     TriageDispatcher,
@@ -51,6 +57,7 @@ def run_lark_event_watcher(
     resource_dir: Path | None = None,
     resource_store: ResourceStore | None = None,
     resource_describer: ResourceDescriber | None = None,
+    resource_policy: ResourcePolicy | None = None,
     event_log_path: Path | None = None,
     event_log: JsonlEventLog | None = None,
     processed_ledger_path: Path | None = None,
@@ -122,6 +129,7 @@ def run_lark_event_watcher(
                 lark=lark,
                 store=store,
                 describer=resource_describer,
+                policy=resource_policy,
             )
         outcome = workflow.process(record)
         outcomes.append(outcome)
