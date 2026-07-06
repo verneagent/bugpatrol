@@ -175,6 +175,12 @@ def main(argv: list[str] | None = None) -> int:
             "{trigger_fingerprint}, and {reason}"
         ),
     )
+    watch.add_argument(
+        "--parallel-topics",
+        type=int,
+        default=1,
+        help="process up to N Lark topics concurrently (attachment download/vision/intake)",
+    )
 
     event_watch = sub.add_parser("watch-lark-events", help="read Lark event NDJSON from stdin into GitHub")
     event_watch.add_argument("project_config", type=Path)
@@ -434,6 +440,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             if args.triage_dispatch_command
             else None,
+            parallel_topics=args.parallel_topics,
         )
         print(json.dumps(result.__dict__, ensure_ascii=False))
         return 0

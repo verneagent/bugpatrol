@@ -8,6 +8,7 @@ BugPatrol uses a long-running watcher daemon for Lark intake.
 python -m bugpatrol watch-lark projects/example.toml \
   --interval 30 \
   --limit 20 \
+  --parallel-topics 3 \
   --asset-repo \
   --event-log .bugpatrol/watch-events.jsonl \
   --lease-file .bugpatrol/watch-lark.lock \
@@ -22,6 +23,12 @@ python -m bugpatrol watch-lark projects/example.toml \
 
 Run exactly one active watcher writer per Lark group. Use `--lease-file` to
 prevent accidental duplicate writers on one host.
+
+`--parallel-topics N` lets the watcher process up to N Lark topics at once
+(attachment download, vision description, issue writes). The coordinator loop
+stays serial and cheap: it scans, hands each topic to a worker thread, and
+keeps a per-topic in-flight flag so a topic is never worked on twice. Ledger,
+queue, and event-log writes all happen on the coordinator thread.
 
 ## Event Stream Watcher
 

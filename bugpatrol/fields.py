@@ -56,6 +56,10 @@ def default_field_specs() -> dict[str, FieldSpec]:
     return {spec.name: spec for spec in specs}
 
 
+# Terminal states an agent may return. "Pending"/"Running"/"Failed" are
+# watcher/runner lifecycle states and must never come from the agent.
+AGENT_TRIAGE_STATUS_VALUES = ("Needs info", "Needs review", "Done", "Skipped")
+
 TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -85,7 +89,7 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
         "issue_type": {"type": "string", "enum": list(NATIVE_ISSUE_TYPES)},
         "triage_verdict": {"type": "string", "enum": list(default_field_specs()["Triage verdict"].values)},
         "priority": {"type": "string", "enum": list(default_field_specs()["Priority"].values)},
-        "triage_status": {"type": "string", "enum": list(default_field_specs()["Triage status"].values)},
+        "triage_status": {"type": "string", "enum": list(AGENT_TRIAGE_STATUS_VALUES)},
         "platform": {"type": "string", "enum": list(default_field_specs()["Platform"].values)},
         "reproducibility": {"type": "string", "enum": list(default_field_specs()["Reproducibility"].values)},
         "other_platforms": {"type": "string", "enum": list(default_field_specs()["Other platforms"].values)},

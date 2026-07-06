@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Sequence
 
-from bugpatrol.backfill import BackfillResult, run_lark_backfill
+from bugpatrol.backfill import TopicResult, process_topic_batch, scan_topic_batches
 from bugpatrol.config import ProjectConfig
 from bugpatrol.event_log import JsonlEventLog
 from bugpatrol.github_fields import GitHubIssueFieldsClient
@@ -15,7 +16,14 @@ from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.ledger import JsonMessageLedger, MessageLedger
 from bugpatrol.lease import FileLease
 from bugpatrol.lark import LarkOpenApiMessengerClient
-from bugpatrol.resources import ResourceDescriber, ResourcePolicy, ResourceRedactor, ResourceStore, ResourceTransformer
+from bugpatrol.resources import (
+    LocalResourceStore,
+    ResourceDescriber,
+    ResourcePolicy,
+    ResourceRedactor,
+    ResourceStore,
+    ResourceTransformer,
+)
 from bugpatrol.triage_queue import CommandTriageDispatcher, TriageRequest, TriageRequestQueue
 
 
@@ -81,6 +89,7 @@ def run_polling_watcher(
     triage_dispatch_command: str | Sequence[str] | None = None,
     triage_dispatcher: TriageDispatcher | None = None,
     triage_status_reader: TriageStatusReader | None = None,
+    parallel_topics: int = 1,
 ) -> WatchResult:
     if event_log is not None and event_log_path is not None:
         raise ValueError("event_log and event_log_path are mutually exclusive")
@@ -104,73 +113,120 @@ def run_polling_watcher(
         logger = JsonlEventLog(event_log_path)
     lease = FileLease(lease_file, ttl_seconds=lease_ttl_seconds) if lease_file is not None else None
 
+    if parallel_topics < 1:
+        raise ValueError("parallel_topics must be >= 1")
+    store = resource_store
+    if store is None and resource_dir is not None:
+        store = LocalResourceStore(resource_dir)
+
     iterations = 0
     scanned = 0
     processed = 0
     skipped = 0
     queued_triage = 0
     dispatched_triage = 0
+    in_flight: dict[str, Future[TopicResult]] = {}
     if lease is not None:
         lease.acquire()
     try:
-        while True:
-            result = run_lark_backfill(
-                config=config,
-                lark=lark,
-                workflow=workflow,
-                limit=limit,
-                dry_run=dry_run,
-                resource_dir=resource_dir,
-                resource_store=resource_store,
-                resource_describer=resource_describer,
-                resource_policy=resource_policy,
-                resource_redactor=resource_redactor,
-                resource_transformer=resource_transformer,
-                processed_ledger=ledger,
-            )
-            iterations += 1
-            scanned += result.scanned
-            processed += result.processed
-            skipped += result.skipped
-            if logger is not None:
-                logger.write(
-                    {
-                        "event": "watch_scan",
-                        "iteration": iterations,
-                        "scanned": result.scanned,
-                        "processed": result.processed,
-                        "skipped": result.skipped,
-                    }
+        with ThreadPoolExecutor(max_workers=parallel_topics) as executor:
+            while True:
+                iterations += 1
+                scan = scan_topic_batches(
+                    config=config,
+                    lark=lark,
+                    limit=limit,
+                    processed_ledger=ledger,
+                    exclude_roots=frozenset(in_flight),
                 )
-                write_backfill_events(logger=logger, iteration=iterations, events=result.events)
-            if queue is not None:
-                queued_triage += enqueue_triage_outcomes(
-                    outcomes=result.outcomes,
-                    queue=queue,
-                    triage_quiet_seconds=triage_quiet_seconds,
-                )
-                if dispatcher is not None:
-                    dispatched_triage += dispatch_due_triage(
-                        queue=queue,
-                        dispatcher=dispatcher,
-                        triage_quiet_seconds=triage_quiet_seconds,
-                        status_reader=triage_status_reader,
+                for batch in scan.topics:
+                    in_flight[batch.root_key] = executor.submit(
+                        process_topic_batch,
+                        batch,
+                        config=config,
+                        lark=lark,
+                        workflow=workflow,
+                        dry_run=dry_run,
+                        store=store,
+                        resource_describer=resource_describer,
+                        resource_policy=resource_policy,
+                        resource_redactor=resource_redactor,
+                        resource_transformer=resource_transformer,
                     )
-            if lease is not None:
-                lease.refresh()
-            if once or (max_iterations is not None and iterations >= max_iterations):
-                return WatchResult(
-                    iterations=iterations,
-                    scanned=scanned,
-                    processed=processed,
-                    skipped=skipped,
-                    queued_triage=queued_triage,
-                    dispatched_triage=dispatched_triage,
-                )
-            time.sleep(interval_seconds)
+                final_iteration = once or (max_iterations is not None and iterations >= max_iterations)
+                results = _harvest_topic_results(in_flight, wait_all=final_iteration)
+                iteration_events = list(scan.skipped_events)
+                iteration_outcomes = []
+                for result in results:
+                    if ledger is not None:
+                        for message_id in result.processed_message_ids:
+                            ledger.mark_processed(message_id)
+                    iteration_events.extend(result.events)
+                    iteration_outcomes.extend(result.outcomes)
+                iteration_skipped = sum(1 for event in iteration_events if event.action == "skipped")
+                scanned += scan.scanned
+                processed += len(iteration_outcomes)
+                skipped += iteration_skipped
+                if logger is not None:
+                    logger.write(
+                        {
+                            "event": "watch_scan",
+                            "iteration": iterations,
+                            "scanned": scan.scanned,
+                            "processed": len(iteration_outcomes),
+                            "skipped": iteration_skipped,
+                        }
+                    )
+                    write_backfill_events(logger=logger, iteration=iterations, events=iteration_events)
+                if queue is not None:
+                    queued_triage += enqueue_triage_outcomes(
+                        outcomes=iteration_outcomes,
+                        queue=queue,
+                        triage_quiet_seconds=triage_quiet_seconds,
+                    )
+                    if dispatcher is not None:
+                        dispatched_triage += dispatch_due_triage(
+                            queue=queue,
+                            dispatcher=dispatcher,
+                            triage_quiet_seconds=triage_quiet_seconds,
+                            status_reader=triage_status_reader,
+                        )
+                if lease is not None:
+                    lease.refresh()
+                if final_iteration:
+                    return WatchResult(
+                        iterations=iterations,
+                        scanned=scanned,
+                        processed=processed,
+                        skipped=skipped,
+                        queued_triage=queued_triage,
+                        dispatched_triage=dispatched_triage,
+                    )
+                time.sleep(interval_seconds)
     finally:
         if lease is not None:
             lease.release()
+
+
+def _harvest_topic_results(
+    in_flight: dict[str, "Future[TopicResult]"],
+    *,
+    wait_all: bool,
+) -> list[TopicResult]:
+    """Collect finished topic results; optionally block for the stragglers.
+
+    `process_topic_batch` never raises, so `future.result()` is safe.
+    """
+    if wait_all:
+        for future in list(in_flight.values()):
+            future.exception()  # block until done
+    results: list[TopicResult] = []
+    for root_key, future in list(in_flight.items()):
+        if not future.done():
+            continue
+        results.append(future.result())
+        del in_flight[root_key]
+    return results
 
 
 def write_backfill_events(*, logger: JsonlEventLog, iteration: int, events) -> None:  # type: ignore[no-untyped-def]

@@ -10,7 +10,7 @@ from typing import Any
 
 from bugpatrol.clients import GitHubIssueComment, LarkMessengerClient
 from bugpatrol.config import ProjectConfig, branch_matches_patterns
-from bugpatrol.fields import NATIVE_ISSUE_TYPES, default_field_specs, validate_field_value
+from bugpatrol.fields import AGENT_TRIAGE_STATUS_VALUES, NATIVE_ISSUE_TYPES, default_field_specs, validate_field_value
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake import parse_intake_metadata, require_bugpatrol_managed_issue
@@ -95,6 +95,10 @@ def parse_triage_result(
     }
     for field, value in fields.items():
         validate_field_value(field, value, default_field_specs())
+    if fields["Triage status"] not in AGENT_TRIAGE_STATUS_VALUES:
+        raise ValueError(
+            f"triage_status must be a terminal state {AGENT_TRIAGE_STATUS_VALUES}, got: {fields['Triage status']}"
+        )
     follow_up_questions = _optional_str_tuple(data, "follow_up_questions")
     if fields["Triage status"] == "Needs info" and not follow_up_questions:
         raise ValueError("Needs info triage requires follow_up_questions")

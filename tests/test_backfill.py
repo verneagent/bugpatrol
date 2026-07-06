@@ -7,9 +7,12 @@ import unittest
 from pathlib import Path
 
 from bugpatrol.backfill import (
+    TopicBatch,
     attachments_from_lark_message,
     intake_record_from_lark_message,
+    process_topic_batch,
     run_lark_backfill,
+    scan_topic_batches,
     should_skip_message,
     skip_reason,
 )
@@ -593,6 +596,89 @@ class BackfillTest(unittest.TestCase):
 
         self.assertEqual(result.processed, 0)
         self.assertEqual(lark.downloads, [])
+
+
+class TopicBatchTest(unittest.TestCase):
+    def test_scan_topic_batches_groups_by_root_oldest_first(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        lark = FakeLarkHistory(
+            [
+                # list API order is newest first; scan reverses it.
+                message(message_id="om_a2", root_id="om_a1", text="A followup"),
+                message(message_id="om_b1", root_id="om_b1", text="B report"),
+                message(message_id="om_a1", root_id="om_a1", text="A report"),
+                message(message_id="om_bot", root_id="om_bot", sender_open_id=config.lark.bot_open_id),
+            ]
+        )
+
+        scan = scan_topic_batches(config=config, lark=lark)
+
+        self.assertEqual(scan.scanned, 4)
+        self.assertEqual([e.reason for e in scan.skipped_events], ["bot_message"])
+        batches = {batch.root_key: [m.message_id for m in batch.messages] for batch in scan.topics}
+        self.assertEqual(batches, {"om_a1": ["om_a1", "om_a2"], "om_b1": ["om_b1"]})
+
+    def test_scan_topic_batches_excludes_in_flight_roots_and_ledger(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        lark = FakeLarkHistory(
+            [
+                message(message_id="om_a1", root_id="om_a1", text="A report"),
+                message(message_id="om_b1", root_id="om_b1", text="B report"),
+                message(message_id="om_c1", root_id="om_c1", text="C report"),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = JsonMessageLedger.load(Path(tmp) / "ledger.json")
+            ledger.mark_processed("om_c1")
+
+            scan = scan_topic_batches(
+                config=config,
+                lark=lark,
+                processed_ledger=ledger,
+                exclude_roots=frozenset({"om_a1"}),
+            )
+
+        self.assertEqual([batch.root_key for batch in scan.topics], ["om_b1"])
+        self.assertEqual([e.reason for e in scan.skipped_events], ["processed_ledger"])
+
+    def test_process_topic_batch_error_keeps_partial_progress(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkHistory([])
+        real_workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        class ExplodingWorkflow:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def has_issue_for_root(self, *, chat_id: str, root_id: str) -> bool:
+                return real_workflow.has_issue_for_root(chat_id=chat_id, root_id=root_id)
+
+            def process(self, record):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                if self.calls > 1:
+                    raise RuntimeError("boom")
+                return real_workflow.process(record)
+
+        batch = TopicBatch(
+            root_key="om_a1",
+            messages=(
+                message(message_id="om_a1", root_id="om_a1", text="A report"),
+                message(message_id="om_a2", root_id="om_a1", text="A followup"),
+            ),
+        )
+
+        result = process_topic_batch(
+            batch,
+            config=config,
+            lark=lark,
+            workflow=ExplodingWorkflow(),  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(result.processed_message_ids, ("om_a1",))
+        self.assertEqual(len(result.outcomes), 1)
+        self.assertIn("boom", result.error)
+        self.assertEqual([e.action for e in result.events], ["processed", "error"])
 
 
 if __name__ == "__main__":

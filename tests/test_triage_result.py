@@ -104,6 +104,14 @@ class TriageResultTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid value"):
             parse_triage_result(data)
 
+    def test_parse_triage_result_rejects_lifecycle_triage_status(self) -> None:
+        for status in ("Pending", "Running", "Failed"):
+            data = dict(VALID)
+            data["triage_status"] = status
+
+            with self.assertRaisesRegex(ValueError, "terminal state"):
+                parse_triage_result(data)
+
     def test_parse_triage_result_requires_questions_for_needs_info(self) -> None:
         data = dict(VALID)
         data["triage_status"] = "Needs info"

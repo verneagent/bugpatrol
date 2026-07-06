@@ -40,6 +40,30 @@ class BackfillResult:
     events: tuple[BackfillEvent, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class TopicBatch:
+    """Messages of one Lark topic (root), oldest first."""
+
+    root_key: str
+    messages: tuple[LarkMessage, ...]
+
+
+@dataclass(frozen=True)
+class ScanResult:
+    scanned: int
+    skipped_events: tuple[BackfillEvent, ...]
+    topics: tuple[TopicBatch, ...]
+
+
+@dataclass(frozen=True)
+class TopicResult:
+    root_key: str
+    outcomes: tuple[IntakeOutcome, ...]
+    events: tuple[BackfillEvent, ...]
+    processed_message_ids: tuple[str, ...]
+    error: str = ""
+
+
 def run_lark_backfill(
     *,
     config: ProjectConfig,
@@ -93,62 +117,26 @@ def run_lark_backfill(
                 )
             )
             continue
-        if (
-            config.intake.skip_orphan_replies
-            and message.root_id
-            and message.root_id != message.message_id
-            and not workflow.has_issue_for_root(chat_id=message.chat_id, root_id=message.root_id)
-        ):
-            # Reply in a topic BugPatrol never intook (e.g. pre-cutover
-            # history): appending is impossible and creating a fragment
-            # issue from a lone reply would be misleading.
-            skipped += 1
-            events.append(
-                BackfillEvent(
-                    message_id=message.message_id,
-                    action="skipped",
-                    reason="orphan_reply",
-                )
-            )
-            continue
-        record = intake_record_from_lark_message(
-            message,
-            sender_names=config.lark.sender_names or {},
-            message_url_template=config.lark.message_url_template,
-        )
-        if dry_run:
-            skipped += 1
-            events.append(
-                BackfillEvent(
-                    message_id=message.message_id,
-                    action="skipped",
-                    reason="dry_run",
-                )
-            )
-            continue
         store = resource_store
         if store is None and resource_dir is not None:
             store = LocalResourceStore(resource_dir)
-        if store is not None:
-            record = materialize_lark_attachments(
-                record=record,
-                lark=lark,
-                store=store,
-                describer=resource_describer,
-                policy=resource_policy,
-                redactor=resource_redactor,
-                transformer=resource_transformer,
-            )
-        outcome = workflow.process(record)
-        outcomes.append(outcome)
-        events.append(
-            BackfillEvent(
-                message_id=message.message_id,
-                action="processed",
-                reason=outcome.action,
-                issue_number=outcome.issue.number,
-            )
+        outcome, event = _intake_one_message(
+            message,
+            config=config,
+            lark=lark,
+            workflow=workflow,
+            dry_run=dry_run,
+            store=store,
+            resource_describer=resource_describer,
+            resource_policy=resource_policy,
+            resource_redactor=resource_redactor,
+            resource_transformer=resource_transformer,
         )
+        events.append(event)
+        if outcome is None:
+            skipped += 1
+            continue
+        outcomes.append(outcome)
         if processed_ledger is not None:
             processed_ledger.mark_processed(message.message_id)
     return BackfillResult(
@@ -157,6 +145,159 @@ def run_lark_backfill(
         skipped=skipped,
         outcomes=tuple(outcomes),
         events=tuple(events),
+    )
+
+
+def _intake_one_message(
+    message: LarkMessage,
+    *,
+    config: ProjectConfig,
+    lark: LarkOpenApiMessengerClient,
+    workflow: IntakeWorkflow,
+    dry_run: bool = False,
+    store: ResourceStore | None = None,
+    resource_describer: ResourceDescriber | None = None,
+    resource_policy: ResourcePolicy | None = None,
+    resource_redactor: ResourceRedactor | None = None,
+    resource_transformer: ResourceTransformer | None = None,
+) -> tuple[IntakeOutcome | None, BackfillEvent]:
+    if (
+        config.intake.skip_orphan_replies
+        and message.root_id
+        and message.root_id != message.message_id
+        and not workflow.has_issue_for_root(chat_id=message.chat_id, root_id=message.root_id)
+    ):
+        # Reply in a topic BugPatrol never intook (e.g. pre-cutover
+        # history): appending is impossible and creating a fragment
+        # issue from a lone reply would be misleading.
+        return None, BackfillEvent(
+            message_id=message.message_id,
+            action="skipped",
+            reason="orphan_reply",
+        )
+    record = intake_record_from_lark_message(
+        message,
+        sender_names=config.lark.sender_names or {},
+        message_url_template=config.lark.message_url_template,
+    )
+    if dry_run:
+        return None, BackfillEvent(
+            message_id=message.message_id,
+            action="skipped",
+            reason="dry_run",
+        )
+    if store is not None:
+        record = materialize_lark_attachments(
+            record=record,
+            lark=lark,
+            store=store,
+            describer=resource_describer,
+            policy=resource_policy,
+            redactor=resource_redactor,
+            transformer=resource_transformer,
+        )
+    outcome = workflow.process(record)
+    return outcome, BackfillEvent(
+        message_id=message.message_id,
+        action="processed",
+        reason=outcome.action,
+        issue_number=outcome.issue.number,
+    )
+
+
+def scan_topic_batches(
+    *,
+    config: ProjectConfig,
+    lark: LarkOpenApiMessengerClient,
+    limit: int = 20,
+    processed_ledger: MessageLedger | None = None,
+    exclude_roots: frozenset[str] = frozenset(),
+) -> ScanResult:
+    """Cheap scan phase: filter messages and group the workable ones by topic.
+
+    Topics whose root key is in `exclude_roots` (already in flight on a
+    worker) are left untouched so the next scan can pick them up again.
+    """
+    messages = lark.list_chat_messages(chat_id=config.lark.chat_id, limit=limit)
+    skipped_events: list[BackfillEvent] = []
+    groups: dict[str, list[LarkMessage]] = {}
+    since_ms = config.intake.since_ms()
+    for message in reversed(messages):
+        reason = skip_reason(
+            message,
+            bot_open_id=config.lark.bot_open_id,
+            bot_app_id=config.lark.app_id,
+            since_ms=since_ms,
+        )
+        if not reason and processed_ledger is not None and processed_ledger.is_processed(message.message_id):
+            reason = "processed_ledger"
+        if reason:
+            skipped_events.append(
+                BackfillEvent(message_id=message.message_id, action="skipped", reason=reason)
+            )
+            continue
+        root_key = message.root_id or message.message_id
+        if root_key in exclude_roots:
+            continue
+        groups.setdefault(root_key, []).append(message)
+    return ScanResult(
+        scanned=len(messages),
+        skipped_events=tuple(skipped_events),
+        topics=tuple(TopicBatch(root_key=key, messages=tuple(items)) for key, items in groups.items()),
+    )
+
+
+def process_topic_batch(
+    batch: TopicBatch,
+    *,
+    config: ProjectConfig,
+    lark: LarkOpenApiMessengerClient,
+    workflow: IntakeWorkflow,
+    dry_run: bool = False,
+    store: ResourceStore | None = None,
+    resource_describer: ResourceDescriber | None = None,
+    resource_policy: ResourcePolicy | None = None,
+    resource_redactor: ResourceRedactor | None = None,
+    resource_transformer: ResourceTransformer | None = None,
+) -> TopicResult:
+    """Process one topic's messages in order. Never raises: an error stops the
+    topic and is reported in the result so unprocessed messages retry on the
+    next scan."""
+    outcomes: list[IntakeOutcome] = []
+    events: list[BackfillEvent] = []
+    processed_ids: list[str] = []
+    error = ""
+    for message in batch.messages:
+        try:
+            outcome, event = _intake_one_message(
+                message,
+                config=config,
+                lark=lark,
+                workflow=workflow,
+                dry_run=dry_run,
+                store=store,
+                resource_describer=resource_describer,
+                resource_policy=resource_policy,
+                resource_redactor=resource_redactor,
+                resource_transformer=resource_transformer,
+            )
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            events.append(
+                BackfillEvent(message_id=message.message_id, action="error", reason=error)
+            )
+            break
+        events.append(event)
+        if outcome is None:
+            continue
+        outcomes.append(outcome)
+        processed_ids.append(message.message_id)
+    return TopicResult(
+        root_key=batch.root_key,
+        outcomes=tuple(outcomes),
+        events=tuple(events),
+        processed_message_ids=tuple(processed_ids),
+        error=error,
     )
 
 

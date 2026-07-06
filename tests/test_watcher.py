@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from bugpatrol.backfill import BackfillResult
+from bugpatrol.backfill import BackfillEvent, TopicResult
 from bugpatrol.config import load_project_config
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lease import FileLease, LeaseHeldError
@@ -29,6 +30,23 @@ class FakeHistoryLark(FakeLarkMessengerClient):
                 msg_type="text",
                 text="Todo 空状态不显示",
             )
+        ]
+
+
+class FakeTwoTopicLark(FakeLarkMessengerClient):
+    def list_chat_messages(self, *, chat_id: str, limit: int = 20) -> list[LarkMessage]:
+        return [
+            LarkMessage(
+                message_id=message_id,
+                chat_id=chat_id,
+                root_id=message_id,
+                sender_open_id="ou_user",
+                sender_type="user",
+                create_time="1000",
+                msg_type="text",
+                text=f"bug report {message_id}",
+            )
+            for message_id in ("om_t1", "om_t2")
         ]
 
 
@@ -61,8 +79,13 @@ class WatcherTest(unittest.TestCase):
         describer = object()
         transformer = object()
 
-        with patch("bugpatrol.watcher.run_lark_backfill") as backfill:
-            backfill.return_value = BackfillResult(scanned=1, processed=0, skipped=1, outcomes=())
+        with patch("bugpatrol.watcher.process_topic_batch") as process:
+            process.return_value = TopicResult(
+                root_key="om_1",
+                outcomes=(),
+                events=(BackfillEvent(message_id="om_1", action="skipped", reason="dry_run"),),
+                processed_message_ids=(),
+            )
             result = run_polling_watcher(
                 config=config,
                 lark=lark,  # type: ignore[arg-type]
@@ -76,9 +99,9 @@ class WatcherTest(unittest.TestCase):
             )
 
         self.assertEqual(result.skipped, 1)
-        self.assertIs(backfill.call_args.kwargs["resource_store"], store)
-        self.assertIs(backfill.call_args.kwargs["resource_describer"], describer)
-        self.assertIs(backfill.call_args.kwargs["resource_transformer"], transformer)
+        self.assertIs(process.call_args.kwargs["store"], store)
+        self.assertIs(process.call_args.kwargs["resource_describer"], describer)
+        self.assertIs(process.call_args.kwargs["resource_transformer"], transformer)
 
     def test_run_polling_watcher_can_enqueue_and_dispatch_triage(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
@@ -104,6 +127,44 @@ class WatcherTest(unittest.TestCase):
         self.assertEqual(result.dispatched_triage, 1)
         self.assertEqual(dispatcher.requests[0].issue_number, 1)
         self.assertEqual(queue.due_requests(now=999999), ())
+
+    def test_run_polling_watcher_runs_topics_concurrently(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeTwoTopicLark()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        # Both topic workers must be inside process_topic_batch at the same
+        # time, otherwise the barrier times out and the test fails.
+        barrier = threading.Barrier(2)
+
+        def concurrent_process(batch, **kwargs):  # type: ignore[no-untyped-def]
+            barrier.wait(timeout=10)
+            return TopicResult(
+                root_key=batch.root_key,
+                outcomes=(),
+                events=(),
+                processed_message_ids=tuple(m.message_id for m in batch.messages),
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            ledger_path = Path(temp) / "ledger.json"
+            from bugpatrol.ledger import JsonMessageLedger
+
+            ledger = JsonMessageLedger.load(ledger_path)
+            with patch("bugpatrol.watcher.process_topic_batch", side_effect=concurrent_process):
+                result = run_polling_watcher(
+                    config=config,
+                    lark=lark,  # type: ignore[arg-type]
+                    workflow=workflow,
+                    once=True,
+                    interval_seconds=0,
+                    parallel_topics=2,
+                    processed_ledger=ledger,
+                )
+
+            self.assertEqual(result.iterations, 1)
+            self.assertTrue(ledger.is_processed("om_t1"))
+            self.assertTrue(ledger.is_processed("om_t2"))
 
     def test_run_polling_watcher_releases_lease_after_once(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import subprocess
 import tempfile
+import threading
 import time
 from io import BytesIO
 from dataclasses import dataclass, replace
@@ -137,8 +138,14 @@ class GitHubAssetRepoStore:
         self._branch = branch
         self._remote_url = remote_url
         self._git = git
+        # Parallel topic workers share one checkout; git mutations must not interleave.
+        self._lock = threading.Lock()
 
     def write(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> str:
+        with self._lock:
+            return self._write_locked(ref=ref, resource=resource)
+
+    def _write_locked(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> str:
         self._ensure_checkout()
         rel_path = Path(self._base_path) / _safe_segment(ref.message_id) / _resource_filename(
             resource=resource,
