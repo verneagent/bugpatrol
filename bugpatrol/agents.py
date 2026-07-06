@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from bugpatrol.config import ProjectConfig
+
+DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-pro[1m]"
 
 
 @dataclass(frozen=True)
 class AgentInvocation:
     provider: str
     command: list[str]
+    # Extra environment for the agent process (e.g. third-party endpoint
+    # overrides). Merged over os.environ at execution time; never printed.
+    env: dict[str, str] = field(default_factory=dict)
 
 
 def build_triage_agent_invocation(
@@ -24,6 +31,7 @@ def build_triage_agent_invocation(
     context_path: Path | None = None,
 ) -> AgentInvocation:
     provider = config.triage_agent.provider
+    env: dict[str, str] = {}
     if provider == "codex":
         command = _build_codex_command(
             config,
@@ -42,9 +50,29 @@ def build_triage_agent_invocation(
             output_path=output_path,
             context_path=context_path,
         )
+    elif provider == "deepseek":
+        # DeepSeek's Anthropic-compatible endpoint driven through the claude
+        # CLI (codex+DeepSeek is broken since codex 0.128 dropped wire_api=chat).
+        api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        if not api_key:
+            raise ValueError("deepseek provider requires DEEPSEEK_API_KEY in the environment")
+        command = _build_claude_command(
+            config,
+            issue_number=issue_number,
+            prompt_path=prompt_path,
+            schema_path=schema_path,
+            output_path=output_path,
+            context_path=context_path,
+            default_model=DEEPSEEK_DEFAULT_MODEL,
+        )
+        env = {
+            "ANTHROPIC_BASE_URL": DEEPSEEK_ANTHROPIC_BASE_URL,
+            "ANTHROPIC_API_KEY": api_key,
+            "ANTHROPIC_AUTH_TOKEN": api_key,
+        }
     else:
         raise ValueError(f"unsupported triage agent provider: {provider}")
-    return AgentInvocation(provider=provider, command=command)
+    return AgentInvocation(provider=provider, command=command, env=env)
 
 
 def _common_prompt(
@@ -106,6 +134,7 @@ def _build_claude_command(
     schema_path: Path,
     output_path: Path,
     context_path: Path | None,
+    default_model: str = "",
 ) -> list[str]:
     prompt = "\n".join(
         [
@@ -122,6 +151,7 @@ def _build_claude_command(
     # Non-interactive `claude -p` auto-denies file writes by default, which
     # would block writing the output JSON. Runs happen on trusted runners.
     command = ["claude", "-p", prompt, "--permission-mode", "acceptEdits"]
-    if config.triage_agent.model:
-        command.extend(["--model", config.triage_agent.model])
+    model = config.triage_agent.model or default_model
+    if model:
+        command.extend(["--model", model])
     return command

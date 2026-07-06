@@ -13,8 +13,8 @@ default = "main"
 allowed = ["main", "feature-*"]
 
 [triage_agent]
-# 临时切到 claude（codex 配额 2026-07-07 恢复后可切回）
-provider = "claude"
+# deepseek: claude CLI + DeepSeek Anthropic 端点（需 DEEPSEEK_API_KEY）
+provider = "deepseek"
 runner_labels = ["self-hosted", "bugpatrol-sandbox-triage"]
 model = ""
 effort = ""

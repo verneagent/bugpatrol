@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from datetime import datetime, timezone
 from dataclasses import dataclass, replace
@@ -152,7 +153,8 @@ def execute_triage_run(
         run_id=run_id,
         github=github,
     )
-    completed = subprocess.run(plan.invocation.command, check=False)
+    agent_env = {**os.environ, **plan.invocation.env} if plan.invocation.env else None
+    completed = subprocess.run(plan.invocation.command, check=False, env=agent_env)
     if completed.returncode != 0:
         mark_triage_failed(
             config=config,
