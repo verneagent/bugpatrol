@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -66,6 +67,7 @@ class FakeIssueFields:
 class TriageRunnerTest(unittest.TestCase):
     def test_prepare_triage_run_writes_context_schema_and_command(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = replace(config, triage_agent=replace(config.triage_agent, provider="codex"))
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prd_root = root / config.prd.cache_path

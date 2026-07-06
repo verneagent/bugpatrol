@@ -89,6 +89,7 @@ def build_fix_notification(
             repo=repo,
             pr=pr,
             commit=commit,
+            affected_branch=affected_branch_from_comments(comments),
         ),
         chat_id=chat_id,
         message_id=message_id,
@@ -201,16 +202,21 @@ def render_fix_notification_text(
     repo: str,
     pr: str = "",
     commit: str = "",
+    affected_branch: str = "",
 ) -> str:
     if event == "pr_opened":
-        return f"修复 PR 已创建：{repo}#{_normalize_pr(pr)}\nIssue #{issue.number}: {issue.url}"
-    if event == "pr_merged":
-        return f"修复 PR 已合并：{repo}#{_normalize_pr(pr)}\nIssue #{issue.number}: {issue.url}"
-    if event == "commit_linked":
-        return f"关联修复 commit：{repo}@{commit}\nIssue #{issue.number}: {issue.url}"
-    if event == "issue_fixed":
-        return f"该问题已标记修复：Issue #{issue.number}: {issue.url}"
-    raise ValueError(f"unsupported fix event: {event}")
+        text = f"修复 PR 已创建：{repo}#{_normalize_pr(pr)}\nIssue #{issue.number}: {issue.url}"
+    elif event == "pr_merged":
+        text = f"修复 PR 已合并：{repo}#{_normalize_pr(pr)}\nIssue #{issue.number}: {issue.url}"
+    elif event == "commit_linked":
+        text = f"关联修复 commit：{repo}@{commit}\nIssue #{issue.number}: {issue.url}"
+    elif event == "issue_fixed":
+        text = f"该问题已标记修复：Issue #{issue.number}: {issue.url}"
+    else:
+        raise ValueError(f"unsupported fix event: {event}")
+    if affected_branch:
+        text = f"{text}\n影响分支：{affected_branch}"
+    return text
 
 
 def render_fix_metadata_comment(metadata: dict[str, Any]) -> str:

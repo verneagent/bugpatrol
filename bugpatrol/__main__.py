@@ -251,8 +251,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.live:
             checks = run_doctor(
                 config=config,
-                github=GitHubCliIssuesClient(),
-                issue_fields=GitHubIssueFieldsClient(),
+                github=GitHubCliIssuesClient(gh=config.github_cli),
+                issue_fields=GitHubIssueFieldsClient(gh=config.github_cli),
             )
             if not all(check.ok for check in checks):
                 print(json.dumps([check.__dict__ for check in checks], ensure_ascii=False), file=sys.stderr)
@@ -287,8 +287,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
             return 2
         lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
-        issue_fields = GitHubIssueFieldsClient()
+        issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
         github = GitHubCliIssuesClient(
+            gh=config.github_cli,
             issue_fields=issue_fields,
             project_config=config,
         )
@@ -357,8 +358,8 @@ def main(argv: list[str] | None = None) -> int:
             lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
         checks = run_doctor(
             config=config,
-            github=GitHubCliIssuesClient(),
-            issue_fields=GitHubIssueFieldsClient(),
+            github=GitHubCliIssuesClient(gh=config.github_cli),
+            issue_fields=GitHubIssueFieldsClient(gh=config.github_cli),
             lark=lark,
         )
         print(json.dumps([check.__dict__ for check in checks], ensure_ascii=False))
@@ -371,8 +372,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
             return 2
         lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
-        issue_fields = GitHubIssueFieldsClient()
+        issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
         github = GitHubCliIssuesClient(
+            gh=config.github_cli,
             issue_fields=issue_fields,
             project_config=config,
         )
@@ -419,7 +421,7 @@ def main(argv: list[str] | None = None) -> int:
             triage_dispatch_command=args.triage_dispatch_command,
             triage_status_reader=GitHubTriageStatusReader(
                 config=config,
-                issue_fields=GitHubIssueFieldsClient(),
+                issue_fields=GitHubIssueFieldsClient(gh=config.github_cli),
             )
             if args.triage_dispatch_command
             else None,
@@ -434,8 +436,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
             return 2
         lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
-        issue_fields = GitHubIssueFieldsClient()
+        issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
         github = GitHubCliIssuesClient(
+            gh=config.github_cli,
             issue_fields=issue_fields,
             project_config=config,
         )
@@ -478,7 +481,7 @@ def main(argv: list[str] | None = None) -> int:
             triage_dispatch_command=args.triage_dispatch_command,
             triage_status_reader=GitHubTriageStatusReader(
                 config=config,
-                issue_fields=GitHubIssueFieldsClient(),
+                issue_fields=GitHubIssueFieldsClient(gh=config.github_cli),
             )
             if args.triage_dispatch_command
             else None,
@@ -527,7 +530,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "issue-context":
         config = load_project_config(args.project_config)
-        github = GitHubCliIssuesClient()
+        github = GitHubCliIssuesClient(gh=config.github_cli)
         issue = github.get_issue(repo=config.github_repo, issue_number=args.issue)
         comments = github.list_issue_comments(repo=config.github_repo, issue_number=args.issue)
         prd_root = args.repo_path / config.prd.cache_path
@@ -554,7 +557,7 @@ def main(argv: list[str] | None = None) -> int:
                 issue_number=args.issue,
                 config=config,
                 result=result,
-                issue_fields=GitHubIssueFieldsClient(),
+                issue_fields=GitHubIssueFieldsClient(gh=config.github_cli),
             )
             print(
                 json.dumps(
@@ -577,16 +580,16 @@ def main(argv: list[str] | None = None) -> int:
             issue_number=args.issue,
             config=config,
             result=result,
-            github=GitHubCliIssuesClient(),
-            issue_fields=GitHubIssueFieldsClient(),
+            github=GitHubCliIssuesClient(gh=config.github_cli),
+            issue_fields=GitHubIssueFieldsClient(gh=config.github_cli),
         )
         print(json.dumps({"ok": True, "issue": args.issue, "summary": summary.__dict__}, ensure_ascii=False))
         return 0
 
     if args.command == "run-triage":
         config = load_project_config(args.project_config)
-        github = GitHubCliIssuesClient()
-        issue_fields = GitHubIssueFieldsClient()
+        github = GitHubCliIssuesClient(gh=config.github_cli)
+        issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
         plan = prepare_triage_run(
             config=config,
             issue_number=args.issue,
@@ -619,7 +622,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "notify-fix":
         config = load_project_config(args.project_config)
-        github = GitHubCliIssuesClient()
+        github = GitHubCliIssuesClient(gh=config.github_cli)
         lark = None
         if args.write:
             app_secret = os.environ.get(config.lark.app_secret_env)
@@ -686,7 +689,7 @@ def main(argv: list[str] | None = None) -> int:
         result = reconcile_fix_notifications(
             repo=config.github_repo,
             candidates=candidates,
-            github=GitHubCliIssuesClient(),
+            github=GitHubCliIssuesClient(gh=config.github_cli),
             lark=lark,
             dry_run=not args.write,
             default_branch=config.branches.default,

@@ -266,10 +266,18 @@ def reject_affected_branch(result: TriageResult) -> TriageResult:
 
 def render_triage_comment(result: TriageResult) -> str:
     body = result.comment_markdown.rstrip()
+    branch_line = ""
     if result.affected_branch and "影响分支" not in body and "Affected branch" not in body:
-        body = f"{body}\n\n影响分支：{result.affected_branch}"
+        branch_line = f"**影响分支：{result.affected_branch}**"
     elif result.affected_branch_rejected and "影响分支" not in body:
-        body = f"{body}\n\n影响分支：`{result.affected_branch_rejected}`（不匹配项目允许的分支规则，未采信）"
+        branch_line = f"影响分支：`{result.affected_branch_rejected}`（不匹配项目允许的分支规则，未采信）"
+    if branch_line:
+        lines = body.splitlines()
+        if lines and lines[0].lstrip().startswith("#"):
+            # Keep the branch prominent: right under the comment heading.
+            body = "\n".join([lines[0], "", branch_line, *lines[1:]])
+        else:
+            body = f"{branch_line}\n\n{body}"
     if not result.blame_suggestion:
         return body
     if "Blame" in body or "归因" in body:
@@ -365,6 +373,7 @@ def _send_lark_follow_up(
             issue_number=issue_number,
             issue_url=issue.url,
             questions=result.follow_up_questions,
+            affected_branch=result.affected_branch,
         ),
     )
 
@@ -374,11 +383,12 @@ def render_needs_info_lark_message(
     issue_number: int,
     issue_url: str,
     questions: tuple[str, ...],
+    affected_branch: str = "",
 ) -> str:
-    lines = [
-        f"需要补充信息，GitHub issue #{issue_number}: {issue_url}",
-        "",
-    ]
+    lines = [f"需要补充信息，GitHub issue #{issue_number}: {issue_url}"]
+    if affected_branch:
+        lines.append(f"影响分支：{affected_branch}")
+    lines.append("")
     lines.extend(f"{index}. {question}" for index, question in enumerate(questions, start=1))
     return "\n".join(lines)
 

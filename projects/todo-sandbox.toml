@@ -1,4 +1,6 @@
 github_repo = "TheCloverLab/bugpatrol-todo-sandbox"
+# 以 sobit-bot[bot] GitHub App 身份执行所有 gh 操作
+github_cli = "/Users/dinghaozeng/clover/fived/scripts/gh-as-bot.sh"
 
 [lark]
 chat_id = "oc_d371f022f168b567a141ced142691894"
@@ -11,7 +13,8 @@ default = "main"
 allowed = ["main", "feature-*"]
 
 [triage_agent]
-provider = "codex"
+# 临时切到 claude（codex 配额 2026-07-07 恢复后可切回）
+provider = "claude"
 runner_labels = ["self-hosted", "bugpatrol-sandbox-triage"]
 model = ""
 effort = ""
@@ -54,3 +57,4 @@ Evidence = "Evidence"
 "PRD status" = "PRD status"
 "Triage confidence" = "Triage confidence"
 "Owner reason" = "Owner reason"
+"Affected branch" = "Affected branch"

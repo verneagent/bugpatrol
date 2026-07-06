@@ -103,6 +103,7 @@ class FollowupClassifierConfig:
 @dataclass(frozen=True)
 class ProjectConfig:
     github_repo: str
+    github_cli: str
     lark: LarkConfig
     triage_agent: TriageAgentConfig
     prd: PrdConfig
@@ -191,6 +192,7 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
 
     return ProjectConfig(
         github_repo=_required_str(data, "github_repo"),
+        github_cli=str(data.get("github_cli") or "gh"),
         lark=LarkConfig(
             chat_id=_required_str(lark, "chat_id"),
             app_id=_required_str(lark, "app_id"),

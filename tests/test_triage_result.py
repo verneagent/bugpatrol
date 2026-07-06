@@ -199,6 +199,14 @@ class TriageResultTest(unittest.TestCase):
 
     def test_affected_branch_not_written_when_field_is_not_mapped(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = replace(
+            config,
+            issue_field_names={
+                name: value
+                for name, value in config.issue_field_names.items()
+                if name != "Affected branch"
+            },
+        )
         data = dict(VALID)
         data["affected_branch"] = "main"
         result = parse_triage_result(data)

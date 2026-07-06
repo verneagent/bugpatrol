@@ -32,6 +32,7 @@ class FakeIssueFields:
 class DoctorTest(unittest.TestCase):
     def test_run_doctor_reports_all_checks_ok(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = replace(config, triage_agent=replace(config.triage_agent, provider="codex"))
 
         with patch("bugpatrol.doctor.shutil.which", return_value="/usr/bin/tool"):
             with patch("bugpatrol.doctor.subprocess.run") as run:
@@ -72,9 +73,10 @@ class DoctorTest(unittest.TestCase):
 
     def test_triage_agent_auth_command_matches_provider(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
+        codex = replace(config, triage_agent=replace(config.triage_agent, provider="codex"))
         claude = replace(config, triage_agent=replace(config.triage_agent, provider="claude"))
 
-        self.assertEqual(_triage_agent_auth_command(config), ("codex", "login", "status"))
+        self.assertEqual(_triage_agent_auth_command(codex), ("codex", "login", "status"))
         self.assertEqual(_triage_agent_auth_command(claude), ("claude", "auth", "status"))
 
     def test_doctor_reports_agent_auth_failure(self) -> None:
