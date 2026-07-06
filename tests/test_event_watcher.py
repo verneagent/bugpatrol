@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import tempfile
 import unittest
@@ -109,6 +110,60 @@ class EventWatcherTest(unittest.TestCase):
         self.assertEqual(result.processed, 1)
         self.assertEqual(github.created[0].issue.number, 1)
         self.assertEqual(result.events[0].reason, "created")
+
+    def test_run_lark_event_watcher_applies_since_cutoff(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = dataclasses.replace(
+            config,
+            intake=dataclasses.replace(config.intake, since="2026-07-06T00:00:00+08:00"),
+        )
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        result = run_lark_event_watcher(
+            config=config,
+            event_payloads=[
+                event_payload(message_id="om_old", create_time="1783224000000"),
+                event_payload(message_id="om_new", create_time="1783310400000"),
+            ],
+            lark=lark,  # type: ignore[arg-type]
+            workflow=workflow,
+        )
+
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(
+            [(event.message_id, event.action, event.reason) for event in result.events],
+            [
+                ("om_old", "skipped", "before_intake_since"),
+                ("om_new", "processed", "created"),
+            ],
+        )
+
+    def test_run_lark_event_watcher_skips_orphan_replies(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = dataclasses.replace(
+            config,
+            intake=dataclasses.replace(config.intake, skip_orphan_replies=True),
+        )
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        result = run_lark_event_watcher(
+            config=config,
+            event_payloads=[
+                event_payload(message_id="om_orphan", root_id="om_pre_cutover"),
+            ],
+            lark=lark,  # type: ignore[arg-type]
+            workflow=workflow,
+        )
+
+        self.assertEqual(result.processed, 0)
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(result.events[0].reason, "orphan_reply")
+        self.assertEqual(github.created, [])
 
     def test_run_lark_event_watcher_logs_and_dispatches_triage(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

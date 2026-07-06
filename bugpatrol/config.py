@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,13 @@ class PrdConfig:
 @dataclass(frozen=True)
 class IntakeConfig:
     language: str
+    since: str = ""
+    skip_orphan_replies: bool = False
+
+    def since_ms(self) -> int:
+        if not self.since:
+            return 0
+        return int(datetime.fromisoformat(self.since).timestamp() * 1000)
 
 
 @dataclass(frozen=True)
@@ -212,7 +220,7 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             cache_path=str(prd.get("cache_path") or ""),
             include_globs=tuple(include_globs),
         ),
-        intake=IntakeConfig(language=language),
+        intake=_parse_intake(language=language, intake=intake),
         assets=AssetsConfig(
             github_repo=str(assets.get("github_repo") or ""),
             checkout_path=str(assets.get("checkout_path") or ""),
@@ -257,6 +265,14 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             if isinstance(value, str)
         },
     )
+
+
+def _parse_intake(*, language: str, intake: dict[str, Any]) -> IntakeConfig:
+    since = str(intake.get("since") or "")
+    if since:
+        datetime.fromisoformat(since)  # validate eagerly; raises ValueError on bad input
+    skip_orphan = bool(intake.get("skip_orphan_replies", False))
+    return IntakeConfig(language=language, since=since, skip_orphan_replies=skip_orphan)
 
 
 def _parse_branches(branches: dict[str, Any]) -> BranchesConfig:

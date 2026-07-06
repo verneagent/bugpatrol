@@ -66,6 +66,31 @@ class GitHubCliIssuesClient:
                 )
         return None
 
+    def list_issues(self, *, repo: str, state: str = "open") -> tuple[GitHubIssue, ...]:
+        result = self._run(
+            [
+                "issue",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                state,
+                "--limit",
+                str(self._search_limit),
+                "--json",
+                "number,url,title,body",
+            ]
+        )
+        return tuple(
+            GitHubIssue(
+                number=int(item["number"]),
+                url=str(item["url"]),
+                title=str(item["title"]),
+                body=str(item.get("body") or ""),
+            )
+            for item in json.loads(result.stdout)
+        )
+
     def create_issue(
         self,
         *,

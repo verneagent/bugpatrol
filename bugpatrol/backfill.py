@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from bugpatrol.config import ProjectConfig
@@ -60,14 +61,25 @@ def run_lark_backfill(
     outcomes: list[IntakeOutcome] = []
     events: list[BackfillEvent] = []
     skipped = 0
+    since_ms = config.intake.since_ms()
     for message in reversed(messages):
-        if should_skip_message(message, bot_open_id=config.lark.bot_open_id, bot_app_id=config.lark.app_id):
+        if should_skip_message(
+            message,
+            bot_open_id=config.lark.bot_open_id,
+            bot_app_id=config.lark.app_id,
+            since_ms=since_ms,
+        ):
             skipped += 1
             events.append(
                 BackfillEvent(
                     message_id=message.message_id,
                     action="skipped",
-                    reason=skip_reason(message, bot_open_id=config.lark.bot_open_id, bot_app_id=config.lark.app_id),
+                    reason=skip_reason(
+                        message,
+                        bot_open_id=config.lark.bot_open_id,
+                        bot_app_id=config.lark.app_id,
+                        since_ms=since_ms,
+                    ),
                 )
             )
             continue
@@ -78,6 +90,24 @@ def run_lark_backfill(
                     message_id=message.message_id,
                     action="skipped",
                     reason="processed_ledger",
+                )
+            )
+            continue
+        if (
+            config.intake.skip_orphan_replies
+            and message.root_id
+            and message.root_id != message.message_id
+            and not workflow.has_issue_for_root(chat_id=message.chat_id, root_id=message.root_id)
+        ):
+            # Reply in a topic BugPatrol never intook (e.g. pre-cutover
+            # history): appending is impossible and creating a fragment
+            # issue from a lone reply would be misleading.
+            skipped += 1
+            events.append(
+                BackfillEvent(
+                    message_id=message.message_id,
+                    action="skipped",
+                    reason="orphan_reply",
                 )
             )
             continue
@@ -130,13 +160,21 @@ def run_lark_backfill(
     )
 
 
-def should_skip_message(message: LarkMessage, *, bot_open_id: str, bot_app_id: str = "") -> bool:
-    return skip_reason(message, bot_open_id=bot_open_id, bot_app_id=bot_app_id) != ""
+def should_skip_message(
+    message: LarkMessage, *, bot_open_id: str, bot_app_id: str = "", since_ms: int = 0
+) -> bool:
+    return skip_reason(message, bot_open_id=bot_open_id, bot_app_id=bot_app_id, since_ms=since_ms) != ""
 
 
-def skip_reason(message: LarkMessage, *, bot_open_id: str, bot_app_id: str = "") -> str:
+def skip_reason(
+    message: LarkMessage, *, bot_open_id: str, bot_app_id: str = "", since_ms: int = 0
+) -> str:
     if not message.message_id:
         return "missing_message_id"
+    if since_ms:
+        created_ms = _create_time_ms(message.create_time)
+        if created_ms and created_ms < since_ms:
+            return "before_intake_since"
     if message.sender_open_id == bot_open_id:
         return "bot_message"
     if bot_app_id and message.sender_type == "app" and message.sender_id == bot_app_id:
@@ -158,6 +196,22 @@ def skip_reason(message: LarkMessage, *, bot_open_id: str, bot_app_id: str = "")
     if "BugPatrol live test" in text:
         return "live_test_message"
     return ""
+
+
+def _create_time_ms(value: str) -> int:
+    raw = value.strip()
+    if not raw:
+        return 0
+    try:
+        timestamp = int(raw)
+    except ValueError:
+        try:
+            return int(datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp() * 1000)
+        except ValueError:
+            return 0
+    if timestamp <= 0:
+        return 0
+    return timestamp if timestamp > 10_000_000_000 else timestamp * 1000
 
 
 def _has_reporter_identity(message: LarkMessage) -> bool:

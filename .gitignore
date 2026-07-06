@@ -20,3 +20,4 @@ coverage.xml
 
 # bugpatrol runtime scratch (triage run outputs)
 .bugpatrol/
+.playwright-cli/

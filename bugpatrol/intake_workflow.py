@@ -46,6 +46,16 @@ class IntakeWorkflow:
         self._lark = lark
         self._issue_fields = issue_fields
 
+    def has_issue_for_root(self, *, chat_id: str, root_id: str) -> bool:
+        return (
+            self._github.find_issue_by_intake_root(
+                repo=self._config.github_repo,
+                chat_id=chat_id,
+                root_id=root_id,
+            )
+            is not None
+        )
+
     def process(self, record: IntakeRecord) -> IntakeOutcome:
         if record.chat_id != self._config.lark.chat_id:
             raise ValueError(f"unexpected chat_id: {record.chat_id}")

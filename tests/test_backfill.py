@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import tempfile
 import unittest
@@ -404,6 +405,108 @@ class BackfillTest(unittest.TestCase):
                     resource_dir=Path(tmp),
                     resource_store=FakeResourceStore("https://assets/bug.png"),
                 )
+
+    def test_since_cutoff_skips_messages_before_intake_since(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = dataclasses.replace(
+            config,
+            intake=dataclasses.replace(config.intake, since="2026-07-06T00:00:00+08:00"),
+        )
+        github = FakeGitHubIssuesClient()
+        # 2026-07-05 12:00 +08:00 in epoch ms (before cutoff) vs 2026-07-06 12:00 +08:00 (after)
+        lark = FakeLarkHistory(
+            [
+                message(message_id="om_new", root_id="om_new", create_time="1783310400000"),
+                message(message_id="om_old", root_id="om_old", create_time="1783224000000"),
+            ]
+        )
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        result = run_lark_backfill(config=config, lark=lark, workflow=workflow, limit=10)
+
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(
+            [(event.message_id, event.action, event.reason) for event in result.events],
+            [
+                ("om_old", "skipped", "before_intake_since"),
+                ("om_new", "processed", "created"),
+            ],
+        )
+
+    def test_since_cutoff_supports_iso_create_time(self) -> None:
+        self.assertTrue(
+            should_skip_message(
+                message(create_time="2026-06-30T14:00:00Z"),
+                bot_open_id="ou_bot",
+                since_ms=1783267200000,  # 2026-07-06T00:00:00+08:00
+            )
+        )
+        self.assertFalse(
+            should_skip_message(
+                message(create_time="2026-07-06T14:00:00+08:00"),
+                bot_open_id="ou_bot",
+                since_ms=1783267200000,
+            )
+        )
+
+    def test_unparseable_create_time_is_not_skipped_by_since(self) -> None:
+        self.assertFalse(
+            should_skip_message(
+                message(create_time="not-a-time"),
+                bot_open_id="ou_bot",
+                since_ms=1783267200000,
+            )
+        )
+
+    def test_skip_orphan_replies_skips_replies_without_existing_issue(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = dataclasses.replace(
+            config,
+            intake=dataclasses.replace(config.intake, skip_orphan_replies=True),
+        )
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkHistory(
+            [
+                message(message_id="om_orphan_reply", root_id="om_pre_cutover", text="老话题里的补充"),
+                message(message_id="om_root", root_id="om_root", text="新话题首帖"),
+            ]
+        )
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        result = run_lark_backfill(config=config, lark=lark, workflow=workflow, limit=10)
+
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(
+            [(event.message_id, event.action, event.reason) for event in result.events],
+            [
+                ("om_root", "processed", "created"),
+                ("om_orphan_reply", "skipped", "orphan_reply"),
+            ],
+        )
+        self.assertEqual(len(github.created), 1)
+
+    def test_skip_orphan_replies_still_appends_to_existing_issue(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = dataclasses.replace(
+            config,
+            intake=dataclasses.replace(config.intake, skip_orphan_replies=True),
+        )
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkHistory(
+            [
+                message(message_id="om_reply", root_id="om_root", text="补充信息"),
+                message(message_id="om_root", root_id="om_root", text="首次上报"),
+            ]
+        )
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        result = run_lark_backfill(config=config, lark=lark, workflow=workflow, limit=10)
+
+        self.assertEqual(result.processed, 2)
+        self.assertEqual(result.outcomes[0].action, "created")
+        self.assertEqual(result.outcomes[1].action, "updated")
 
     def test_dry_run_does_not_write(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

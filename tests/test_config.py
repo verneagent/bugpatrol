@@ -130,6 +130,58 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Triage status"):
             broken.validate_against(default_field_specs())
 
+    def test_intake_since_and_orphan_flag_parse(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        parsed = parse_project_config(
+            {
+                "github_repo": config.github_repo,
+                "lark": {
+                    "chat_id": config.lark.chat_id,
+                    "app_id": config.lark.app_id,
+                    "app_secret_env": config.lark.app_secret_env,
+                    "bot_open_id": config.lark.bot_open_id,
+                },
+                "triage_agent": {"runner_labels": list(config.triage_agent.runner_labels)},
+                "prd": {"root_wiki_node": config.prd.root_wiki_node},
+                "intake": {
+                    "language": config.intake.language,
+                    "since": "2026-07-06T00:00:00+08:00",
+                    "skip_orphan_replies": True,
+                },
+                "issue_field_names": dict(config.issue_field_names),
+            }
+        )
+
+        self.assertEqual(parsed.intake.since, "2026-07-06T00:00:00+08:00")
+        self.assertTrue(parsed.intake.skip_orphan_replies)
+        self.assertEqual(parsed.intake.since_ms(), 1783267200000)
+
+    def test_intake_defaults_have_no_since_cutoff(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+
+        self.assertEqual(config.intake.since, "")
+        self.assertFalse(config.intake.skip_orphan_replies)
+        self.assertEqual(config.intake.since_ms(), 0)
+
+    def test_config_rejects_invalid_intake_since(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        with self.assertRaises(ValueError):
+            parse_project_config(
+                {
+                    "github_repo": config.github_repo,
+                    "lark": {
+                        "chat_id": config.lark.chat_id,
+                        "app_id": config.lark.app_id,
+                        "app_secret_env": config.lark.app_secret_env,
+                        "bot_open_id": config.lark.bot_open_id,
+                    },
+                    "triage_agent": {"runner_labels": list(config.triage_agent.runner_labels)},
+                    "prd": {"root_wiki_node": config.prd.root_wiki_node},
+                    "intake": {"language": config.intake.language, "since": "yesterday"},
+                    "issue_field_names": dict(config.issue_field_names),
+                }
+            )
+
     def test_config_rejects_unknown_intake_language(self) -> None:
         config = load_project_config(Path("projects/example.toml"))
         with self.assertRaisesRegex(ValueError, "intake.language"):

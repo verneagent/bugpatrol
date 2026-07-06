@@ -28,6 +28,7 @@ from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lark import LarkOpenApiMessengerClient
 from bugpatrol.ownership import load_codeowners, resolve_configured_owners, resolve_owners
 from bugpatrol.prd import load_prd_documents, search_prd_documents
+from bugpatrol.reconcile_triage import reconcile_triage
 from bugpatrol.resources import (
     CommandVideoFrameExtractor,
     CommandResourceDescriber,
@@ -223,6 +224,14 @@ def main(argv: list[str] | None = None) -> int:
     run_triage.add_argument("--repo-path", type=Path, required=True)
     run_triage.add_argument("--output-dir", type=Path, default=Path(".bugpatrol/triage-run"))
     run_triage.add_argument("--execute", action="store_true")
+
+    reconcile_triage_parser = sub.add_parser(
+        "reconcile-triage", help="triage intook issues that never got a triage result"
+    )
+    reconcile_triage_parser.add_argument("project_config", type=Path)
+    reconcile_triage_parser.add_argument("--repo-path", type=Path, help="required with --execute")
+    reconcile_triage_parser.add_argument("--output-dir", type=Path, default=Path(".bugpatrol/triage-run"))
+    reconcile_triage_parser.add_argument("--execute", action="store_true")
 
     notify_fix = sub.add_parser("notify-fix", help="notify Lark about explicit fix progress")
     notify_fix.add_argument("project_config", type=Path)
@@ -619,6 +628,34 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
+
+    if args.command == "reconcile-triage":
+        config = load_project_config(args.project_config)
+        if args.execute and args.repo_path is None:
+            print("--repo-path is required with --execute", file=sys.stderr)
+            return 2
+        github = GitHubCliIssuesClient(gh=config.github_cli)
+        issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
+        result = reconcile_triage(
+            config=config,
+            github=github,
+            issue_fields=issue_fields,
+            repo_path=args.repo_path,
+            output_dir=args.output_dir,
+            execute=args.execute,
+        )
+        print(
+            json.dumps(
+                {
+                    "execute": args.execute,
+                    "scanned": result.scanned,
+                    "candidates": [candidate.__dict__ for candidate in result.candidates],
+                    "events": [event.__dict__ for event in result.events],
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 1 if result.failed else 0
 
     if args.command == "notify-fix":
         config = load_project_config(args.project_config)

@@ -137,6 +137,7 @@ def run_lark_event_watcher(
     outcomes: list[IntakeOutcome] = []
     events: list[BackfillEvent] = []
 
+    since_ms = config.intake.since_ms()
     for payload in event_payloads:
         scanned += 1
         message = lark_message_from_event(payload, default_chat_id=config.lark.chat_id)
@@ -144,19 +145,41 @@ def run_lark_event_watcher(
             skipped += 1
             events.append(BackfillEvent(message_id=message.message_id, action="skipped", reason="wrong_chat"))
             continue
-        if should_skip_message(message, bot_open_id=config.lark.bot_open_id, bot_app_id=config.lark.app_id):
+        if should_skip_message(
+            message,
+            bot_open_id=config.lark.bot_open_id,
+            bot_app_id=config.lark.app_id,
+            since_ms=since_ms,
+        ):
             skipped += 1
             events.append(
                 BackfillEvent(
                     message_id=message.message_id,
                     action="skipped",
-                    reason=skip_reason(message, bot_open_id=config.lark.bot_open_id, bot_app_id=config.lark.app_id),
+                    reason=skip_reason(
+                        message,
+                        bot_open_id=config.lark.bot_open_id,
+                        bot_app_id=config.lark.app_id,
+                        since_ms=since_ms,
+                    ),
                 )
             )
             continue
         if ledger is not None and ledger.is_processed(message.message_id):
             skipped += 1
             events.append(BackfillEvent(message_id=message.message_id, action="skipped", reason="processed_ledger"))
+            continue
+        if (
+            config.intake.skip_orphan_replies
+            and message.root_id
+            and message.root_id != message.message_id
+            and not workflow.has_issue_for_root(chat_id=message.chat_id, root_id=message.root_id)
+        ):
+            # Reply in a topic BugPatrol never intook (e.g. pre-cutover
+            # history): appending is impossible and creating a fragment
+            # issue from a lone reply would be misleading.
+            skipped += 1
+            events.append(BackfillEvent(message_id=message.message_id, action="skipped", reason="orphan_reply"))
             continue
         record = intake_record_from_lark_message(
             message,

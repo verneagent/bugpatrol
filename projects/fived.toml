@@ -1,0 +1,64 @@
+github_repo = "TheCloverLab/fived"
+# 以 sobit-bot[bot] GitHub App 身份执行所有 gh 操作
+github_cli = "/Users/dinghaozeng/clover/fived/scripts/gh-as-bot.sh"
+
+[lark]
+chat_id = "oc_91575ce4fdfa88ae0e110f04f61bc53a"
+app_id = "cli_aac97d050d385ee9"
+app_secret_env = "BUGPATROL_LARK_APP_SECRET"
+bot_open_id = "ou_cef931fa2df05ca6f8ae80cb2f3e6094"
+message_url_template = "https://applink.larksuite.com/client/chat/open?openChatId={chat_id}&messageId={message_id}"
+
+[branches]
+default = "main"
+allowed = ["main", "post", "chat-live", "feature-*"]
+
+[triage_agent]
+# 临时切到 claude（codex 配额 2026-07-07 恢复后可切回）
+provider = "claude"
+runner_labels = ["self-hosted", "bugpatrol-fived-triage"]
+model = ""
+effort = ""
+
+[prd]
+root_wiki_node = "LOCAL_PRD_DOCS"
+cache_path = "openspec"
+include_globs = ["specs/**/spec.md", "changes/**/prd-snapshot.md"]
+
+[intake]
+language = "zh-CN"
+# 只处理 2026-07-06 00:00 (+08:00) 之后的消息；老话题的孤儿回复不建 issue
+since = "2026-07-06T00:00:00+08:00"
+skip_orphan_replies = true
+
+[assets]
+github_repo = "TheCloverLab/fived-assets"
+checkout_path = "~/clover/fived-assets"
+base_path = ".github/issue-assets"
+branch = "main"
+
+[media]
+description_command = [
+  "python3",
+  "-m",
+  "bugpatrol.media_vision",
+  "{path}",
+  "请描述这个媒体文件中和 bug 复现相关的界面、操作、错误提示、异常状态。视频请按时间顺序概括关键步骤。",
+]
+description_timeout_seconds = 300
+
+[issue_field_names]
+Priority = "Priority"
+"Triage status" = "Triage status"
+Source = "Source"
+"Intake version" = "Intake version"
+"Triage verdict" = "Triage verdict"
+Platform = "Platform"
+Reproducibility = "Reproducibility"
+"Other platforms" = "Other platforms"
+Capability = "Capability"
+Evidence = "Evidence"
+"PRD status" = "PRD status"
+"Triage confidence" = "Triage confidence"
+"Owner reason" = "Owner reason"
+"Affected branch" = "Affected branch"

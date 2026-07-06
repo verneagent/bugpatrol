@@ -50,6 +50,9 @@ class FakeGitHubIssuesClient:
         )
         return issue
 
+    def list_issues(self, *, repo: str, state: str = "open") -> tuple[GitHubIssue, ...]:
+        return tuple(item.issue for item in self.created if item.repo == repo)
+
     def add_issue_comment(self, *, repo: str, issue_number: int, body: str) -> None:
         for item in self.created:
             if item.repo == repo and item.issue.number == issue_number:
