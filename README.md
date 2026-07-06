@@ -329,8 +329,26 @@ Canonical logical fields:
 | `Triage confidence` | `高`, `中`, `低` |
 | `Owner reason` | `CODEOWNERS`, `Lark @mention`, `Git history`, `Capability fallback`, `Manual` |
 | `Blame` | optional text field for a best-effort person, PR, commit, or code-area regression blame suggestion |
+| `Affected branch` | optional text field for the branch the bug was observed on; constrained by `[branches].allowed` fnmatch patterns in the project config |
 
 Project configs map these logical names to the actual GitHub Issue Field names.
+
+### Branch attribution
+
+Not every bug lives on `main`. Each project config can declare its interesting
+branches with fnmatch patterns:
+
+```toml
+[branches]
+default = "main"
+allowed = ["main", "post", "chat-live", "feature-*"]
+```
+
+The triage agent outputs `affected_branch`, inferred from the reporter's
+natural-language description, build info, or screenshots — but only concrete
+branch names matching an allowed pattern are accepted; anything else fails
+validation. When evidence is insufficient the agent must output an empty
+string instead of guessing `main`.
 
 ## Metadata
 

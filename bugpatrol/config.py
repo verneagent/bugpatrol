@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,19 @@ class AssetsConfig:
 
 
 @dataclass(frozen=True)
+class BranchesConfig:
+    """Branch attribution rules for the target project repo.
+
+    `allowed` is a list of fnmatch patterns (e.g. "main", "feature-*") that
+    constrain which branches a bug can be attributed to. `default` is the
+    branch assumed when nothing else is known.
+    """
+
+    default: str = "main"
+    allowed: tuple[str, ...] = ("main",)
+
+
+@dataclass(frozen=True)
 class MediaConfig:
     description_command: tuple[str, ...] = ()
     description_timeout_seconds: int = 300
@@ -94,6 +108,7 @@ class ProjectConfig:
     prd: PrdConfig
     intake: IntakeConfig
     assets: AssetsConfig
+    branches: BranchesConfig
     media: MediaConfig
     owners: OwnersConfig
     followup_classifier: FollowupClassifierConfig
@@ -148,6 +163,9 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
     assets = data.get("assets") or {}
     if not isinstance(assets, dict):
         raise ValueError("[assets] must be a table")
+    branches = data.get("branches") or {}
+    if not isinstance(branches, dict):
+        raise ValueError("[branches] must be a table")
     media = data.get("media") or {}
     if not isinstance(media, dict):
         raise ValueError("[media] must be a table")
@@ -200,6 +218,7 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             branch=str(assets.get("branch") or "main"),
             remote_url=str(assets.get("remote_url") or ""),
         ),
+        branches=_parse_branches(branches),
         media=MediaConfig(
             description_command=tuple(_optional_str_list(media, "description_command")),
             description_timeout_seconds=int(media.get("description_timeout_seconds") or 300),
@@ -236,6 +255,26 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             if isinstance(value, str)
         },
     )
+
+
+def _parse_branches(branches: dict[str, Any]) -> BranchesConfig:
+    default = str(branches.get("default") or "main")
+    allowed_raw = branches.get("allowed")
+    if allowed_raw is None:
+        allowed: tuple[str, ...] = (default,)
+    else:
+        if not isinstance(allowed_raw, list) or not all(
+            isinstance(item, str) and item for item in allowed_raw
+        ):
+            raise ValueError("branches.allowed must be a non-empty string list")
+        allowed = tuple(allowed_raw)
+    if not branch_matches_patterns(default, allowed):
+        raise ValueError(f"branches.default {default!r} does not match branches.allowed patterns")
+    return BranchesConfig(default=default, allowed=allowed)
+
+
+def branch_matches_patterns(branch: str, patterns: tuple[str, ...]) -> bool:
+    return any(fnmatch.fnmatchcase(branch, pattern) for pattern in patterns)
 
 
 def _required_table(data: dict[str, Any], key: str) -> dict[str, Any]:

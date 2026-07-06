@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Any
 
@@ -75,6 +76,7 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
         "prd_refs",
         "likely_locations",
         "summary_cn",
+        "affected_branch",
         "blame_suggestion",
         "follow_up_questions",
         "comment_markdown",
@@ -120,6 +122,14 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
             },
         },
         "summary_cn": {"type": "string", "minLength": 1},
+        "affected_branch": {
+            "type": "string",
+            "description": (
+                "Branch the bug was observed on. Must be a concrete branch name matching one of "
+                "the project's allowed branch patterns; use an empty string when the branch "
+                "cannot be determined from the report."
+            ),
+        },
         "blame_suggestion": {
             "type": "string",
             "description": "Best-effort person, team, PR, commit, or code area that may have introduced the issue. Use an empty string when unknown.",
@@ -128,6 +138,18 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
         "comment_markdown": {"type": "string", "minLength": 1},
     },
 }
+
+
+def triage_output_schema(*, branch_patterns: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Return the triage output schema, specialized with project branch rules."""
+    schema = copy.deepcopy(TRIAGE_OUTPUT_SCHEMA)
+    if branch_patterns:
+        schema["properties"]["affected_branch"]["description"] = (
+            "Branch the bug was observed on. Must be a concrete branch name matching one of "
+            f"these patterns: {', '.join(branch_patterns)}. Use an empty string when the "
+            "branch cannot be determined from the report."
+        )
+    return schema
 
 
 def validate_field_value(field_name: str, value: str, specs: dict[str, FieldSpec] | None = None) -> None:

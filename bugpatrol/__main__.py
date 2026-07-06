@@ -547,7 +547,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "apply-triage-result":
         config = load_project_config(args.project_config)
         data = json.loads(args.input.read_text())
-        result = parse_triage_result(data)
+        result = parse_triage_result(data, branch_patterns=config.branches.allowed)
         if args.dry_run:
             report = build_triage_dry_run_report(
                 repo=config.github_repo,

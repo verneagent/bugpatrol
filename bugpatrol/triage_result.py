@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from bugpatrol.clients import GitHubIssueComment, LarkMessengerClient
-from bugpatrol.config import ProjectConfig
+from bugpatrol.config import ProjectConfig, branch_matches_patterns
 from bugpatrol.fields import NATIVE_ISSUE_TYPES, default_field_specs, validate_field_value
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
@@ -22,6 +22,7 @@ class TriageResult:
     fields: dict[str, str]
     assignee: str
     comment_markdown: str
+    affected_branch: str = ""
     blame_suggestion: str = ""
     follow_up_questions: tuple[str, ...] = ()
 
@@ -68,7 +69,11 @@ CORE_DUPLICATE_FIELDS = (
 )
 
 
-def parse_triage_result(data: dict[str, Any]) -> TriageResult:
+def parse_triage_result(
+    data: dict[str, Any],
+    *,
+    branch_patterns: tuple[str, ...] = (),
+) -> TriageResult:
     issue_type = _required_str(data, "issue_type")
     if issue_type not in NATIVE_ISSUE_TYPES:
         raise ValueError(f"invalid issue_type: {issue_type}")
@@ -93,6 +98,12 @@ def parse_triage_result(data: dict[str, Any]) -> TriageResult:
     if fields["Triage status"] != "Needs info":
         follow_up_questions = ()
     blame_suggestion = str(data.get("blame_suggestion") or "").strip()
+    affected_branch = str(data.get("affected_branch") or "").strip()
+    if affected_branch and branch_patterns and not branch_matches_patterns(affected_branch, branch_patterns):
+        raise ValueError(
+            f"affected_branch {affected_branch!r} does not match allowed branch patterns: "
+            f"{', '.join(branch_patterns)}"
+        )
     assignee = _required_str(data, "assignee").lstrip("@")
     comment = _required_str(data, "comment_markdown")
     return TriageResult(
@@ -100,6 +111,7 @@ def parse_triage_result(data: dict[str, Any]) -> TriageResult:
         fields=fields,
         assignee=assignee,
         comment_markdown=comment,
+        affected_branch=affected_branch,
         blame_suggestion=blame_suggestion,
         follow_up_questions=follow_up_questions,
     )
@@ -158,6 +170,7 @@ def apply_triage_result(
                     "issue": issue_number,
                     "result_fingerprint": fingerprint,
                     "decision_key": decision_key,
+                    "affected_branch": result.affected_branch,
                     "blame_suggestion": result.blame_suggestion,
                 },
             ),
@@ -238,6 +251,8 @@ def append_triage_metadata(comment_markdown: str, metadata: dict[str, Any]) -> s
 
 def render_triage_comment(result: TriageResult) -> str:
     body = result.comment_markdown.rstrip()
+    if result.affected_branch and "影响分支" not in body and "Affected branch" not in body:
+        body = f"{body}\n\n影响分支：{result.affected_branch}"
     if not result.blame_suggestion:
         return body
     if "Blame" in body or "归因" in body:
@@ -251,6 +266,8 @@ def triage_field_values_for_write(
     config: ProjectConfig,
 ) -> dict[str, str]:
     values = dict(result.fields)
+    if result.affected_branch and "Affected branch" in config.issue_field_names:
+        values["Affected branch"] = result.affected_branch
     if result.blame_suggestion and "Blame" in config.issue_field_names:
         values["Blame"] = result.blame_suggestion
     return values

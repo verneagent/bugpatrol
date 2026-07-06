@@ -12,7 +12,7 @@ from uuid import uuid4
 from bugpatrol.agents import AgentInvocation, build_triage_agent_invocation
 from bugpatrol.clients import GitHubIssueComment
 from bugpatrol.config import ProjectConfig
-from bugpatrol.fields import TRIAGE_OUTPUT_SCHEMA
+from bugpatrol.fields import triage_output_schema
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake import require_bugpatrol_managed_issue
@@ -56,7 +56,13 @@ def prepare_triage_run(
     schema_path = output_dir / "triage.schema.json"
     output_path = output_dir / "triage-output.json"
     context_path.write_text(render_triage_context_markdown(context))
-    schema_path.write_text(json.dumps(TRIAGE_OUTPUT_SCHEMA, ensure_ascii=False, indent=2))
+    schema_path.write_text(
+        json.dumps(
+            triage_output_schema(branch_patterns=config.branches.allowed),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     invocation = build_triage_agent_invocation(
         config,
         issue_number=issue_number,
@@ -107,7 +113,10 @@ def execute_triage_run(
             issue_fields=issue_fields,
         )
         raise RuntimeError(f"triage agent failed with exit {completed.returncode}")
-    result = parse_triage_result(json.loads(plan.output_path.read_text()))
+    result = parse_triage_result(
+        json.loads(plan.output_path.read_text()),
+        branch_patterns=config.branches.allowed,
+    )
     current_comments = github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)
     if latest_triage_run_id(current_comments) != run_id:
         mark_triage_superseded(

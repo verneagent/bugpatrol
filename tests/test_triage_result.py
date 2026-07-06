@@ -134,6 +134,52 @@ class TriageResultTest(unittest.TestCase):
         self.assertEqual(values["Blame"], "可能由 PR #123 的 push token 绑定改动引入")
         self.assertIn("Blame 建议：可能由 PR #123", comment)
 
+    def test_affected_branch_must_match_allowed_patterns(self) -> None:
+        data = dict(VALID)
+        data["affected_branch"] = "release-9"
+
+        with self.assertRaisesRegex(ValueError, "affected_branch"):
+            parse_triage_result(data, branch_patterns=("main", "post", "feature-*"))
+
+    def test_affected_branch_matching_pattern_is_accepted(self) -> None:
+        data = dict(VALID)
+        data["affected_branch"] = "feature-login"
+
+        result = parse_triage_result(data, branch_patterns=("main", "post", "feature-*"))
+
+        self.assertEqual(result.affected_branch, "feature-login")
+
+    def test_affected_branch_may_be_empty_when_unknown(self) -> None:
+        result = parse_triage_result(dict(VALID), branch_patterns=("main",))
+
+        self.assertEqual(result.affected_branch, "")
+
+    def test_affected_branch_is_visible_and_written_when_field_is_mapped(self) -> None:
+        base_config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = replace(
+            base_config,
+            issue_field_names={**base_config.issue_field_names, "Affected branch": "Affected branch"},
+        )
+        data = dict(VALID)
+        data["affected_branch"] = "chat-live"
+        result = parse_triage_result(data, branch_patterns=("main", "chat-live"))
+
+        values = triage_field_values_for_write(result, config=config)
+        comment = render_triage_comment(result)
+
+        self.assertEqual(values["Affected branch"], "chat-live")
+        self.assertIn("影响分支：chat-live", comment)
+
+    def test_affected_branch_not_written_when_field_is_not_mapped(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        data = dict(VALID)
+        data["affected_branch"] = "main"
+        result = parse_triage_result(data)
+
+        values = triage_field_values_for_write(result, config=config)
+
+        self.assertNotIn("Affected branch", values)
+
     def test_apply_triage_result_writes_type_fields_comment_and_assignee(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGithub()
