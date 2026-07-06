@@ -6,6 +6,10 @@ app_id = "cli_aac97d050d385ee9"
 app_secret_env = "BUGPATROL_TODO_LARK_APP_SECRET"
 bot_open_id = "ou_cef931fa2df05ca6f8ae80cb2f3e6094"
 
+[branches]
+default = "main"
+allowed = ["main", "feature-*"]
+
 [triage_agent]
 provider = "codex"
 runner_labels = ["self-hosted", "bugpatrol-sandbox-triage"]

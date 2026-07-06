@@ -162,6 +162,15 @@ def execute_triage_run(
             issue_fields=issue_fields,
         )
         raise RuntimeError(f"triage agent failed with exit {completed.returncode}")
+    if not plan.output_path.exists():
+        mark_triage_failed(
+            config=config,
+            issue_number=issue_number,
+            exit_code=0,
+            github=github,
+            issue_fields=issue_fields,
+        )
+        raise RuntimeError("triage agent exited 0 but produced no output file")
     result = parse_triage_result(
         json.loads(plan.output_path.read_text()),
         branch_patterns=config.branches.allowed,

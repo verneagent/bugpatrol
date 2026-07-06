@@ -305,6 +305,33 @@ class TriageRunnerTest(unittest.TestCase):
         for write in issue_fields.writes:
             self.assertNotIn("Affected branch", write["values"])
 
+    def test_execute_triage_run_fails_when_agent_produces_no_output(self) -> None:
+        config = load_project_config(Path("projects/full.example.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=root / "output.json",
+                invocation=AgentInvocation(provider="claude", command=["true"]),
+                context_comment_ids=("1",),
+            )
+
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["true"], 0)
+                with self.assertRaisesRegex(RuntimeError, "no output file"):
+                    execute_triage_run(
+                        config=config,
+                        issue_number=7,
+                        plan=plan,
+                        github=github,  # type: ignore[arg-type]
+                        issue_fields=issue_fields,  # type: ignore[arg-type]
+                    )
+
+        self.assertIn("BugPatrol triage failed", github.comments[-1])
+
     def test_render_triage_failed_comment_is_actionable(self) -> None:
         comment = render_triage_failed_comment(exit_code=2)
 

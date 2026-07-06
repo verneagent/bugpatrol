@@ -58,6 +58,12 @@ class AgentsTest(unittest.TestCase):
 
         self.assertEqual(invocation.provider, "claude")
         self.assertEqual(invocation.command[0], "claude")
+        # Non-interactive `claude -p` must not auto-deny the output file write.
+        self.assertIn("--permission-mode", invocation.command)
+        self.assertEqual(
+            invocation.command[invocation.command.index("--permission-mode") + 1],
+            "acceptEdits",
+        )
 
 
 if __name__ == "__main__":

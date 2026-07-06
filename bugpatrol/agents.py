@@ -119,7 +119,9 @@ def _build_claude_command(
             f"Write final JSON to: {output_path}",
         ]
     )
-    command = ["claude", "-p", prompt]
+    # Non-interactive `claude -p` auto-denies file writes by default, which
+    # would block writing the output JSON. Runs happen on trusted runners.
+    command = ["claude", "-p", prompt, "--permission-mode", "acceptEdits"]
     if config.triage_agent.model:
         command.extend(["--model", config.triage_agent.model])
     return command
