@@ -17,6 +17,7 @@ from bugpatrol.fields import triage_output_schema
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake import require_bugpatrol_managed_issue
+from bugpatrol.ownership import load_codeowners
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
 from bugpatrol.triage_result import (
     TriageResult,
@@ -38,6 +39,7 @@ class TriageRunPlan:
     invocation: AgentInvocation
     context_comment_ids: tuple[str, ...] = ()
     known_branches: tuple[str, ...] = ()
+    known_assignees: tuple[str, ...] = ()
 
 
 def prepare_triage_run(
@@ -64,11 +66,13 @@ def prepare_triage_run(
     output_path = output_dir / "triage-output.json"
     context_path.write_text(render_triage_context_markdown(context))
     known_branches = list_matching_repo_branches(repo_path, patterns=config.branches.allowed)
+    known_assignees = list_known_assignees(repo_path, config=config)
     schema_path.write_text(
         json.dumps(
             triage_output_schema(
                 branch_patterns=config.branches.allowed,
                 known_branches=known_branches,
+                known_assignees=known_assignees,
             ),
             ensure_ascii=False,
             indent=2,
@@ -89,10 +93,33 @@ def prepare_triage_run(
         context_comment_ids=comment_ids(comments),
         invocation=invocation,
         known_branches=known_branches,
+        known_assignees=known_assignees,
     )
 
 
 MAX_KNOWN_BRANCHES = 50
+
+
+def list_known_assignees(repo_path: Path, *, config: ProjectConfig) -> tuple[str, ...]:
+    """Return valid GitHub logins for triage assignment.
+
+    Combines CODEOWNERS owners with the [owners] tables in the project config.
+    Used both to constrain the agent output schema and to reject results that
+    use display names ("Andy") instead of logins ("AndyCokeZero").
+    """
+    logins: set[str] = set()
+    for rule in load_codeowners(repo_path):
+        for owner in rule.owners:
+            handle = owner.lstrip("@")
+            # Team handles (org/team) cannot be issue assignees.
+            if handle and "/" not in handle:
+                logins.add(handle)
+    for group in (config.owners.default, *config.owners.paths.values(), *config.owners.capabilities.values()):
+        for owner in group:
+            handle = owner.lstrip("@")
+            if handle and "/" not in handle:
+                logins.add(handle)
+    return tuple(sorted(logins))
 
 
 def list_matching_repo_branches(repo_path: Path, *, patterns: tuple[str, ...]) -> tuple[str, ...]:
@@ -179,6 +206,19 @@ def execute_triage_run(
         json.loads(plan.output_path.read_text()),
         branch_patterns=config.branches.allowed,
     )
+    if plan.known_assignees and result.assignee not in plan.known_assignees:
+        mark_triage_failed(
+            config=config,
+            issue_number=issue_number,
+            exit_code=0,
+            github=github,
+            issue_fields=issue_fields,
+            reason=(
+                f"Agent returned assignee `{result.assignee}`, which is not a known GitHub login. "
+                f"Valid assignees: {', '.join(plan.known_assignees)}."
+            ),
+        )
+        raise RuntimeError(f"triage agent returned unknown assignee {result.assignee!r}")
     if (
         result.affected_branch
         and plan.known_branches
@@ -276,6 +316,7 @@ def mark_triage_failed(
     exit_code: int,
     github: GitHubCliIssuesClient,
     issue_fields: GitHubIssueFieldsClient,
+    reason: str = "",
 ) -> None:
     issue_fields.add_issue_field_values(
         repo=config.github_repo,
@@ -286,7 +327,7 @@ def mark_triage_failed(
     github.add_issue_comment(
         repo=config.github_repo,
         issue_number=issue_number,
-        body=render_triage_failed_comment(exit_code=exit_code),
+        body=render_triage_failed_comment(exit_code=exit_code, reason=reason),
     )
 
 
@@ -336,12 +377,15 @@ def mark_result_needs_review(result: TriageResult) -> TriageResult:
     return replace(result, fields=fields, comment_markdown=comment)
 
 
-def render_triage_failed_comment(*, exit_code: int) -> str:
+def render_triage_failed_comment(*, exit_code: int, reason: str = "") -> str:
+    detail = reason or (
+        f"The triage agent exited with code `{exit_code}`.\n"
+        "Check the runner logs, credentials, prompt/schema files, and repository checkout."
+    )
     return "\n".join(
         [
             "## BugPatrol triage failed",
             "",
-            f"The triage agent exited with code `{exit_code}`.",
-            "Check the runner logs, credentials, prompt/schema files, and repository checkout.",
+            detail,
         ]
     )

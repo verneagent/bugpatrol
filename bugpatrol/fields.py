@@ -148,15 +148,23 @@ def triage_output_schema(
     *,
     branch_patterns: tuple[str, ...] = (),
     known_branches: tuple[str, ...] = (),
+    known_assignees: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Return the triage output schema, specialized with project branch rules.
 
     When `known_branches` (real branches from the repo checkout) is available,
     `affected_branch` becomes a closed enum so the agent cannot fabricate a
     plausible-looking branch name. Otherwise fall back to describing the
-    allowed fnmatch patterns.
+    allowed fnmatch patterns. Same idea for `known_assignees`: a closed enum of
+    GitHub logins keeps the agent from answering with display names.
     """
     schema = copy.deepcopy(TRIAGE_OUTPUT_SCHEMA)
+    if known_assignees:
+        schema["properties"]["assignee"] = {
+            "type": "string",
+            "enum": list(known_assignees),
+            "description": "GitHub login of the dev owner. Must be one of the listed logins, never a display name.",
+        }
     if known_branches:
         schema["properties"]["affected_branch"] = {
             "type": "string",

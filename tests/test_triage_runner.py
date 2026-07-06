@@ -16,6 +16,7 @@ from bugpatrol.triage_runner import (
     append_triage_run_metadata,
     comment_ids,
     execute_triage_run,
+    list_known_assignees,
     list_matching_repo_branches,
     prepare_triage_run,
     render_triage_failed_comment,
@@ -342,6 +343,59 @@ class TriageRunnerTest(unittest.TestCase):
 
         self.assertIn("BugPatrol triage failed", comment)
         self.assertIn("credentials", comment)
+
+    def test_list_known_assignees_merges_codeowners_and_config(self) -> None:
+        config = load_project_config(Path("projects/full.example.toml"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "CODEOWNERS").write_text(
+                "# Andy (@AndyCokeZero) owns notifications\n"
+                "/app/notifications.tsx @AndyCokeZero\n"
+                "/app/* @garlanddiego @org/some-team\n"
+            )
+
+            assignees = list_known_assignees(root, config=config)
+
+        self.assertIn("AndyCokeZero", assignees)
+        self.assertIn("garlanddiego", assignees)
+        # Team handles cannot be issue assignees.
+        self.assertNotIn("org/some-team", assignees)
+        # Display names from comments never leak in.
+        self.assertNotIn("Andy", assignees)
+
+    def test_execute_triage_run_fails_on_unknown_assignee(self) -> None:
+        config = load_project_config(Path("projects/full.example.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "output.json"
+            output.write_text(valid_triage_output())  # assignee: octocat
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=output,
+                invocation=AgentInvocation(provider="codex", command=["true"]),
+                context_comment_ids=("1",),
+                known_assignees=("AndyCokeZero", "garlanddiego"),
+            )
+
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["true"], 0)
+                with self.assertRaisesRegex(RuntimeError, "unknown assignee 'octocat'"):
+                    execute_triage_run(
+                        config=config,
+                        issue_number=7,
+                        plan=plan,
+                        github=github,  # type: ignore[arg-type]
+                        issue_fields=issue_fields,  # type: ignore[arg-type]
+                    )
+
+        self.assertEqual(github.assignees, [])
+        self.assertIn("octocat", github.comments[-1])
+        self.assertIn("AndyCokeZero", github.comments[-1])
+        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Failed"})
 
 
 def valid_triage_output(*, affected_branch: str = "") -> str:

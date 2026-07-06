@@ -47,6 +47,15 @@ class FieldsTest(unittest.TestCase):
             ["main", "feature-login", ""],
         )
 
+    def test_triage_output_schema_uses_known_assignees_as_enum(self) -> None:
+        schema = triage_output_schema(known_assignees=("AndyCokeZero", "garlanddiego"))
+
+        self.assertEqual(
+            schema["properties"]["assignee"]["enum"],
+            ["AndyCokeZero", "garlanddiego"],
+        )
+        self.assertNotIn("enum", TRIAGE_OUTPUT_SCHEMA["properties"]["assignee"])
+
     def test_validate_field_value(self) -> None:
         validate_field_value("Platform", "iOS")
         with self.assertRaisesRegex(ValueError, "invalid value"):
