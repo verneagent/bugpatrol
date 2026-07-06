@@ -17,3 +17,6 @@ coverage.xml
 *.log
 *.tmp
 
+
+# bugpatrol runtime scratch (triage run outputs)
+.bugpatrol/
