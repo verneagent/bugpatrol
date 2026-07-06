@@ -220,6 +220,9 @@ class TriageRunnerTest(unittest.TestCase):
         self.assertEqual(issue_fields.writes[0]["values"], {"Triage status": "Running"})
         self.assertEqual(issue_fields.writes[1]["values"]["Triage status"], "Needs review")
         self.assertIn("new issue comments arrived", github.comments[-1])
+        # CI runners hand the agent a never-closing stdin pipe; claude -p
+        # blocks on it forever unless stdin is DEVNULL.
+        self.assertEqual(run.call_args.kwargs.get("stdin"), subprocess.DEVNULL)
 
     def test_execute_triage_run_skips_apply_when_superseded(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

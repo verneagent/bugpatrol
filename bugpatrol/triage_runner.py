@@ -154,7 +154,9 @@ def execute_triage_run(
         github=github,
     )
     agent_env = {**os.environ, **plan.invocation.env} if plan.invocation.env else None
-    completed = subprocess.run(plan.invocation.command, check=False, env=agent_env)
+    # stdin must be closed: in CI runners stdin is a pipe that never reaches
+    # EOF, and `claude -p` blocks reading it forever after finishing its work.
+    completed = subprocess.run(plan.invocation.command, check=False, env=agent_env, stdin=subprocess.DEVNULL)
     if completed.returncode != 0:
         mark_triage_failed(
             config=config,
