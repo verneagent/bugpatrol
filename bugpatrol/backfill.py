@@ -171,6 +171,8 @@ def skip_reason(
 ) -> str:
     if not message.message_id:
         return "missing_message_id"
+    if message.deleted:
+        return "withdrawn_message"
     if since_ms:
         created_ms = _create_time_ms(message.create_time)
         if created_ms and created_ms < since_ms:

@@ -11,6 +11,7 @@ from bugpatrol.clients import GitHubIssue, GitHubIssuesClient, LarkMessengerClie
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import NATIVE_ISSUE_TYPES, validate_field_value
 from bugpatrol.intake import Attachment, IntakeRecord, format_created_at, render_attachments_markdown, render_issue_body
+from bugpatrol.lark import is_message_withdrawn_error
 from bugpatrol.triage_queue import TriageSignal, classify_triage_signal
 
 INTAKE_REPLY_META_MARKER = "BUGPATROL_INTAKE_REPLY_META"
@@ -77,11 +78,9 @@ class IntakeWorkflow:
                 issue_number=existing.number,
                 triage_signal=triage_signal,
             )
-            reply = f"已追加到 GitHub issue #{existing.number}: {existing.url}"
-            self._lark.reply_to_message(
-                chat_id=record.chat_id,
-                message_id=record.message_id,
-                text=reply,
+            reply = self._reply_best_effort(
+                record=record,
+                text=f"已追加到 GitHub issue #{existing.number}: {existing.url}",
             )
             return IntakeOutcome(
                 action="updated",
@@ -99,8 +98,10 @@ class IntakeWorkflow:
             root_id=record.root_id,
         )
         if raced is not None:
-            reply = f"已创建 GitHub issue #{raced.number}: {raced.url}"
-            self._lark.reply_to_message(chat_id=record.chat_id, message_id=record.message_id, text=reply)
+            reply = self._reply_best_effort(
+                record=record,
+                text=f"已创建 GitHub issue #{raced.number}: {raced.url}",
+            )
             return IntakeOutcome(
                 action="deduplicated",
                 issue=raced,
@@ -114,14 +115,35 @@ class IntakeWorkflow:
             issue_type="Bug",
             fields=fields,
         )
-        reply = f"已创建 GitHub issue #{issue.number}: {issue.url}"
-        self._lark.reply_to_message(chat_id=record.chat_id, message_id=record.message_id, text=reply)
+        reply = self._reply_best_effort(
+            record=record,
+            text=f"已创建 GitHub issue #{issue.number}: {issue.url}",
+        )
         return IntakeOutcome(
             action="created",
             issue=issue,
             lark_reply=reply,
             triage_signal=classify_triage_signal("created", record, self._config.followup_classifier),
         )
+
+    def _reply_best_effort(self, *, record: IntakeRecord, text: str) -> str:
+        """Reply in the Lark thread; tolerate a withdrawn target message.
+
+        The GitHub write has already happened by this point, so a recalled
+        source message must not abort intake (it would crash-loop the watcher
+        on a message that can never be replied to).
+        """
+        try:
+            self._lark.reply_to_message(
+                chat_id=record.chat_id,
+                message_id=record.message_id,
+                text=text,
+            )
+        except Exception as error:
+            if not is_message_withdrawn_error(error):
+                raise
+            return f"{text}（原消息已撤回，未发送 Lark 回执）"
+        return text
 
     def _mark_needs_review_after_final_status(self, *, issue_number: int, triage_signal: TriageSignal) -> None:
         if self._issue_fields is None or not triage_signal.should_enqueue:

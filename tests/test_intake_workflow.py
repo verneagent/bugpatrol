@@ -83,6 +83,44 @@ class IntakeWorkflowTest(unittest.TestCase):
         self.assertEqual(len(lark.replies), 1)
         self.assertIn("已创建 GitHub issue #1", lark.replies[0].text)
 
+    def test_process_survives_withdrawn_reply_target(self) -> None:
+        from bugpatrol.lark import LarkOpenApiError
+
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        error = LarkOpenApiError(
+            'Lark HTTP 400: {"code":230011,"msg":"The message was withdrawn."}'
+        )
+
+        def failing_reply(**kwargs: object) -> None:
+            raise error
+
+        lark.reply_to_message = failing_reply  # type: ignore[method-assign]
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        outcome = workflow.process(make_record())
+
+        self.assertEqual(outcome.action, "created")
+        self.assertEqual(len(github.created), 1)
+        self.assertIn("原消息已撤回", outcome.lark_reply)
+
+    def test_process_reraises_non_withdrawn_reply_errors(self) -> None:
+        from bugpatrol.lark import LarkOpenApiError
+
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+
+        def failing_reply(**kwargs: object) -> None:
+            raise LarkOpenApiError('Lark HTTP 500: {"code":9999,"msg":"boom"}')
+
+        lark.reply_to_message = failing_reply  # type: ignore[method-assign]
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        with self.assertRaises(LarkOpenApiError):
+            workflow.process(make_record())
+
     def test_process_appends_followup_for_same_topic_root(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGitHubIssuesClient()

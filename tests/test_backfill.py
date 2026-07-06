@@ -11,6 +11,7 @@ from bugpatrol.backfill import (
     intake_record_from_lark_message,
     run_lark_backfill,
     should_skip_message,
+    skip_reason,
 )
 from bugpatrol.config import load_project_config
 from bugpatrol.intake_workflow import IntakeWorkflow
@@ -87,6 +88,10 @@ class FakeResourceTransformer:
 
 
 class BackfillTest(unittest.TestCase):
+    def test_should_skip_withdrawn_messages(self) -> None:
+        self.assertTrue(should_skip_message(message(deleted=True), bot_open_id="ou_bot"))
+        self.assertEqual(skip_reason(message(deleted=True), bot_open_id="ou_bot"), "withdrawn_message")
+
     def test_should_skip_bot_and_backlink_messages(self) -> None:
         self.assertTrue(should_skip_message(message(sender_open_id="ou_bot"), bot_open_id="ou_bot"))
         self.assertTrue(

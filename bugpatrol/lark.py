@@ -14,6 +14,14 @@ class LarkOpenApiError(RuntimeError):
     pass
 
 
+# Lark error code returned when acting on a withdrawn/recalled message.
+MESSAGE_WITHDRAWN_CODE = 230011
+
+
+def is_message_withdrawn_error(error: Exception) -> bool:
+    return isinstance(error, LarkOpenApiError) and f'"code":{MESSAGE_WITHDRAWN_CODE}' in str(error)
+
+
 @dataclass(frozen=True)
 class SentLarkMessage:
     message_id: str
@@ -32,6 +40,8 @@ class LarkMessage:
     raw_content: str = ""
     sender_id: str = ""
     sender_id_type: str = ""
+    # True when the message was withdrawn/recalled in Lark.
+    deleted: bool = False
 
 
 @dataclass(frozen=True)
@@ -306,6 +316,7 @@ def parse_lark_message(item: dict[str, object], *, default_chat_id: str) -> Lark
         raw_content=content,
         sender_id=sender_raw_id,
         sender_id_type=sender_id_type,
+        deleted=bool(item.get("deleted")),
     )
 
 
