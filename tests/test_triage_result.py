@@ -15,6 +15,7 @@ from bugpatrol.triage_result import (
     build_triage_dry_run_report,
     parse_triage_metadata,
     parse_triage_result,
+    reject_affected_branch,
     render_needs_info_lark_message,
     render_triage_comment,
     triage_field_values_for_write,
@@ -134,12 +135,38 @@ class TriageResultTest(unittest.TestCase):
         self.assertEqual(values["Blame"], "可能由 PR #123 的 push token 绑定改动引入")
         self.assertIn("Blame 建议：可能由 PR #123", comment)
 
-    def test_affected_branch_must_match_allowed_patterns(self) -> None:
+    def test_unmatched_affected_branch_degrades_instead_of_failing(self) -> None:
         data = dict(VALID)
         data["affected_branch"] = "release-9"
 
-        with self.assertRaisesRegex(ValueError, "affected_branch"):
-            parse_triage_result(data, branch_patterns=("main", "post", "feature-*"))
+        result = parse_triage_result(data, branch_patterns=("main", "post", "feature-*"))
+
+        self.assertEqual(result.affected_branch, "")
+        self.assertEqual(result.affected_branch_rejected, "release-9")
+        self.assertIn("release-9", render_triage_comment(result))
+        self.assertIn("未采信", render_triage_comment(result))
+
+    def test_rejected_affected_branch_is_never_written_to_fields(self) -> None:
+        base_config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = replace(
+            base_config,
+            issue_field_names={**base_config.issue_field_names, "Affected branch": "Affected branch"},
+        )
+        data = dict(VALID)
+        data["affected_branch"] = "release-9"
+        result = parse_triage_result(data, branch_patterns=("main",))
+
+        self.assertNotIn("Affected branch", triage_field_values_for_write(result, config=config))
+
+    def test_reject_affected_branch_demotes_value(self) -> None:
+        data = dict(VALID)
+        data["affected_branch"] = "feature-ghost"
+        result = parse_triage_result(data, branch_patterns=("feature-*",))
+
+        rejected = reject_affected_branch(result)
+
+        self.assertEqual(rejected.affected_branch, "")
+        self.assertEqual(rejected.affected_branch_rejected, "feature-ghost")
 
     def test_affected_branch_matching_pattern_is_accepted(self) -> None:
         data = dict(VALID)

@@ -28,6 +28,7 @@ class GitHubPullRequest:
     body: str
     closing_issue_numbers: tuple[int, ...] = ()
     timeline_issue_numbers: tuple[int, ...] = ()
+    base_ref: str = ""
 
 
 class GitHubIssuesClient(Protocol):

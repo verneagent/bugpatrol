@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from bugpatrol.clients import GitHubIssueComment, LarkMessengerClient
@@ -23,6 +23,9 @@ class TriageResult:
     assignee: str
     comment_markdown: str
     affected_branch: str = ""
+    # Raw agent value that failed branch validation; kept visible instead of
+    # silently dropped, and never written to issue fields.
+    affected_branch_rejected: str = ""
     blame_suggestion: str = ""
     follow_up_questions: tuple[str, ...] = ()
 
@@ -99,11 +102,12 @@ def parse_triage_result(
         follow_up_questions = ()
     blame_suggestion = str(data.get("blame_suggestion") or "").strip()
     affected_branch = str(data.get("affected_branch") or "").strip()
+    affected_branch_rejected = ""
     if affected_branch and branch_patterns and not branch_matches_patterns(affected_branch, branch_patterns):
-        raise ValueError(
-            f"affected_branch {affected_branch!r} does not match allowed branch patterns: "
-            f"{', '.join(branch_patterns)}"
-        )
+        # A best-effort attribution field must not veto an otherwise valid
+        # triage result: keep the rejected value visible instead of failing.
+        affected_branch_rejected = affected_branch
+        affected_branch = ""
     assignee = _required_str(data, "assignee").lstrip("@")
     comment = _required_str(data, "comment_markdown")
     return TriageResult(
@@ -112,6 +116,7 @@ def parse_triage_result(
         assignee=assignee,
         comment_markdown=comment,
         affected_branch=affected_branch,
+        affected_branch_rejected=affected_branch_rejected,
         blame_suggestion=blame_suggestion,
         follow_up_questions=follow_up_questions,
     )
@@ -171,6 +176,7 @@ def apply_triage_result(
                     "result_fingerprint": fingerprint,
                     "decision_key": decision_key,
                     "affected_branch": result.affected_branch,
+                    "affected_branch_rejected": result.affected_branch_rejected,
                     "blame_suggestion": result.blame_suggestion,
                 },
             ),
@@ -249,10 +255,21 @@ def append_triage_metadata(comment_markdown: str, metadata: dict[str, Any]) -> s
     )
 
 
+def reject_affected_branch(result: TriageResult) -> TriageResult:
+    """Demote an untrusted affected_branch to a visible rejected value."""
+    return replace(
+        result,
+        affected_branch="",
+        affected_branch_rejected=result.affected_branch,
+    )
+
+
 def render_triage_comment(result: TriageResult) -> str:
     body = result.comment_markdown.rstrip()
     if result.affected_branch and "影响分支" not in body and "Affected branch" not in body:
         body = f"{body}\n\n影响分支：{result.affected_branch}"
+    elif result.affected_branch_rejected and "影响分支" not in body:
+        body = f"{body}\n\n影响分支：`{result.affected_branch_rejected}`（不匹配项目允许的分支规则，未采信）"
     if not result.blame_suggestion:
         return body
     if "Blame" in body or "归因" in body:

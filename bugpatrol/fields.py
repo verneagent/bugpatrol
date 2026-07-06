@@ -140,10 +140,29 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
 }
 
 
-def triage_output_schema(*, branch_patterns: tuple[str, ...] = ()) -> dict[str, Any]:
-    """Return the triage output schema, specialized with project branch rules."""
+def triage_output_schema(
+    *,
+    branch_patterns: tuple[str, ...] = (),
+    known_branches: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Return the triage output schema, specialized with project branch rules.
+
+    When `known_branches` (real branches from the repo checkout) is available,
+    `affected_branch` becomes a closed enum so the agent cannot fabricate a
+    plausible-looking branch name. Otherwise fall back to describing the
+    allowed fnmatch patterns.
+    """
     schema = copy.deepcopy(TRIAGE_OUTPUT_SCHEMA)
-    if branch_patterns:
+    if known_branches:
+        schema["properties"]["affected_branch"] = {
+            "type": "string",
+            "enum": [*known_branches, ""],
+            "description": (
+                "Branch the bug was observed on. Use an empty string when the branch "
+                "cannot be determined from the report."
+            ),
+        }
+    elif branch_patterns:
         schema["properties"]["affected_branch"]["description"] = (
             "Branch the bug was observed on. Must be a concrete branch name matching one of "
             f"these patterns: {', '.join(branch_patterns)}. Use an empty string when the "

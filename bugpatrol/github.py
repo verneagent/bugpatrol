@@ -176,7 +176,7 @@ class GitHubCliIssuesClient:
                 "--repo",
                 repo,
                 "--json",
-                "number,url,title,body,closingIssuesReferences",
+                "number,url,title,body,closingIssuesReferences,baseRefName",
             ]
         )
         data = json.loads(result.stdout)
@@ -193,6 +193,7 @@ class GitHubCliIssuesClient:
             body=str(data.get("body") or ""),
             closing_issue_numbers=tuple(closing_numbers),
             timeline_issue_numbers=self._timeline_issue_numbers_for_pr(repo=repo, pr_number=int(data["number"])),
+            base_ref=str(data.get("baseRefName") or ""),
         )
 
     def _timeline_issue_numbers_for_pr(self, *, repo: str, pr_number: int) -> tuple[int, ...]:

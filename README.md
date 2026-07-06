@@ -345,10 +345,18 @@ allowed = ["main", "post", "chat-live", "feature-*"]
 ```
 
 The triage agent outputs `affected_branch`, inferred from the reporter's
-natural-language description, build info, or screenshots — but only concrete
-branch names matching an allowed pattern are accepted; anything else fails
-validation. When evidence is insufficient the agent must output an empty
-string instead of guessing `main`.
+natural-language description, build info, or screenshots. When the runner has
+a repo checkout, the schema constrains the value to a closed enum of real
+branches matching the allowed patterns, so the agent cannot fabricate a
+plausible-looking branch. A value that fails validation is demoted to a
+visible "未采信" note in the triage comment instead of failing the run or
+being written to fields. When evidence is insufficient the agent must output
+an empty string instead of guessing `main`.
+
+Fix notifications for `pr_opened`/`pr_merged` are branch-gated: if the PR's
+base branch differs from the issue's affected branch (falling back to
+`branches.default`), the Lark notification is skipped rather than telling the
+reporter "fixed" prematurely.
 
 ## Metadata
 

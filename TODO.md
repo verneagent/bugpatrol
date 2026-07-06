@@ -21,6 +21,15 @@ Project-neutral implementation items:
   - Manual trigger.
   - Separate triage and notify reconcile jobs or clearly separated steps.
 
+## Branch attribution
+
+- Parse deterministic build metadata (e.g. a `branch: xxx` line) from Lark app
+  reporter messages at intake, once the app-side report format is settled.
+  Stamp it into `BUGPATROL_INTAKE_META` so triage gets ground truth instead of
+  relying on natural-language inference.
+- Consider gating `commit_linked` fix events on the branch containing the
+  commit (currently only `pr_opened`/`pr_merged` are branch-gated).
+
 ## Operations
 
 - Add stale `Running` thresholds to config with conservative defaults.

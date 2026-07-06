@@ -11,13 +11,18 @@ from uuid import uuid4
 
 from bugpatrol.agents import AgentInvocation, build_triage_agent_invocation
 from bugpatrol.clients import GitHubIssueComment
-from bugpatrol.config import ProjectConfig
+from bugpatrol.config import ProjectConfig, branch_matches_patterns
 from bugpatrol.fields import triage_output_schema
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake import require_bugpatrol_managed_issue
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
-from bugpatrol.triage_result import TriageResult, apply_triage_result, parse_triage_result
+from bugpatrol.triage_result import (
+    TriageResult,
+    apply_triage_result,
+    parse_triage_result,
+    reject_affected_branch,
+)
 
 
 TRIAGE_RUN_META_START = "<!-- BUGPATROL_TRIAGE_RUN_META"
@@ -31,6 +36,7 @@ class TriageRunPlan:
     output_path: Path
     invocation: AgentInvocation
     context_comment_ids: tuple[str, ...] = ()
+    known_branches: tuple[str, ...] = ()
 
 
 def prepare_triage_run(
@@ -56,9 +62,13 @@ def prepare_triage_run(
     schema_path = output_dir / "triage.schema.json"
     output_path = output_dir / "triage-output.json"
     context_path.write_text(render_triage_context_markdown(context))
+    known_branches = list_matching_repo_branches(repo_path, patterns=config.branches.allowed)
     schema_path.write_text(
         json.dumps(
-            triage_output_schema(branch_patterns=config.branches.allowed),
+            triage_output_schema(
+                branch_patterns=config.branches.allowed,
+                known_branches=known_branches,
+            ),
             ensure_ascii=False,
             indent=2,
         )
@@ -77,7 +87,46 @@ def prepare_triage_run(
         output_path=output_path,
         context_comment_ids=comment_ids(comments),
         invocation=invocation,
+        known_branches=known_branches,
     )
+
+
+MAX_KNOWN_BRANCHES = 50
+
+
+def list_matching_repo_branches(repo_path: Path, *, patterns: tuple[str, ...]) -> tuple[str, ...]:
+    """Return real branches of the repo checkout that match the allowed patterns.
+
+    Best-effort: when `repo_path` is not a git repository (e.g. a runner that
+    only materializes the PRD cache), return () and rely on pattern-based
+    validation instead.
+    """
+    completed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_path),
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads",
+            "refs/remotes/origin",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return ()
+    branches: list[str] = []
+    for line in completed.stdout.splitlines():
+        name = line.strip()
+        if name.startswith("origin/"):
+            name = name[len("origin/") :]
+        if not name or name == "HEAD" or name in branches:
+            continue
+        if branch_matches_patterns(name, patterns):
+            branches.append(name)
+    return tuple(sorted(branches)[:MAX_KNOWN_BRANCHES])
 
 
 def execute_triage_run(
@@ -117,6 +166,14 @@ def execute_triage_run(
         json.loads(plan.output_path.read_text()),
         branch_patterns=config.branches.allowed,
     )
+    if (
+        result.affected_branch
+        and plan.known_branches
+        and result.affected_branch not in plan.known_branches
+    ):
+        # Pattern-valid but nonexistent branch (agent fabrication): demote it
+        # to a visible rejected value instead of recording false data.
+        result = reject_affected_branch(result)
     current_comments = github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)
     if latest_triage_run_id(current_comments) != run_id:
         mark_triage_superseded(

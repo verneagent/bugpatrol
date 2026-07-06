@@ -7,6 +7,7 @@ from bugpatrol.config import load_project_config
 from bugpatrol.clients import GitHubPullRequest
 from bugpatrol.fix_notify import (
     FixEventCandidate,
+    affected_branch_from_comments,
     apply_fix_notification,
     associated_issue_numbers_from_pr,
     fix_event_candidates_from_json,
@@ -21,6 +22,7 @@ from bugpatrol.fix_notify import (
 from bugpatrol.intake import IntakeRecord
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.testing.fakes import FakeGitHubIssuesClient, FakeLarkMessengerClient
+from bugpatrol.triage_result import append_triage_metadata
 
 
 class FixNotifyTest(unittest.TestCase):
@@ -132,6 +134,119 @@ class FixNotifyTest(unittest.TestCase):
         self.assertIn("修复 PR 已合并", lark.replies[1].text)
         self.assertEqual(len(github.created[0].comments), 1)
         self.assertEqual(notified_fix_keys(github.list_issue_comments(repo=config.github_repo, issue_number=1)), {first.key})
+
+    def _managed_issue(self, config, github, lark):
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        return workflow.process(
+            IntakeRecord(
+                reporter_name="Reporter",
+                reporter_open_id="ou_1",
+                created_at="2026-07-01T00:00:00Z",
+                chat_id=config.lark.chat_id,
+                root_id="om_root",
+                message_id="om_1",
+                original_text="bug",
+            )
+        ).issue
+
+    @staticmethod
+    def _pr_with_base(base_ref: str):
+        def get_pull_request(repo: str, pr: str) -> GitHubPullRequest:
+            return GitHubPullRequest(
+                number=int(pr),
+                url=f"https://github.test/{repo}/pull/{pr}",
+                title="Fix",
+                body="",
+                base_ref=base_ref,
+            )
+
+        return get_pull_request
+
+    def test_branch_gate_skips_pr_merged_into_other_branch(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        issue = self._managed_issue(config, github, lark)
+        github.add_issue_comment(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            body=append_triage_metadata("## Triage", {"affected_branch": "feature-x"}),
+        )
+        github.get_pull_request = self._pr_with_base("main")  # type: ignore[method-assign]
+
+        summary = apply_fix_notification(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            event="pr_merged",
+            pr="123",
+            dry_run=False,
+            github=github,  # type: ignore[arg-type]
+            lark=lark,
+            default_branch="main",
+        )
+
+        self.assertTrue(summary.branch_mismatch_skipped)
+        self.assertFalse(summary.lark_sent)
+        # Only the intake backlink reply exists; no fix notification.
+        self.assertEqual(len(lark.replies), 1)
+
+    def test_branch_gate_allows_pr_merged_into_affected_branch(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        issue = self._managed_issue(config, github, lark)
+        github.add_issue_comment(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            body=append_triage_metadata("## Triage", {"affected_branch": "feature-x"}),
+        )
+        github.get_pull_request = self._pr_with_base("feature-x")  # type: ignore[method-assign]
+
+        summary = apply_fix_notification(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            event="pr_merged",
+            pr="123",
+            dry_run=False,
+            github=github,  # type: ignore[arg-type]
+            lark=lark,
+            default_branch="main",
+        )
+
+        self.assertFalse(summary.branch_mismatch_skipped)
+        self.assertTrue(summary.lark_sent)
+
+    def test_branch_gate_falls_back_to_default_branch_without_triage_meta(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        issue = self._managed_issue(config, github, lark)
+        github.get_pull_request = self._pr_with_base("main")  # type: ignore[method-assign]
+
+        summary = apply_fix_notification(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            event="pr_merged",
+            pr="123",
+            dry_run=False,
+            github=github,  # type: ignore[arg-type]
+            lark=lark,
+            default_branch="main",
+        )
+
+        self.assertFalse(summary.branch_mismatch_skipped)
+        self.assertTrue(summary.lark_sent)
+
+    def test_affected_branch_from_comments_uses_latest_triage_meta(self) -> None:
+        from bugpatrol.clients import GitHubIssueComment
+
+        comments = (
+            GitHubIssueComment(id="1", body=append_triage_metadata("## Triage", {"affected_branch": "main"})),
+            GitHubIssueComment(id="2", body="plain comment"),
+            GitHubIssueComment(id="3", body=append_triage_metadata("## Triage", {"affected_branch": "feature-x"})),
+        )
+
+        self.assertEqual(affected_branch_from_comments(comments), "feature-x")
 
     def test_reconcile_fix_notifications_dedupes_multiple_workflow_reruns(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

@@ -36,6 +36,17 @@ class FieldsTest(unittest.TestCase):
         # The shared schema constant must not be mutated.
         self.assertNotIn("feature-*", TRIAGE_OUTPUT_SCHEMA["properties"]["affected_branch"]["description"])
 
+    def test_triage_output_schema_uses_known_branches_as_enum(self) -> None:
+        schema = triage_output_schema(
+            branch_patterns=("main", "feature-*"),
+            known_branches=("main", "feature-login"),
+        )
+
+        self.assertEqual(
+            schema["properties"]["affected_branch"]["enum"],
+            ["main", "feature-login", ""],
+        )
+
     def test_validate_field_value(self) -> None:
         validate_field_value("Platform", "iOS")
         with self.assertRaisesRegex(ValueError, "invalid value"):

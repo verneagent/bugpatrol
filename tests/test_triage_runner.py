@@ -15,6 +15,7 @@ from bugpatrol.triage_runner import (
     append_triage_run_metadata,
     comment_ids,
     execute_triage_run,
+    list_matching_repo_branches,
     prepare_triage_run,
     render_triage_failed_comment,
 )
@@ -254,6 +255,56 @@ class TriageRunnerTest(unittest.TestCase):
         self.assertEqual(github.assignees, [])
         self.assertIn("superseded", github.comments[-1])
 
+    def test_list_matching_repo_branches_filters_by_patterns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_args = ["-c", "user.email=t@t", "-c", "user.name=t"]
+            subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), *env_args, "commit", "--allow-empty", "-q", "-m", "init"], check=True)
+            subprocess.run(["git", "-C", str(root), "branch", "feature-login"], check=True)
+            subprocess.run(["git", "-C", str(root), "branch", "release-9"], check=True)
+
+            branches = list_matching_repo_branches(root, patterns=("main", "feature-*"))
+
+        self.assertEqual(branches, ("feature-login", "main"))
+
+    def test_list_matching_repo_branches_is_empty_for_non_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(list_matching_repo_branches(Path(tmp), patterns=("main",)), ())
+
+    def test_execute_triage_run_rejects_fabricated_branch(self) -> None:
+        config = load_project_config(Path("projects/full.example.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "output.json"
+            output.write_text(valid_triage_output(affected_branch="feature-ghost"))
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=output,
+                invocation=AgentInvocation(provider="codex", command=["true"]),
+                context_comment_ids=("1",),
+                known_branches=("main", "feature-login"),
+            )
+
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["true"], 0)
+                execute_triage_run(
+                    config=config,
+                    issue_number=7,
+                    plan=plan,
+                    github=github,  # type: ignore[arg-type]
+                    issue_fields=issue_fields,  # type: ignore[arg-type]
+                )
+
+        triage_comment = github.comments[-1]
+        self.assertIn("feature-ghost", triage_comment)
+        self.assertIn("未采信", triage_comment)
+        for write in issue_fields.writes:
+            self.assertNotIn("Affected branch", write["values"])
+
     def test_render_triage_failed_comment_is_actionable(self) -> None:
         comment = render_triage_failed_comment(exit_code=2)
 
@@ -261,9 +312,10 @@ class TriageRunnerTest(unittest.TestCase):
         self.assertIn("credentials", comment)
 
 
-def valid_triage_output() -> str:
-    return """
-    {
+def valid_triage_output(*, affected_branch: str = "") -> str:
+    return f"""
+    {{
+      "affected_branch": "{affected_branch}",
       "issue_type": "Bug",
       "priority": "High",
       "triage_status": "Done",
@@ -280,7 +332,7 @@ def valid_triage_output() -> str:
       "summary_cn": "空状态缺失",
       "follow_up_questions": [],
       "comment_markdown": "## Triage Analysis\\n\\nLooks like a code bug."
-    }
+    }}
     """
 
 
