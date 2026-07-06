@@ -81,6 +81,7 @@ class DoctorTest(unittest.TestCase):
 
     def test_doctor_reports_agent_auth_failure(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = replace(config, triage_agent=replace(config.triage_agent, provider="codex"))
 
         with patch("bugpatrol.doctor.shutil.which", return_value="/usr/bin/tool"):
             with patch("bugpatrol.doctor.subprocess.run") as run:
@@ -99,6 +100,31 @@ class DoctorTest(unittest.TestCase):
         auth = next(check for check in checks if check.name == "triage_agent_auth")
         self.assertFalse(auth.ok)
         self.assertIn("not logged in", auth.detail)
+
+    def test_doctor_deepseek_auth_checks_api_key(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = replace(config, triage_agent=replace(config.triage_agent, provider="deepseek"))
+
+        with patch("bugpatrol.doctor.shutil.which", return_value="/usr/bin/claude"):
+            with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "sk-test"}):
+                checks = run_doctor(
+                    config=config,
+                    github=FakeGithub(),  # type: ignore[arg-type]
+                    issue_fields=FakeIssueFields(),  # type: ignore[arg-type]
+                )
+        auth = next(check for check in checks if check.name == "triage_agent_auth")
+        self.assertTrue(auth.ok)
+
+        with patch("bugpatrol.doctor.shutil.which", return_value="/usr/bin/claude"):
+            with patch.dict("os.environ", {}, clear=True):
+                checks = run_doctor(
+                    config=config,
+                    github=FakeGithub(),  # type: ignore[arg-type]
+                    issue_fields=FakeIssueFields(),  # type: ignore[arg-type]
+                )
+        auth = next(check for check in checks if check.name == "triage_agent_auth")
+        self.assertFalse(auth.ok)
+        self.assertIn("DEEPSEEK_API_KEY", auth.detail)
 
 
 if __name__ == "__main__":

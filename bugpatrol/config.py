@@ -200,7 +200,8 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
 
     return ProjectConfig(
         github_repo=_required_str(data, "github_repo"),
-        github_cli=str(data.get("github_cli") or "gh"),
+        # expanduser so one config works across machines with different homes.
+        github_cli=str(Path(str(data.get("github_cli") or "gh")).expanduser()),
         lark=LarkConfig(
             chat_id=_required_str(lark, "chat_id"),
             app_id=_required_str(lark, "app_id"),

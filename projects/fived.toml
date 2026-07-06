@@ -1,6 +1,6 @@
 github_repo = "TheCloverLab/fived"
 # 以 sobit-bot[bot] GitHub App 身份执行所有 gh 操作
-github_cli = "/Users/dinghaozeng/clover/fived/scripts/gh-as-bot.sh"
+github_cli = "~/clover/fived/scripts/gh-as-bot.sh"
 
 [lark]
 chat_id = "oc_91575ce4fdfa88ae0e110f04f61bc53a"
@@ -14,8 +14,8 @@ default = "main"
 allowed = ["main", "post", "chat-live", "feature-*"]
 
 [triage_agent]
-# 临时切到 claude（codex 配额 2026-07-07 恢复后可切回）
-provider = "claude"
+# deepseek: claude CLI + DeepSeek Anthropic 端点（需 DEEPSEEK_API_KEY）
+provider = "deepseek"
 runner_labels = ["self-hosted", "bugpatrol-fived-triage"]
 model = ""
 effort = ""

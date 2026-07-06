@@ -156,6 +156,35 @@ class ConfigTest(unittest.TestCase):
         self.assertTrue(parsed.intake.skip_orphan_replies)
         self.assertEqual(parsed.intake.since_ms(), 1783267200000)
 
+    def test_github_cli_expands_user_home(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        parsed = parse_project_config(
+            {
+                "github_repo": config.github_repo,
+                "github_cli": "~/clover/fived/scripts/gh-as-bot.sh",
+                "lark": {
+                    "chat_id": config.lark.chat_id,
+                    "app_id": config.lark.app_id,
+                    "app_secret_env": config.lark.app_secret_env,
+                    "bot_open_id": config.lark.bot_open_id,
+                },
+                "triage_agent": {"runner_labels": list(config.triage_agent.runner_labels)},
+                "prd": {"root_wiki_node": config.prd.root_wiki_node},
+                "intake": {"language": config.intake.language},
+                "issue_field_names": dict(config.issue_field_names),
+            }
+        )
+
+        self.assertEqual(
+            parsed.github_cli,
+            str(Path.home() / "clover/fived/scripts/gh-as-bot.sh"),
+        )
+
+    def test_github_cli_defaults_to_plain_gh(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+
+        self.assertEqual(config.github_cli, "gh")
+
     def test_intake_defaults_have_no_since_cutoff(self) -> None:
         config = load_project_config(Path("projects/example.toml"))
 

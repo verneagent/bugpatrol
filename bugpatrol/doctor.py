@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -101,7 +102,7 @@ def _check_ffmpeg(config: ProjectConfig) -> str:
 
 
 def _check_triage_agent(config: ProjectConfig) -> str:
-    if config.triage_agent.provider not in {"codex", "claude"}:
+    if config.triage_agent.provider not in {"codex", "claude", "deepseek"}:
         raise ValueError(f"unsupported provider: {config.triage_agent.provider}")
     if not config.triage_agent.runner_labels:
         raise ValueError("missing runner labels")
@@ -109,6 +110,13 @@ def _check_triage_agent(config: ProjectConfig) -> str:
 
 
 def _check_triage_agent_auth(config: ProjectConfig) -> str:
+    if config.triage_agent.provider == "deepseek":
+        # deepseek rides the claude CLI with API-key auth; no login session needed.
+        if shutil.which("claude") is None:
+            raise ValueError("claude not found")
+        if not os.environ.get("DEEPSEEK_API_KEY"):
+            raise ValueError("deepseek provider requires DEEPSEEK_API_KEY in the environment")
+        return "claude CLI + DEEPSEEK_API_KEY"
     command = _triage_agent_auth_command(config)
     executable = command[0]
     if shutil.which(executable) is None:
