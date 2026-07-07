@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment, GitHubPullRequest, LarkMessengerClient
+from bugpatrol.config import ProjectConfig
 from bugpatrol.github import GitHubCliIssuesClient
+from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake import parse_intake_metadata
 from bugpatrol.triage_result import parse_triage_metadata
 
@@ -41,6 +43,7 @@ class FixNotificationSummary:
     lark_sent: bool
     metadata_written: bool
     branch_mismatch_skipped: bool = False
+    resolution_written: bool = False
 
 
 @dataclass(frozen=True)
@@ -108,6 +111,8 @@ def apply_fix_notification(
     commit: str = "",
     dry_run: bool = True,
     default_branch: str = "",
+    issue_fields: GitHubIssueFieldsClient | None = None,
+    config: ProjectConfig | None = None,
 ) -> FixNotificationSummary:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
     comments = github.list_issue_comments(repo=repo, issue_number=issue_number)
@@ -164,6 +169,15 @@ def apply_fix_notification(
             }
         ),
     )
+    resolution_written = False
+    if event in ("pr_merged", "issue_fixed") and issue_fields is not None and config is not None:
+        issue_fields.add_issue_field_values(
+            repo=repo,
+            issue_number=issue_number,
+            values={"Resolution": "代码修复"},
+            config=config,
+        )
+        resolution_written = True
     return FixNotificationSummary(
         key=notification.key,
         event=event,
@@ -171,6 +185,7 @@ def apply_fix_notification(
         duplicate_skipped=False,
         lark_sent=True,
         metadata_written=True,
+        resolution_written=resolution_written,
     )
 
 
@@ -293,6 +308,8 @@ def reconcile_fix_notifications(
     lark: LarkMessengerClient | None = None,
     dry_run: bool = True,
     default_branch: str = "",
+    issue_fields: GitHubIssueFieldsClient | None = None,
+    config: ProjectConfig | None = None,
 ) -> FixReconcileResult:
     summaries: list[FixNotificationSummary] = []
     errors: list[str] = []
@@ -323,6 +340,8 @@ def reconcile_fix_notifications(
                 lark=lark,
                 dry_run=dry_run,
                 default_branch=default_branch,
+                issue_fields=issue_fields,
+                config=config,
             )
         except ValueError as error:
             skipped += 1

@@ -714,6 +714,8 @@ def main(argv: list[str] | None = None) -> int:
                 github=github,
                 lark=lark,
                 default_branch=config.branches.default,
+                issue_fields=GitHubIssueFieldsClient(gh=config.github_cli),
+                config=config,
             )
         except ValueError as error:
             if "BugPatrol Lark intake metadata" not in str(error):
@@ -754,6 +756,8 @@ def main(argv: list[str] | None = None) -> int:
             lark=lark,
             dry_run=not args.write,
             default_branch=config.branches.default,
+            issue_fields=GitHubIssueFieldsClient(gh=config.github_cli),
+            config=config,
         )
         print(
             json.dumps(
