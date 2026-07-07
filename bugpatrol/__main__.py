@@ -153,6 +153,7 @@ def main(argv: list[str] | None = None) -> int:
     backfill.add_argument("--write", action="store_true", help="perform writes; default is dry-run")
     backfill.add_argument("--resource-dir", type=Path, help="download Lark resources before writing issues")
     backfill.add_argument("--asset-repo", action="store_true", help="upload Lark resources to configured assets repo")
+    backfill.add_argument("--root", action="append", default=[], help="only process messages in these topic root_ids (repeatable)")
 
     doctor = sub.add_parser("doctor", help="check project integration dependencies")
     doctor.add_argument("project_config", type=Path)
@@ -334,6 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         resource_transformer = media_resource_transformer(config)
         resource_policy = media_resource_policy(config)
         result = run_lark_backfill(
+            root_allowlist=tuple(args.root),
             config=config,
             lark=lark,
             workflow=workflow,

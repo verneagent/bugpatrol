@@ -78,6 +78,7 @@ def run_lark_backfill(
     resource_redactor: ResourceRedactor | None = None,
     resource_transformer: ResourceTransformer | None = None,
     processed_ledger: MessageLedger | None = None,
+    root_allowlist: tuple[str, ...] = (),
 ) -> BackfillResult:
     if resource_dir is not None and resource_store is not None:
         raise ValueError("resource_dir and resource_store are mutually exclusive")
@@ -86,7 +87,18 @@ def run_lark_backfill(
     events: list[BackfillEvent] = []
     skipped = 0
     since_ms = config.intake.since_ms()
+    allowed_roots = set(root_allowlist)
     for message in reversed(messages):
+        if allowed_roots and (message.root_id or message.message_id) not in allowed_roots:
+            skipped += 1
+            events.append(
+                BackfillEvent(
+                    message_id=message.message_id,
+                    action="skipped",
+                    reason="not_in_root_allowlist",
+                )
+            )
+            continue
         if should_skip_message(
             message,
             bot_open_id=config.lark.bot_open_id,

@@ -151,16 +151,26 @@ class LarkOpenApiMessengerClient:
         return SentLarkMessage(message_id=message_id)
 
     def list_chat_messages(self, *, chat_id: str, limit: int = 20) -> list[LarkMessage]:
-        query = urlencode(
-            {
+        messages: list[LarkMessage] = []
+        page_token = ""
+        while len(messages) < limit:
+            params = {
                 "container_id_type": "chat",
                 "container_id": chat_id,
-                "page_size": str(limit),
+                "page_size": str(min(limit - len(messages), 50)),
                 "sort_type": "ByCreateTimeDesc",
             }
-        )
-        data = self._request("GET", f"/im/v1/messages?{query}")
-        return [parse_lark_message(item, default_chat_id=chat_id) for item in data.get("data", {}).get("items", ())]
+            if page_token:
+                params["page_token"] = page_token
+            data = self._request("GET", f"/im/v1/messages?{urlencode(params)}")
+            payload = data.get("data", {})
+            messages.extend(
+                parse_lark_message(item, default_chat_id=chat_id) for item in payload.get("items", ())
+            )
+            page_token = payload.get("page_token") or ""
+            if not payload.get("has_more") or not page_token:
+                break
+        return messages
 
     def get_message(self, *, message_id: str, default_chat_id: str) -> LarkMessage:
         data = self._request("GET", f"/im/v1/messages/{message_id}")

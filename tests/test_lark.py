@@ -161,6 +161,61 @@ class LarkOpenApiMessengerClientTest(unittest.TestCase):
         self.assertEqual(messages[0].raw_content, json.dumps({"text": "hello"}))
         self.assertIn("page_size=5", urlopen.call_args_list[1].args[0].full_url)
 
+    def test_list_chat_messages_paginates_past_page_size_cap(self) -> None:
+        client = LarkOpenApiMessengerClient(app_id="app", app_secret="secret")
+
+        def message_item(index: int) -> dict:
+            return {
+                "message_id": f"om_{index}",
+                "root_id": "",
+                "chat_id": "oc_1",
+                "msg_type": "text",
+                "create_time": "1000",
+                "sender": {"sender_type": "user", "id": {"open_id": "ou_1"}},
+                "body": {"content": json.dumps({"text": f"m{index}"})},
+            }
+
+        with patch("urllib.request.urlopen") as urlopen:
+            token_response = MagicMock()
+            token_response.__enter__.return_value.read.return_value = json.dumps(
+                {"code": 0, "tenant_access_token": "token"}
+            ).encode()
+            first_page = MagicMock()
+            first_page.__enter__.return_value.read.return_value = json.dumps(
+                {
+                    "code": 0,
+                    "data": {
+                        "items": [message_item(i) for i in range(50)],
+                        "has_more": True,
+                        "page_token": "next-token",
+                    },
+                }
+            ).encode()
+            second_page = MagicMock()
+            second_page.__enter__.return_value.read.return_value = json.dumps(
+                {
+                    "code": 0,
+                    "data": {
+                        "items": [message_item(50 + i) for i in range(10)],
+                        "has_more": True,
+                        "page_token": "another-token",
+                    },
+                }
+            ).encode()
+            urlopen.side_effect = [token_response, first_page, second_page]
+
+            messages = client.list_chat_messages(chat_id="oc_1", limit=60)
+
+        self.assertEqual(len(messages), 60)
+        self.assertEqual(messages[0].message_id, "om_0")
+        self.assertEqual(messages[-1].message_id, "om_59")
+        first_url = urlopen.call_args_list[1].args[0].full_url
+        second_url = urlopen.call_args_list[2].args[0].full_url
+        self.assertIn("page_size=50", first_url)
+        self.assertNotIn("page_token", first_url)
+        self.assertIn("page_size=10", second_url)
+        self.assertIn("page_token=next-token", second_url)
+
     def test_parse_lark_message_falls_back_to_raw_content(self) -> None:
         parsed = parse_lark_message(
             {
