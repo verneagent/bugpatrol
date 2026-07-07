@@ -16,6 +16,7 @@ from bugpatrol.triage_result import (
     parse_triage_metadata,
     parse_triage_result,
     reject_affected_branch,
+    render_branch_question_lark_message,
     render_needs_info_lark_message,
     render_triage_comment,
     triage_field_values_for_write,
@@ -480,6 +481,110 @@ class TriageResultTest(unittest.TestCase):
         self.assertEqual(lark.replies[0].chat_id, config.lark.chat_id)
         self.assertEqual(lark.replies[0].message_id, "om_1")
         self.assertIn("请补充复现账号", lark.replies[0].text)
+
+    def test_apply_asks_branch_in_lark_when_bug_branch_unknown(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.issue_body = render_issue_body(
+            IntakeRecord(
+                reporter_name="Reporter",
+                reporter_open_id="ou_1",
+                created_at="2026-07-01T00:00:00Z",
+                chat_id=config.lark.chat_id,
+                root_id="om_root",
+                message_id="om_1",
+                original_text="bug",
+            ),
+            language=config.intake.language,
+        )
+        issue_fields = FakeIssueFields()
+        lark = FakeLarkMessengerClient()
+        result = parse_triage_result(dict(VALID), branch_patterns=config.branches.allowed)
+        self.assertEqual(result.affected_branch, "")
+
+        summary = apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+            lark=lark,
+        )
+
+        self.assertTrue(summary.comment_added)
+        self.assertEqual(len(lark.replies), 1)
+        self.assertEqual(lark.replies[0].message_id, "om_1")
+        self.assertIn("影响分支", lark.replies[0].text)
+        metadata = parse_triage_metadata(github.comments[-1])
+        assert metadata is not None
+        self.assertTrue(metadata["branch_question_sent"])
+
+    def test_apply_asks_branch_only_once_across_retriage_rounds(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.issue_body = managed_issue_body()
+        issue_fields = FakeIssueFields()
+        lark = FakeLarkMessengerClient()
+        first_result = parse_triage_result(dict(VALID))
+        data = dict(VALID)
+        data["priority"] = "Medium"
+        second_result = parse_triage_result(data)
+
+        apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=first_result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+            lark=lark,
+        )
+        apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=second_result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+            lark=lark,
+        )
+
+        self.assertEqual(len(lark.replies), 1)
+
+    def test_apply_does_not_ask_branch_when_branch_known_or_not_bug(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        for override in ({"affected_branch": "main"}, {"issue_type": "Task"}):
+            github = FakeGithub()
+            github.issue_body = managed_issue_body()
+            issue_fields = FakeIssueFields()
+            lark = FakeLarkMessengerClient()
+            data = dict(VALID)
+            data.update(override)
+            result = parse_triage_result(data, branch_patterns=("main",))
+
+            apply_triage_result(
+                repo=config.github_repo,
+                issue_number=1,
+                config=config,
+                result=result,
+                github=github,  # type: ignore[arg-type]
+                issue_fields=issue_fields,  # type: ignore[arg-type]
+                lark=lark,
+            )
+
+            self.assertEqual(len(lark.replies), 0, override)
+
+    def test_render_branch_question_lark_message_lists_patterns(self) -> None:
+        message = render_branch_question_lark_message(
+            issue_number=9,
+            issue_url="https://github.test/o/r/issues/9",
+            branch_patterns=("main", "post", "feature-*"),
+        )
+
+        self.assertIn("#9", message)
+        self.assertIn("main / post / feature-*", message)
+        self.assertIn("影响分支", message)
 
     def test_render_needs_info_lark_message_lists_questions(self) -> None:
         message = render_needs_info_lark_message(

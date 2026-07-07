@@ -160,12 +160,28 @@ def apply_triage_result(
         values=triage_field_values_for_write(result, config=config),
         config=config,
     )
+    ask_branch = (
+        lark is not None
+        and result.issue_type == "Bug"
+        and result.fields.get("Triage status") in ("Needs review", "Done")
+        and not result.affected_branch
+        and not _branch_question_already_sent(existing_comments)
+    )
     if not duplicate:
         if lark is not None and result.fields["Triage status"] == "Needs info":
             _send_lark_follow_up(
                 repo=repo,
                 issue_number=issue_number,
                 result=result,
+                github=github,
+                lark=lark,
+            )
+        elif ask_branch:
+            assert lark is not None
+            _send_lark_branch_question(
+                repo=repo,
+                issue_number=issue_number,
+                config=config,
                 github=github,
                 lark=lark,
             )
@@ -182,6 +198,7 @@ def apply_triage_result(
                     "affected_branch": result.affected_branch,
                     "affected_branch_rejected": result.affected_branch_rejected,
                     "blame_suggestion": result.blame_suggestion,
+                    "branch_question_sent": ask_branch,
                 },
             ),
         )
@@ -363,16 +380,9 @@ def _send_lark_follow_up(
     lark: LarkMessengerClient,
 ) -> None:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
-    metadata = parse_intake_metadata(issue.body or "")
-    if metadata is None:
-        return
-    chat_id = _metadata_str(metadata, "chat_id")
-    message_id = _metadata_str(metadata, "message_id")
-    if not chat_id or not message_id:
-        return
-    lark.reply_to_message(
-        chat_id=chat_id,
-        message_id=message_id,
+    _reply_to_intake_topic(
+        issue_body=issue.body or "",
+        lark=lark,
         text=render_needs_info_lark_message(
             issue_number=issue_number,
             issue_url=issue.url,
@@ -380,6 +390,63 @@ def _send_lark_follow_up(
             affected_branch=result.affected_branch,
         ),
     )
+
+
+def _send_lark_branch_question(
+    *,
+    repo: str,
+    issue_number: int,
+    config: ProjectConfig,
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient,
+) -> None:
+    issue = github.get_issue(repo=repo, issue_number=issue_number)
+    _reply_to_intake_topic(
+        issue_body=issue.body or "",
+        lark=lark,
+        text=render_branch_question_lark_message(
+            issue_number=issue_number,
+            issue_url=issue.url,
+            branch_patterns=config.branches.allowed,
+        ),
+    )
+
+
+def _reply_to_intake_topic(
+    *,
+    issue_body: str,
+    lark: LarkMessengerClient,
+    text: str,
+) -> None:
+    metadata = parse_intake_metadata(issue_body)
+    if metadata is None:
+        return
+    chat_id = _metadata_str(metadata, "chat_id")
+    message_id = _metadata_str(metadata, "message_id")
+    if not chat_id or not message_id:
+        return
+    lark.reply_to_message(chat_id=chat_id, message_id=message_id, text=text)
+
+
+def _branch_question_already_sent(comments: tuple[GitHubIssueComment, ...]) -> bool:
+    for comment in comments:
+        metadata = parse_triage_metadata(comment.body)
+        if metadata is not None and metadata.get("branch_question_sent"):
+            return True
+    return False
+
+
+def render_branch_question_lark_message(
+    *,
+    issue_number: int,
+    issue_url: str,
+    branch_patterns: tuple[str, ...] = (),
+) -> str:
+    lines = [f"分诊完成，但未能从现有信息判断出影响分支，GitHub issue #{issue_number}: {issue_url}"]
+    lines.append("")
+    hint = f"（如 {' / '.join(branch_patterns)}）" if branch_patterns else ""
+    lines.append(f"请在本话题回复该问题出现时所用的分支或安装包{hint}，以便修复合入后准确通知。")
+    return "\n".join(lines)
 
 
 def render_needs_info_lark_message(
