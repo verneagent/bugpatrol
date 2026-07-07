@@ -11,7 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from bugpatrol.agents import AgentInvocation, build_triage_agent_invocation
-from bugpatrol.clients import GitHubIssueComment
+from bugpatrol.clients import GitHubIssueComment, LarkMessengerClient
 from bugpatrol.config import ProjectConfig, branch_matches_patterns
 from bugpatrol.fields import triage_output_schema
 from bugpatrol.github import GitHubCliIssuesClient
@@ -24,6 +24,7 @@ from bugpatrol.triage_result import (
     apply_triage_result,
     parse_triage_result,
     reject_affected_branch,
+    send_intake_topic_message,
 )
 
 
@@ -164,6 +165,7 @@ def execute_triage_run(
     plan: TriageRunPlan,
     github: GitHubCliIssuesClient,
     issue_fields: GitHubIssueFieldsClient,
+    lark: LarkMessengerClient | None = None,
 ) -> None:
     issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
     require_bugpatrol_managed_issue(issue)
@@ -173,6 +175,14 @@ def execute_triage_run(
         issue_number=issue_number,
         issue_fields=issue_fields,
     )
+    if lark is not None:
+        send_intake_topic_message(
+            repo=config.github_repo,
+            issue_number=issue_number,
+            github=github,
+            lark=lark,
+            text=f"开始分诊，GitHub issue #{issue_number}: {issue.url}",
+        )
     record_triage_run_start(
         config=config,
         issue_number=issue_number,
@@ -191,6 +201,7 @@ def execute_triage_run(
             exit_code=completed.returncode,
             github=github,
             issue_fields=issue_fields,
+            lark=lark,
         )
         raise RuntimeError(f"triage agent failed with exit {completed.returncode}")
     if not plan.output_path.exists():
@@ -200,6 +211,7 @@ def execute_triage_run(
             exit_code=0,
             github=github,
             issue_fields=issue_fields,
+            lark=lark,
         )
         raise RuntimeError("triage agent exited 0 but produced no output file")
     result = parse_triage_result(
@@ -213,6 +225,7 @@ def execute_triage_run(
             exit_code=0,
             github=github,
             issue_fields=issue_fields,
+            lark=lark,
             reason=(
                 f"Agent returned assignee `{result.assignee}`, which is not a known GitHub login. "
                 f"Valid assignees: {', '.join(plan.known_assignees)}."
@@ -246,6 +259,7 @@ def execute_triage_run(
         result=result,
         github=github,
         issue_fields=issue_fields,
+        lark=lark,
     )
 
 
@@ -316,6 +330,7 @@ def mark_triage_failed(
     exit_code: int,
     github: GitHubCliIssuesClient,
     issue_fields: GitHubIssueFieldsClient,
+    lark: LarkMessengerClient | None = None,
     reason: str = "",
 ) -> None:
     issue_fields.add_issue_field_values(
@@ -329,6 +344,17 @@ def mark_triage_failed(
         issue_number=issue_number,
         body=render_triage_failed_comment(exit_code=exit_code, reason=reason),
     )
+    if lark is not None:
+        lines = [f"分诊失败，GitHub issue #{issue_number} 已标记 Failed，待重试或人工处理。"]
+        if reason:
+            lines.append(reason)
+        send_intake_topic_message(
+            repo=config.github_repo,
+            issue_number=issue_number,
+            github=github,
+            lark=lark,
+            text="\n".join(lines),
+        )
 
 
 def comment_ids(comments: tuple[GitHubIssueComment, ...]) -> tuple[str, ...]:

@@ -128,6 +128,13 @@ def media_resource_transformer(config) -> ResourceTransformer | None:  # type: i
     return CompositeResourceTransformer(tuple(transformers))
 
 
+def _optional_lark_client(config) -> LarkOpenApiMessengerClient | None:  # type: ignore[no-untyped-def]
+    app_secret = os.environ.get(config.lark.app_secret_env)
+    if not app_secret:
+        return None
+    return LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="bugpatrol")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -605,6 +612,7 @@ def main(argv: list[str] | None = None) -> int:
             result=result,
             github=GitHubCliIssuesClient(gh=config.github_cli),
             issue_fields=GitHubIssueFieldsClient(gh=config.github_cli),
+            lark=_optional_lark_client(config),
         )
         print(json.dumps({"ok": True, "issue": args.issue, "summary": summary.__dict__}, ensure_ascii=False))
         return 0
@@ -627,6 +635,7 @@ def main(argv: list[str] | None = None) -> int:
                 plan=plan,
                 github=github,
                 issue_fields=issue_fields,
+                lark=_optional_lark_client(config),
             )
         print(
             json.dumps(
@@ -657,6 +666,7 @@ def main(argv: list[str] | None = None) -> int:
             repo_path=args.repo_path,
             output_dir=args.output_dir,
             execute=args.execute,
+            lark=_optional_lark_client(config),
         )
         print(
             json.dumps(

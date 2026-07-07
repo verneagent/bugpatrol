@@ -417,6 +417,18 @@ def _send_lark_triage_summary(
     )
 
 
+def send_intake_topic_message(
+    *,
+    repo: str,
+    issue_number: int,
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient,
+    text: str,
+) -> None:
+    issue = github.get_issue(repo=repo, issue_number=issue_number)
+    _reply_to_intake_topic(issue_body=issue.body or "", lark=lark, text=text)
+
+
 def _reply_to_intake_topic(
     *,
     issue_body: str,

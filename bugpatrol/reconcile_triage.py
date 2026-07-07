@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from bugpatrol.clients import LarkMessengerClient
 from bugpatrol.config import ProjectConfig
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
@@ -74,6 +75,7 @@ def reconcile_triage(
     output_dir: Path = Path(".bugpatrol/triage-run"),
     execute: bool = False,
     run_triage: Callable[[int], None] | None = None,
+    lark: LarkMessengerClient | None = None,
 ) -> ReconcileTriageResult:
     candidates, events_tuple, scanned = find_untriaged_issues(config=config, github=github)
     events = list(events_tuple)
@@ -96,6 +98,7 @@ def reconcile_triage(
                 plan=plan,
                 github=github,
                 issue_fields=issue_fields,
+                lark=lark,
             )
 
         run_triage = _run_triage
