@@ -434,13 +434,15 @@ class ImageResourceResizer:
         max_width: int = 0,
         max_height: int = 0,
         quality: int = 85,
+        convert_to_jpeg: bool = False,
     ) -> None:
         self._max_width = max(0, max_width)
         self._max_height = max(0, max_height)
         self._quality = min(100, max(1, quality))
+        self._convert_to_jpeg = convert_to_jpeg
 
     def transform(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> DownloadedLarkResource:
-        if not self._max_width and not self._max_height:
+        if not self._max_width and not self._max_height and not self._convert_to_jpeg:
             return resource
         if not _is_image_resource(ref=ref, resource=resource):
             return resource
@@ -451,25 +453,46 @@ class ImageResourceResizer:
             raise RuntimeError("image resizing requires Pillow to be installed") from exc
 
         with Image.open(BytesIO(resource.content)) as image:
+            source_format = image.format or _pillow_format_for_resource(resource)
             target = _scaled_image_size(
                 width=image.width,
                 height=image.height,
                 max_width=self._max_width,
                 max_height=self._max_height,
             )
-            if target == (image.width, image.height):
+            convert = self._convert_to_jpeg and source_format != "JPEG"
+            if target == (image.width, image.height) and not convert:
                 return resource
-            resized = image.resize(target, Image.Resampling.LANCZOS)
+            format_name = "JPEG" if self._convert_to_jpeg else source_format
+            output_image = image
+            if target != (image.width, image.height):
+                output_image = output_image.resize(target, Image.Resampling.LANCZOS)
+            if format_name == "JPEG" and output_image.mode not in {"RGB", "L"}:
+                # Flatten transparency onto white instead of the default black.
+                rgba = output_image.convert("RGBA")
+                background = Image.new("RGB", rgba.size, (255, 255, 255))
+                background.paste(rgba, mask=rgba.getchannel("A"))
+                output_image = background
             output = BytesIO()
-            format_name = _pillow_format_for_resource(resource)
-            if format_name == "JPEG" and resized.mode not in {"RGB", "L"}:
-                resized = resized.convert("RGB")
-            resized.save(output, format=format_name, quality=self._quality, optimize=True)
+            output_image.save(output, format=format_name, quality=self._quality, optimize=True)
+        content_type = "image/jpeg" if format_name == "JPEG" else resource.content_type
+        filename = _jpeg_filename(resource.filename) if format_name == "JPEG" else resource.filename
         return DownloadedLarkResource(
             content=output.getvalue(),
-            content_type=resource.content_type,
-            filename=resource.filename,
+            content_type=content_type,
+            filename=filename,
         )
+
+
+def _jpeg_filename(filename: str) -> str:
+    if not filename:
+        return filename
+    stem, _, ext = filename.rpartition(".")
+    if not stem:
+        return f"{filename}.jpg"
+    if ext.lower() in {"jpg", "jpeg"}:
+        return filename
+    return f"{stem}.jpg"
 
 
 def materialize_lark_attachments(

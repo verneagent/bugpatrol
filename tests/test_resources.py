@@ -16,6 +16,7 @@ from bugpatrol.resources import (
     FfprobeVideoDurationProbe,
     GitHubAssetRepoStore,
     ImageResourceResizer,
+    LarkResourceRef,
     LocalResourceStore,
     ResourcePolicy,
     materialize_attachment,
@@ -313,6 +314,54 @@ class ResourcesTest(unittest.TestCase):
             with Image.open(path) as stored:
                 self.assertEqual((stored.width, stored.height), (20, 10))
             self.assertEqual(materialized.attachments[0].description, "size: 20x10")
+
+    def test_image_resizer_converts_png_to_jpeg(self) -> None:
+        resizer = ImageResourceResizer(convert_to_jpeg=True)
+        resource = DownloadedLarkResource(
+            content=png_bytes(width=10, height=10),
+            content_type="image/png",
+            filename="shot.png",
+        )
+
+        result = resizer.transform(
+            ref=LarkResourceRef(message_id="om_1", kind="image", resource_key="img_1"),
+            resource=resource,
+        )
+
+        self.assertTrue(result.content.startswith(b"\xff\xd8\xff"))  # JPEG magic
+        self.assertEqual(result.content_type, "image/jpeg")
+        self.assertEqual(result.filename, "shot.jpg")
+
+    def test_image_resizer_flattens_alpha_on_white_when_converting(self) -> None:
+        from PIL import Image
+
+        rgba = Image.new("RGBA", (8, 8), color=(0, 0, 0, 0))  # fully transparent
+        raw = BytesIO()
+        rgba.save(raw, format="PNG")
+        resizer = ImageResourceResizer(convert_to_jpeg=True)
+
+        result = resizer.transform(
+            ref=LarkResourceRef(message_id="om_1", kind="image", resource_key="img_1"),
+            resource=DownloadedLarkResource(content=raw.getvalue(), content_type="image/png", filename="a.png"),
+        )
+
+        with Image.open(BytesIO(result.content)) as converted:
+            self.assertEqual(converted.getpixel((0, 0)), (255, 255, 255))
+
+    def test_image_resizer_keeps_small_jpeg_untouched(self) -> None:
+        from PIL import Image
+
+        raw = BytesIO()
+        Image.new("RGB", (10, 10)).save(raw, format="JPEG")
+        resizer = ImageResourceResizer(max_width=100, max_height=100, convert_to_jpeg=True)
+        resource = DownloadedLarkResource(content=raw.getvalue(), content_type="image/jpeg", filename="a.jpg")
+
+        result = resizer.transform(
+            ref=LarkResourceRef(message_id="om_1", kind="image", resource_key="img_1"),
+            resource=resource,
+        )
+
+        self.assertIs(result, resource)
 
     def test_materialize_skips_resource_when_policy_rejects_size(self) -> None:
         attachment = Attachment(kind="image", url="lark://message/om_1/image/img_v2_abc")

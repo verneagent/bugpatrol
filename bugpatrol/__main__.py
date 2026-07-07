@@ -108,12 +108,17 @@ def media_resource_transformer(config) -> ResourceTransformer | None:  # type: i
                 duration_probe=duration_probe,
             )
         )
-    if config.media.resize_max_image_width or config.media.resize_max_image_height:
+    if (
+        config.media.resize_max_image_width
+        or config.media.resize_max_image_height
+        or config.media.convert_images_to_jpeg
+    ):
         transformers.append(
             ImageResourceResizer(
                 max_width=config.media.resize_max_image_width,
                 max_height=config.media.resize_max_image_height,
                 quality=config.media.resize_image_quality,
+                convert_to_jpeg=config.media.convert_images_to_jpeg,
             )
         )
     if not transformers:

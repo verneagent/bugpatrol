@@ -49,6 +49,7 @@ description_timeout_seconds = 300
 resize_max_image_width = 1600
 resize_max_image_height = 1600
 resize_image_quality = 85
+convert_images_to_jpeg = true
 
 [issue_field_names]
 Priority = "Priority"
