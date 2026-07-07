@@ -16,7 +16,7 @@ from bugpatrol.triage_result import (
     parse_triage_metadata,
     parse_triage_result,
     reject_affected_branch,
-    render_branch_question_lark_message,
+    render_triage_summary_lark_message,
     render_needs_info_lark_message,
     render_triage_comment,
     triage_field_values_for_write,
@@ -550,7 +550,9 @@ class TriageResultTest(unittest.TestCase):
             lark=lark,
         )
 
-        self.assertEqual(len(lark.replies), 1)
+        self.assertEqual(len(lark.replies), 2)
+        self.assertIn("请在本话题回复", lark.replies[0].text)
+        self.assertNotIn("请在本话题回复", lark.replies[1].text)
 
     def test_apply_does_not_ask_branch_when_branch_known_or_not_bug(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
@@ -573,18 +575,41 @@ class TriageResultTest(unittest.TestCase):
                 lark=lark,
             )
 
-            self.assertEqual(len(lark.replies), 0, override)
+            self.assertEqual(len(lark.replies), 1, override)
+            self.assertIn("分诊完成", lark.replies[0].text)
+            self.assertNotIn("请在本话题回复", lark.replies[0].text, override)
 
-    def test_render_branch_question_lark_message_lists_patterns(self) -> None:
-        message = render_branch_question_lark_message(
+    def test_render_triage_summary_lark_message_includes_fields_and_branch_ask(self) -> None:
+        result = parse_triage_result(dict(VALID))
+        message = render_triage_summary_lark_message(
             issue_number=9,
             issue_url="https://github.test/o/r/issues/9",
+            result=result,
+            ask_branch=True,
             branch_patterns=("main", "post", "feature-*"),
         )
 
         self.assertIn("#9", message)
+        self.assertIn("分诊完成", message)
+        self.assertIn("结论：代码 Bug", message)
+        self.assertIn("状态：Done", message)
+        self.assertIn("优先级：High", message)
+        self.assertIn("负责人：garlanddiego", message)
         self.assertIn("main / post / feature-*", message)
-        self.assertIn("影响分支", message)
+        self.assertIn("请在本话题回复", message)
+
+    def test_render_triage_summary_lark_message_shows_branch_without_ask(self) -> None:
+        data = dict(VALID)
+        data["affected_branch"] = "main"
+        result = parse_triage_result(data, branch_patterns=("main",))
+        message = render_triage_summary_lark_message(
+            issue_number=9,
+            issue_url="https://github.test/o/r/issues/9",
+            result=result,
+        )
+
+        self.assertIn("影响分支：main", message)
+        self.assertNotIn("请在本话题回复", message)
 
     def test_render_needs_info_lark_message_lists_questions(self) -> None:
         message = render_needs_info_lark_message(

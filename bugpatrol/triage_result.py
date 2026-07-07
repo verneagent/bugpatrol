@@ -176,14 +176,15 @@ def apply_triage_result(
                 github=github,
                 lark=lark,
             )
-        elif ask_branch:
-            assert lark is not None
-            _send_lark_branch_question(
+        elif lark is not None:
+            _send_lark_triage_summary(
                 repo=repo,
                 issue_number=issue_number,
                 config=config,
+                result=result,
                 github=github,
                 lark=lark,
+                ask_branch=ask_branch,
             )
         github.add_issue_comment(
             repo=repo,
@@ -392,21 +393,25 @@ def _send_lark_follow_up(
     )
 
 
-def _send_lark_branch_question(
+def _send_lark_triage_summary(
     *,
     repo: str,
     issue_number: int,
     config: ProjectConfig,
+    result: TriageResult,
     github: GitHubCliIssuesClient,
     lark: LarkMessengerClient,
+    ask_branch: bool = False,
 ) -> None:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
     _reply_to_intake_topic(
         issue_body=issue.body or "",
         lark=lark,
-        text=render_branch_question_lark_message(
+        text=render_triage_summary_lark_message(
             issue_number=issue_number,
             issue_url=issue.url,
+            result=result,
+            ask_branch=ask_branch,
             branch_patterns=config.branches.allowed,
         ),
     )
@@ -436,16 +441,28 @@ def _branch_question_already_sent(comments: tuple[GitHubIssueComment, ...]) -> b
     return False
 
 
-def render_branch_question_lark_message(
+def render_triage_summary_lark_message(
     *,
     issue_number: int,
     issue_url: str,
+    result: TriageResult,
+    ask_branch: bool = False,
     branch_patterns: tuple[str, ...] = (),
 ) -> str:
-    lines = [f"分诊完成，但未能从现有信息判断出影响分支，GitHub issue #{issue_number}: {issue_url}"]
-    lines.append("")
-    hint = f"（如 {' / '.join(branch_patterns)}）" if branch_patterns else ""
-    lines.append(f"请在本话题回复该问题出现时所用的分支或安装包{hint}，以便修复合入后准确通知。")
+    lines = [f"分诊完成，GitHub issue #{issue_number}: {issue_url}"]
+    for label, value in (
+        ("结论", result.fields.get("Triage verdict", "")),
+        ("状态", result.fields.get("Triage status", "")),
+        ("优先级", result.fields.get("Priority", "")),
+        ("负责人", result.assignee),
+        ("影响分支", result.affected_branch),
+    ):
+        if value:
+            lines.append(f"{label}：{value}")
+    if ask_branch:
+        hint = f"（如 {' / '.join(branch_patterns)}）" if branch_patterns else ""
+        lines.append("")
+        lines.append(f"未能从现有信息判断出影响分支，请在本话题回复该问题出现时所用的分支或安装包{hint}，以便修复合入后准确通知。")
     return "\n".join(lines)
 
 
