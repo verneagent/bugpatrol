@@ -11,9 +11,11 @@ from bugpatrol.agents import AgentInvocation
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment
 from bugpatrol.config import load_project_config
 from bugpatrol.intake import IntakeRecord, render_issue_body
+from bugpatrol.intake_workflow import render_followup_comment
 from bugpatrol.triage_runner import (
     TriageRunPlan,
     append_triage_run_metadata,
+    branch_answer_from_comments,
     comment_ids,
     execute_triage_run,
     list_known_assignees,
@@ -311,6 +313,78 @@ class TriageRunnerTest(unittest.TestCase):
         for write in issue_fields.writes:
             self.assertNotIn("Affected branch", write["values"])
 
+    def test_branch_answer_from_comments_extracts_bare_branch_reply(self) -> None:
+        comments = (
+            GitHubIssueComment(id="1", body="Reporter follow-up"),
+            GitHubIssueComment(id="2", body=followup_comment("post")),
+        )
+
+        self.assertEqual(
+            branch_answer_from_comments(comments, known_branches=("main", "post")),
+            "post",
+        )
+
+    def test_branch_answer_from_comments_ignores_prose_and_non_followups(self) -> None:
+        comments = (
+            GitHubIssueComment(id="1", body="post"),  # not a follow-up comment
+            GitHubIssueComment(id="2", body=followup_comment("在 post 分支上复现")),
+        )
+
+        self.assertEqual(
+            branch_answer_from_comments(comments, known_branches=("main", "post")),
+            "",
+        )
+
+    def test_branch_answer_from_comments_latest_reply_wins(self) -> None:
+        comments = (
+            GitHubIssueComment(id="1", body=followup_comment("main")),
+            GitHubIssueComment(id="2", body=followup_comment("`post`")),
+        )
+
+        self.assertEqual(
+            branch_answer_from_comments(comments, known_branches=("main", "post")),
+            "post",
+        )
+
+    def test_execute_triage_run_fills_branch_from_followup_reply(self) -> None:
+        config = load_project_config(Path("projects/full.example.toml"))
+        config = replace(
+            config,
+            issue_field_names={**config.issue_field_names, "Affected branch": "Affected branch"},
+        )
+        github = FakeGithub()
+        github.comments.append(followup_comment("post"))
+        issue_fields = FakeIssueFields()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "output.json"
+            output.write_text(valid_triage_output(affected_branch=""))
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=output,
+                invocation=AgentInvocation(provider="codex", command=["true"]),
+                context_comment_ids=("1", "2"),
+                known_branches=("main", "post"),
+            )
+
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["true"], 0)
+                execute_triage_run(
+                    config=config,
+                    issue_number=7,
+                    plan=plan,
+                    github=github,  # type: ignore[arg-type]
+                    issue_fields=issue_fields,  # type: ignore[arg-type]
+                )
+
+        branch_writes = [
+            write["values"]["Affected branch"]  # type: ignore[index]
+            for write in issue_fields.writes
+            if "Affected branch" in write["values"]  # type: ignore[operator]
+        ]
+        self.assertEqual(branch_writes, ["post"])
+
     def test_execute_triage_run_fails_when_agent_produces_no_output(self) -> None:
         config = load_project_config(Path("projects/full.example.toml"))
         github = FakeGithub()
@@ -454,6 +528,21 @@ def valid_triage_output(*, affected_branch: str = "") -> str:
       "comment_markdown": "## Triage Analysis\\n\\nLooks like a code bug."
     }}
     """
+
+
+def followup_comment(text: str) -> str:
+    return render_followup_comment(
+        IntakeRecord(
+            reporter_name="Reporter",
+            reporter_open_id="ou_1",
+            created_at="2026-07-07T00:00:00Z",
+            chat_id="oc_1",
+            root_id="om_root",
+            message_id="om_reply",
+            original_text=text,
+        ),
+        language="zh-CN",
+    )
 
 
 def managed_issue_body() -> str:

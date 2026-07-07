@@ -17,6 +17,7 @@ from bugpatrol.fields import triage_output_schema
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake import require_bugpatrol_managed_issue
+from bugpatrol.intake_workflow import INTAKE_REPLY_META_MARKER
 from bugpatrol.ownership import load_codeowners
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
 from bugpatrol.triage_result import (
@@ -252,6 +253,14 @@ def execute_triage_run(
         return
     if comment_ids(current_comments) != plan.context_comment_ids:
         result = mark_result_needs_review(result)
+    if not result.affected_branch:
+        # Reporters answer the branch question with a bare branch name in the
+        # topic; resolve it deterministically instead of trusting the agent.
+        branch_answer = branch_answer_from_comments(
+            current_comments, known_branches=plan.known_branches
+        )
+        if branch_answer:
+            result = replace(result, affected_branch=branch_answer, affected_branch_rejected="")
     apply_triage_result(
         repo=config.github_repo,
         issue_number=issue_number,
@@ -355,6 +364,44 @@ def mark_triage_failed(
             lark=lark,
             text="\n".join(lines),
         )
+
+
+def branch_answer_from_comments(
+    comments: tuple[GitHubIssueComment, ...],
+    *,
+    known_branches: tuple[str, ...],
+) -> str:
+    """Deterministically extract an affected-branch answer from topic replies.
+
+    When the bot asks for the affected branch in the Lark topic, reporters
+    typically reply with just the branch name. That reply is appended to the
+    issue as a follow-up comment; if its message section is exactly a known
+    branch name, use it directly instead of relying on the agent to notice.
+    """
+    answer = ""
+    for comment in comments:
+        body = comment.body or ""
+        if INTAKE_REPLY_META_MARKER not in body:
+            continue
+        text = _followup_message_text(body).strip().strip("`")
+        if text in known_branches:
+            answer = text  # keep scanning: the latest reply wins
+    return answer
+
+
+def _followup_message_text(body: str) -> str:
+    lines = body.splitlines()
+    collected: list[str] = []
+    in_message = False
+    for line in lines:
+        if line.strip() in ("## 消息", "## Message"):
+            in_message = True
+            continue
+        if in_message and line.startswith("## "):
+            break
+        if in_message:
+            collected.append(line)
+    return "\n".join(collected)
 
 
 def comment_ids(comments: tuple[GitHubIssueComment, ...]) -> tuple[str, ...]:
