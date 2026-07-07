@@ -132,7 +132,11 @@ def _optional_lark_client(config) -> LarkOpenApiMessengerClient | None:  # type:
     app_secret = os.environ.get(config.lark.app_secret_env)
     if not app_secret:
         return None
-    return LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
+    return LarkOpenApiMessengerClient(
+            app_id=config.lark.app_id,
+            app_secret=app_secret,
+            base_url=config.lark.api_base_url,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -314,7 +318,11 @@ def main(argv: list[str] | None = None) -> int:
         if not app_secret:
             print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
             return 2
-        lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
+        lark = LarkOpenApiMessengerClient(
+            app_id=config.lark.app_id,
+            app_secret=app_secret,
+            base_url=config.lark.api_base_url,
+        )
         issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
         github = GitHubCliIssuesClient(
             gh=config.github_cli,
@@ -384,7 +392,11 @@ def main(argv: list[str] | None = None) -> int:
             if not app_secret:
                 print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
                 return 2
-            lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
+            lark = LarkOpenApiMessengerClient(
+            app_id=config.lark.app_id,
+            app_secret=app_secret,
+            base_url=config.lark.api_base_url,
+        )
         checks = run_doctor(
             config=config,
             github=GitHubCliIssuesClient(gh=config.github_cli),
@@ -400,7 +412,11 @@ def main(argv: list[str] | None = None) -> int:
         if not app_secret:
             print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
             return 2
-        lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
+        lark = LarkOpenApiMessengerClient(
+            app_id=config.lark.app_id,
+            app_secret=app_secret,
+            base_url=config.lark.api_base_url,
+        )
         issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
         github = GitHubCliIssuesClient(
             gh=config.github_cli,
@@ -465,7 +481,11 @@ def main(argv: list[str] | None = None) -> int:
         if not app_secret:
             print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
             return 2
-        lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
+        lark = LarkOpenApiMessengerClient(
+            app_id=config.lark.app_id,
+            app_secret=app_secret,
+            base_url=config.lark.api_base_url,
+        )
         issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
         github = GitHubCliIssuesClient(
             gh=config.github_cli,
@@ -690,7 +710,11 @@ def main(argv: list[str] | None = None) -> int:
             if not app_secret:
                 print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
                 return 2
-            lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
+            lark = LarkOpenApiMessengerClient(
+            app_id=config.lark.app_id,
+            app_secret=app_secret,
+            base_url=config.lark.api_base_url,
+        )
         issue_number = args.issue
         if issue_number is None:
             if args.event not in ("pr_opened", "pr_merged") or not args.pr:
@@ -748,7 +772,11 @@ def main(argv: list[str] | None = None) -> int:
             if not app_secret:
                 print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
                 return 2
-            lark = LarkOpenApiMessengerClient(app_id=config.lark.app_id, app_secret=app_secret)
+            lark = LarkOpenApiMessengerClient(
+            app_id=config.lark.app_id,
+            app_secret=app_secret,
+            base_url=config.lark.api_base_url,
+        )
         result = reconcile_fix_notifications(
             repo=config.github_repo,
             candidates=candidates,

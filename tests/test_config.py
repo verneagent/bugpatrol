@@ -105,6 +105,60 @@ class ConfigTest(unittest.TestCase):
                 }
             )
 
+    def _minimal_data(self, config, lark_extra: dict | None = None) -> dict:
+        lark = {
+            "chat_id": config.lark.chat_id,
+            "app_id": config.lark.app_id,
+            "app_secret_env": config.lark.app_secret_env,
+            "bot_open_id": config.lark.bot_open_id,
+        }
+        lark.update(lark_extra or {})
+        return {
+            "github_repo": config.github_repo,
+            "lark": lark,
+            "triage_agent": {"runner_labels": list(config.triage_agent.runner_labels)},
+            "prd": {"root_wiki_node": config.prd.root_wiki_node},
+            "intake": {"language": config.intake.language},
+            "issue_field_names": dict(config.issue_field_names),
+        }
+
+    def test_lark_platform_defaults_to_international(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        parsed = parse_project_config(self._minimal_data(config))
+
+        self.assertEqual(parsed.lark.platform, "lark")
+        self.assertEqual(parsed.lark.api_base_url, "https://open.larksuite.com/open-apis")
+        self.assertEqual(
+            parsed.lark.message_url_template,
+            "https://applink.larksuite.com/client/chat/open?openChatId={chat_id}&messageId={message_id}",
+        )
+
+    def test_lark_platform_feishu_switches_api_and_link_domains(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        parsed = parse_project_config(self._minimal_data(config, {"platform": "feishu"}))
+
+        self.assertEqual(parsed.lark.api_base_url, "https://open.feishu.cn/open-apis")
+        self.assertEqual(
+            parsed.lark.message_url_template,
+            "https://applink.feishu.cn/client/chat/open?openChatId={chat_id}&messageId={message_id}",
+        )
+
+    def test_lark_platform_keeps_explicit_message_url_template(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        parsed = parse_project_config(
+            self._minimal_data(
+                config,
+                {"platform": "feishu", "message_url_template": "https://custom.test/{chat_id}/{message_id}"},
+            )
+        )
+
+        self.assertEqual(parsed.lark.message_url_template, "https://custom.test/{chat_id}/{message_id}")
+
+    def test_lark_platform_rejects_unknown_value(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        with self.assertRaisesRegex(ValueError, "lark.platform"):
+            parse_project_config(self._minimal_data(config, {"platform": "wechat"}))
+
     def test_validation_rejects_missing_field(self) -> None:
         config = load_project_config(Path("projects/example.toml"))
         broken = parse_project_config(

@@ -13,6 +13,16 @@ import tomllib
 from bugpatrol.fields import FieldSpec
 
 
+_LARK_PLATFORM_API_BASE_URLS = {
+    "lark": "https://open.larksuite.com/open-apis",
+    "feishu": "https://open.feishu.cn/open-apis",
+}
+_LARK_PLATFORM_APPLINK_DOMAINS = {
+    "lark": "applink.larksuite.com",
+    "feishu": "applink.feishu.cn",
+}
+
+
 @dataclass(frozen=True)
 class LarkConfig:
     chat_id: str
@@ -21,6 +31,18 @@ class LarkConfig:
     bot_open_id: str
     sender_names: dict[str, str] | None = None
     message_url_template: str = ""
+    # "lark" (international) or "feishu" (China); drives API base URL and
+    # the default message link domain.
+    platform: str = "lark"
+
+    @property
+    def api_base_url(self) -> str:
+        return _LARK_PLATFORM_API_BASE_URLS[self.platform]
+
+
+def _default_message_url_template(platform: str) -> str:
+    domain = _LARK_PLATFORM_APPLINK_DOMAINS[platform]
+    return f"https://{domain}/client/chat/open?openChatId={{chat_id}}&messageId={{message_id}}"
 
 
 @dataclass(frozen=True)
@@ -198,6 +220,9 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
         isinstance(key, str) and isinstance(value, str) for key, value in sender_names.items()
     ):
         raise ValueError("lark.sender_names must be a string map")
+    platform = str(lark.get("platform") or "lark")
+    if platform not in _LARK_PLATFORM_API_BASE_URLS:
+        raise ValueError('lark.platform must be "lark" or "feishu"')
 
     return ProjectConfig(
         github_repo=_required_str(data, "github_repo"),
@@ -209,7 +234,9 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             app_secret_env=_required_str(lark, "app_secret_env"),
             bot_open_id=_required_str(lark, "bot_open_id"),
             sender_names=dict(sender_names),
-            message_url_template=str(lark.get("message_url_template") or ""),
+            message_url_template=str(lark.get("message_url_template") or "")
+            or _default_message_url_template(platform),
+            platform=platform,
         ),
         triage_agent=TriageAgentConfig(
             runner_labels=tuple(_required_list(triage_agent, "runner_labels")),

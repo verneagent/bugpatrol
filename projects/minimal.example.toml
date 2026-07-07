@@ -5,6 +5,9 @@ chat_id = "oc_example"
 app_id = "cli_example"
 app_secret_env = "EXAMPLE_LARK_APP_SECRET"
 bot_open_id = "ou_example_bot"
+# Optional: "lark" (international, default) or "feishu" (China).
+# Drives the Open API base URL and the default message link domain.
+# platform = "lark"
 # Optional. Supports {chat_id}, {root_id}, and {message_id}.
 # message_url_template = "https://applink.larksuite.com/client/chat/open?openChatId={chat_id}&messageId={message_id}"
 
