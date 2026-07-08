@@ -15,7 +15,6 @@ from bugpatrol.triage_result import (
     build_triage_dry_run_report,
     parse_triage_metadata,
     parse_triage_result,
-    reject_affected_branch,
     render_triage_summary_lark_message,
     render_needs_info_lark_message,
     render_triage_comment,
@@ -143,86 +142,6 @@ class TriageResultTest(unittest.TestCase):
 
         self.assertEqual(values["Blame"], "可能由 PR #123 的 push token 绑定改动引入")
         self.assertIn("Blame 建议：可能由 PR #123", comment)
-
-    def test_unmatched_affected_branch_degrades_instead_of_failing(self) -> None:
-        data = dict(VALID)
-        data["affected_branch"] = "release-9"
-
-        result = parse_triage_result(data, branch_patterns=("main", "post", "feature-*"))
-
-        self.assertEqual(result.affected_branch, "")
-        self.assertEqual(result.affected_branch_rejected, "release-9")
-        self.assertIn("release-9", render_triage_comment(result))
-        self.assertIn("未采信", render_triage_comment(result))
-
-    def test_rejected_affected_branch_is_never_written_to_fields(self) -> None:
-        base_config = load_project_config(Path("projects/todo-sandbox.toml"))
-        config = replace(
-            base_config,
-            issue_field_names={**base_config.issue_field_names, "Affected branch": "Affected branch"},
-        )
-        data = dict(VALID)
-        data["affected_branch"] = "release-9"
-        result = parse_triage_result(data, branch_patterns=("main",))
-
-        self.assertNotIn("Affected branch", triage_field_values_for_write(result, config=config))
-
-    def test_reject_affected_branch_demotes_value(self) -> None:
-        data = dict(VALID)
-        data["affected_branch"] = "feature-ghost"
-        result = parse_triage_result(data, branch_patterns=("feature-*",))
-
-        rejected = reject_affected_branch(result)
-
-        self.assertEqual(rejected.affected_branch, "")
-        self.assertEqual(rejected.affected_branch_rejected, "feature-ghost")
-
-    def test_affected_branch_matching_pattern_is_accepted(self) -> None:
-        data = dict(VALID)
-        data["affected_branch"] = "feature-login"
-
-        result = parse_triage_result(data, branch_patterns=("main", "post", "feature-*"))
-
-        self.assertEqual(result.affected_branch, "feature-login")
-
-    def test_affected_branch_may_be_empty_when_unknown(self) -> None:
-        result = parse_triage_result(dict(VALID), branch_patterns=("main",))
-
-        self.assertEqual(result.affected_branch, "")
-
-    def test_affected_branch_is_visible_and_written_when_field_is_mapped(self) -> None:
-        base_config = load_project_config(Path("projects/todo-sandbox.toml"))
-        config = replace(
-            base_config,
-            issue_field_names={**base_config.issue_field_names, "Affected branch": "Affected branch"},
-        )
-        data = dict(VALID)
-        data["affected_branch"] = "chat-live"
-        result = parse_triage_result(data, branch_patterns=("main", "chat-live"))
-
-        values = triage_field_values_for_write(result, config=config)
-        comment = render_triage_comment(result)
-
-        self.assertEqual(values["Affected branch"], "chat-live")
-        self.assertIn("影响分支：chat-live", comment)
-
-    def test_affected_branch_not_written_when_field_is_not_mapped(self) -> None:
-        config = load_project_config(Path("projects/todo-sandbox.toml"))
-        config = replace(
-            config,
-            issue_field_names={
-                name: value
-                for name, value in config.issue_field_names.items()
-                if name != "Affected branch"
-            },
-        )
-        data = dict(VALID)
-        data["affected_branch"] = "main"
-        result = parse_triage_result(data)
-
-        values = triage_field_values_for_write(result, config=config)
-
-        self.assertNotIn("Affected branch", values)
 
     def test_apply_triage_result_writes_type_fields_comment_and_assignee(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
@@ -482,111 +401,12 @@ class TriageResultTest(unittest.TestCase):
         self.assertEqual(lark.replies[0].message_id, "om_1")
         self.assertIn("请补充复现账号", lark.replies[0].text)
 
-    def test_apply_asks_branch_in_lark_when_bug_branch_unknown(self) -> None:
-        config = load_project_config(Path("projects/todo-sandbox.toml"))
-        github = FakeGithub()
-        github.issue_body = render_issue_body(
-            IntakeRecord(
-                reporter_name="Reporter",
-                reporter_open_id="ou_1",
-                created_at="2026-07-01T00:00:00Z",
-                chat_id=config.lark.chat_id,
-                root_id="om_root",
-                message_id="om_1",
-                original_text="bug",
-            ),
-            language=config.intake.language,
-        )
-        issue_fields = FakeIssueFields()
-        lark = FakeLarkMessengerClient()
-        result = parse_triage_result(dict(VALID), branch_patterns=config.branches.allowed)
-        self.assertEqual(result.affected_branch, "")
-
-        summary = apply_triage_result(
-            repo=config.github_repo,
-            issue_number=1,
-            config=config,
-            result=result,
-            github=github,  # type: ignore[arg-type]
-            issue_fields=issue_fields,  # type: ignore[arg-type]
-            lark=lark,
-        )
-
-        self.assertTrue(summary.comment_added)
-        self.assertEqual(len(lark.replies), 1)
-        self.assertEqual(lark.replies[0].message_id, "om_1")
-        self.assertIn("影响分支", lark.replies[0].text)
-        metadata = parse_triage_metadata(github.comments[-1])
-        assert metadata is not None
-        self.assertTrue(metadata["branch_question_sent"])
-
-    def test_apply_asks_branch_only_once_across_retriage_rounds(self) -> None:
-        config = load_project_config(Path("projects/todo-sandbox.toml"))
-        github = FakeGithub()
-        github.issue_body = managed_issue_body()
-        issue_fields = FakeIssueFields()
-        lark = FakeLarkMessengerClient()
-        first_result = parse_triage_result(dict(VALID))
-        data = dict(VALID)
-        data["priority"] = "Medium"
-        second_result = parse_triage_result(data)
-
-        apply_triage_result(
-            repo=config.github_repo,
-            issue_number=1,
-            config=config,
-            result=first_result,
-            github=github,  # type: ignore[arg-type]
-            issue_fields=issue_fields,  # type: ignore[arg-type]
-            lark=lark,
-        )
-        apply_triage_result(
-            repo=config.github_repo,
-            issue_number=1,
-            config=config,
-            result=second_result,
-            github=github,  # type: ignore[arg-type]
-            issue_fields=issue_fields,  # type: ignore[arg-type]
-            lark=lark,
-        )
-
-        self.assertEqual(len(lark.replies), 2)
-        self.assertIn("请在本话题回复", lark.replies[0].text)
-        self.assertNotIn("请在本话题回复", lark.replies[1].text)
-
-    def test_apply_does_not_ask_branch_when_branch_known_or_not_bug(self) -> None:
-        config = load_project_config(Path("projects/todo-sandbox.toml"))
-        for override in ({"affected_branch": "main"}, {"issue_type": "Task"}):
-            github = FakeGithub()
-            github.issue_body = managed_issue_body()
-            issue_fields = FakeIssueFields()
-            lark = FakeLarkMessengerClient()
-            data = dict(VALID)
-            data.update(override)
-            result = parse_triage_result(data, branch_patterns=("main",))
-
-            apply_triage_result(
-                repo=config.github_repo,
-                issue_number=1,
-                config=config,
-                result=result,
-                github=github,  # type: ignore[arg-type]
-                issue_fields=issue_fields,  # type: ignore[arg-type]
-                lark=lark,
-            )
-
-            self.assertEqual(len(lark.replies), 1, override)
-            self.assertIn("分诊完成", lark.replies[0].text)
-            self.assertNotIn("请在本话题回复", lark.replies[0].text, override)
-
-    def test_render_triage_summary_lark_message_includes_fields_and_branch_ask(self) -> None:
+    def test_render_triage_summary_lark_message_includes_fields(self) -> None:
         result = parse_triage_result(dict(VALID))
         message = render_triage_summary_lark_message(
             issue_number=9,
             issue_url="https://github.test/o/r/issues/9",
             result=result,
-            ask_branch=True,
-            branch_patterns=("main", "post", "feature-*"),
         )
 
         self.assertIn("#9", message)
@@ -595,21 +415,6 @@ class TriageResultTest(unittest.TestCase):
         self.assertIn("状态：Done", message)
         self.assertIn("优先级：High", message)
         self.assertIn("负责人：garlanddiego", message)
-        self.assertIn("main / post / feature-*", message)
-        self.assertIn("请在本话题回复", message)
-
-    def test_render_triage_summary_lark_message_shows_branch_without_ask(self) -> None:
-        data = dict(VALID)
-        data["affected_branch"] = "main"
-        result = parse_triage_result(data, branch_patterns=("main",))
-        message = render_triage_summary_lark_message(
-            issue_number=9,
-            issue_url="https://github.test/o/r/issues/9",
-            result=result,
-        )
-
-        self.assertIn("影响分支：main", message)
-        self.assertNotIn("请在本话题回复", message)
 
     def test_render_needs_info_lark_message_lists_questions(self) -> None:
         message = render_needs_info_lark_message(

@@ -600,7 +600,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "apply-triage-result":
         config = load_project_config(args.project_config)
         data = json.loads(args.input.read_text())
-        result = parse_triage_result(data, branch_patterns=config.branches.allowed)
+        result = parse_triage_result(data)
         if args.dry_run:
             report = build_triage_dry_run_report(
                 repo=config.github_repo,
@@ -737,7 +737,6 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=not args.write,
                 github=github,
                 lark=lark,
-                default_branch=config.branches.default,
                 issue_fields=GitHubIssueFieldsClient(gh=config.github_cli),
                 config=config,
             )
@@ -783,7 +782,6 @@ def main(argv: list[str] | None = None) -> int:
             github=GitHubCliIssuesClient(gh=config.github_cli),
             lark=lark,
             dry_run=not args.write,
-            default_branch=config.branches.default,
             issue_fields=GitHubIssueFieldsClient(gh=config.github_cli),
             config=config,
         )

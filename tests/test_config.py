@@ -73,38 +73,6 @@ class ConfigTest(unittest.TestCase):
                 config = load_project_config(path)
                 config.validate_against(default_field_specs())
 
-    def test_branches_default_to_main_when_section_missing(self) -> None:
-        config = load_project_config(Path("projects/example.toml"))
-
-        self.assertEqual(config.branches.default, "main")
-        self.assertEqual(config.branches.allowed, ("main",))
-
-    def test_full_example_parses_branch_patterns(self) -> None:
-        config = load_project_config(Path("projects/full.example.toml"))
-
-        self.assertEqual(config.branches.default, "main")
-        self.assertEqual(config.branches.allowed, ("main", "post", "chat-live", "feature-*"))
-
-    def test_branches_default_must_match_allowed_patterns(self) -> None:
-        config = load_project_config(Path("projects/example.toml"))
-        with self.assertRaisesRegex(ValueError, "branches.default"):
-            parse_project_config(
-                {
-                    "github_repo": config.github_repo,
-                    "lark": {
-                        "chat_id": config.lark.chat_id,
-                        "app_id": config.lark.app_id,
-                        "app_secret_env": config.lark.app_secret_env,
-                        "bot_open_id": config.lark.bot_open_id,
-                    },
-                    "triage_agent": {"runner_labels": list(config.triage_agent.runner_labels)},
-                    "prd": {"root_wiki_node": config.prd.root_wiki_node},
-                    "intake": {"language": config.intake.language},
-                    "branches": {"default": "develop", "allowed": ["main", "feature-*"]},
-                    "issue_field_names": dict(config.issue_field_names),
-                }
-            )
-
     def _minimal_data(self, config, lark_extra: dict | None = None) -> dict:
         lark = {
             "chat_id": config.lark.chat_id,

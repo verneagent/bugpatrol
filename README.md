@@ -329,34 +329,8 @@ Canonical logical fields:
 | `Triage confidence` | `高`, `中`, `低` |
 | `Owner reason` | `CODEOWNERS`, `Lark @mention`, `Git history`, `Capability fallback`, `Manual` |
 | `Blame` | optional text field for a best-effort person, PR, commit, or code-area regression blame suggestion |
-| `Affected branch` | optional text field for the branch the bug was observed on; constrained by `[branches].allowed` fnmatch patterns in the project config |
 
 Project configs map these logical names to the actual GitHub Issue Field names.
-
-### Branch attribution
-
-Not every bug lives on `main`. Each project config can declare its interesting
-branches with fnmatch patterns:
-
-```toml
-[branches]
-default = "main"
-allowed = ["main", "post", "chat-live", "feature-*"]
-```
-
-The triage agent outputs `affected_branch`, inferred from the reporter's
-natural-language description, build info, or screenshots. When the runner has
-a repo checkout, the schema constrains the value to a closed enum of real
-branches matching the allowed patterns, so the agent cannot fabricate a
-plausible-looking branch. A value that fails validation is demoted to a
-visible "未采信" note in the triage comment instead of failing the run or
-being written to fields. When evidence is insufficient the agent must output
-an empty string instead of guessing `main`.
-
-Fix notifications for `pr_opened`/`pr_merged` are branch-gated: if the PR's
-base branch differs from the issue's affected branch (falling back to
-`branches.default`), the Lark notification is skipped rather than telling the
-reporter "fixed" prematurely.
 
 ## Metadata
 

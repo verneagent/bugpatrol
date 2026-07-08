@@ -32,13 +32,6 @@ base_path = ".github/issue-assets"
 branch = "main"
 remote_url = "https://github.com/example-org/example-assets.git"
 
-# Branch attribution rules for the target project repo.
-# `allowed` entries are fnmatch patterns; triage may only attribute a bug to a
-# branch matching one of them (or leave it unknown).
-[branches]
-default = "main"
-allowed = ["main", "post", "chat-live", "feature-*"]
-
 [media]
 description_command = [
   "python3",
@@ -94,5 +87,3 @@ Evidence = "Evidence"
 "Owner reason" = "Owner reason"
 # Optional text field for best-effort regression blame suggestions.
 # Blame = "Blame"
-# Optional text field for the branch the bug was observed on.
-# "Affected branch" = "Affected branch"

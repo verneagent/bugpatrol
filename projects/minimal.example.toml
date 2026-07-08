@@ -22,11 +22,6 @@ cache_path = "docs/prd"
 [intake]
 language = "zh-CN"
 
-# Optional. Branch attribution rules (fnmatch patterns). Defaults to main only.
-# [branches]
-# default = "main"
-# allowed = ["main", "post", "chat-live", "feature-*"]
-
 [issue_field_names]
 Priority = "Priority"
 "Triage status" = "Triage status"
@@ -43,5 +38,3 @@ Evidence = "Evidence"
 "Owner reason" = "Owner reason"
 # Optional text field for best-effort regression blame suggestions.
 # Blame = "Blame"
-# Optional text field for the branch the bug was observed on.
-# "Affected branch" = "Affected branch"

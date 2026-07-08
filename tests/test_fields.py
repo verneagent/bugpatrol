@@ -28,25 +28,6 @@ class FieldsTest(unittest.TestCase):
 
         self.assertEqual(set(TRIAGE_OUTPUT_SCHEMA["required"]), set(props))
 
-    def test_triage_output_schema_embeds_branch_patterns(self) -> None:
-        schema = triage_output_schema(branch_patterns=("main", "post", "feature-*"))
-
-        description = schema["properties"]["affected_branch"]["description"]
-        self.assertIn("main, post, feature-*", description)
-        # The shared schema constant must not be mutated.
-        self.assertNotIn("feature-*", TRIAGE_OUTPUT_SCHEMA["properties"]["affected_branch"]["description"])
-
-    def test_triage_output_schema_uses_known_branches_as_enum(self) -> None:
-        schema = triage_output_schema(
-            branch_patterns=("main", "feature-*"),
-            known_branches=("main", "feature-login"),
-        )
-
-        self.assertEqual(
-            schema["properties"]["affected_branch"]["enum"],
-            ["main", "feature-login", ""],
-        )
-
     def test_triage_output_schema_uses_known_assignees_as_enum(self) -> None:
         schema = triage_output_schema(known_assignees=("AndyCokeZero", "garlanddiego"))
 

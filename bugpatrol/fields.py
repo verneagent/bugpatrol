@@ -80,7 +80,6 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
         "prd_refs",
         "likely_locations",
         "summary_cn",
-        "affected_branch",
         "blame_suggestion",
         "follow_up_questions",
         "comment_markdown",
@@ -126,14 +125,6 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
             },
         },
         "summary_cn": {"type": "string", "minLength": 1},
-        "affected_branch": {
-            "type": "string",
-            "description": (
-                "Branch the bug was observed on. Must be a concrete branch name matching one of "
-                "the project's allowed branch patterns; use an empty string when the branch "
-                "cannot be determined from the report."
-            ),
-        },
         "blame_suggestion": {
             "type": "string",
             "description": "Best-effort person, team, PR, commit, or code area that may have introduced the issue. Use an empty string when unknown.",
@@ -146,17 +137,12 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
 
 def triage_output_schema(
     *,
-    branch_patterns: tuple[str, ...] = (),
-    known_branches: tuple[str, ...] = (),
     known_assignees: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """Return the triage output schema, specialized with project branch rules.
+    """Return the triage output schema, specialized with project rules.
 
-    When `known_branches` (real branches from the repo checkout) is available,
-    `affected_branch` becomes a closed enum so the agent cannot fabricate a
-    plausible-looking branch name. Otherwise fall back to describing the
-    allowed fnmatch patterns. Same idea for `known_assignees`: a closed enum of
-    GitHub logins keeps the agent from answering with display names.
+    `known_assignees` becomes a closed enum of GitHub logins so the agent
+    cannot answer with display names.
     """
     schema = copy.deepcopy(TRIAGE_OUTPUT_SCHEMA)
     if known_assignees:
@@ -165,21 +151,6 @@ def triage_output_schema(
             "enum": list(known_assignees),
             "description": "GitHub login of the dev owner. Must be one of the listed logins, never a display name.",
         }
-    if known_branches:
-        schema["properties"]["affected_branch"] = {
-            "type": "string",
-            "enum": [*known_branches, ""],
-            "description": (
-                "Branch the bug was observed on. Use an empty string when the branch "
-                "cannot be determined from the report."
-            ),
-        }
-    elif branch_patterns:
-        schema["properties"]["affected_branch"]["description"] = (
-            "Branch the bug was observed on. Must be a concrete branch name matching one of "
-            f"these patterns: {', '.join(branch_patterns)}. Use an empty string when the "
-            "branch cannot be determined from the report."
-        )
     return schema
 
 

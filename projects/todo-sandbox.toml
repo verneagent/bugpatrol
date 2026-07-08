@@ -9,10 +9,6 @@ app_secret_env = "BUGPATROL_TODO_LARK_APP_SECRET"
 bot_open_id = "ou_cef931fa2df05ca6f8ae80cb2f3e6094"
 platform = "lark"
 
-[branches]
-default = "main"
-allowed = ["main", "feature-*"]
-
 [triage_agent]
 # deepseek: claude CLI + DeepSeek Anthropic 端点（需 DEEPSEEK_API_KEY）
 provider = "deepseek"
@@ -58,5 +54,4 @@ Evidence = "Evidence"
 "PRD status" = "PRD status"
 "Triage confidence" = "Triage confidence"
 "Owner reason" = "Owner reason"
-"Affected branch" = "Affected branch"
 Resolution = "Resolution"

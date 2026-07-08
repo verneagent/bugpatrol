@@ -12,7 +12,6 @@ from bugpatrol.config import ProjectConfig
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake import parse_intake_metadata
-from bugpatrol.triage_result import parse_triage_metadata
 
 FIX_META_START = "<!-- BUGPATROL_FIX_META"
 FIX_META_END = "BUGPATROL_FIX_META -->"
@@ -42,7 +41,6 @@ class FixNotificationSummary:
     duplicate_skipped: bool
     lark_sent: bool
     metadata_written: bool
-    branch_mismatch_skipped: bool = False
     resolution_written: bool = False
 
 
@@ -92,7 +90,6 @@ def build_fix_notification(
             repo=repo,
             pr=pr,
             commit=commit,
-            affected_branch=affected_branch_from_comments(comments),
         ),
         chat_id=chat_id,
         message_id=message_id,
@@ -110,27 +107,11 @@ def apply_fix_notification(
     pr: str = "",
     commit: str = "",
     dry_run: bool = True,
-    default_branch: str = "",
     issue_fields: GitHubIssueFieldsClient | None = None,
     config: ProjectConfig | None = None,
 ) -> FixNotificationSummary:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
     comments = github.list_issue_comments(repo=repo, issue_number=issue_number)
-    if default_branch and pr and event in ("pr_opened", "pr_merged"):
-        pull_request = github.get_pull_request(repo=repo, pr=pr)
-        affected = affected_branch_from_comments(comments) or default_branch
-        if pull_request.base_ref and pull_request.base_ref != affected:
-            # The PR landed on a different branch than the bug was observed
-            # on; telling the reporter "fixed" would be premature.
-            return FixNotificationSummary(
-                key=fix_notification_key(repo=repo, issue_number=issue_number, event=event, pr=pr, commit=commit),
-                event=event,
-                dry_run=dry_run,
-                duplicate_skipped=False,
-                lark_sent=False,
-                metadata_written=False,
-                branch_mismatch_skipped=True,
-            )
     notification = build_fix_notification(
         repo=repo,
         issue=issue,
@@ -217,7 +198,6 @@ def render_fix_notification_text(
     repo: str,
     pr: str = "",
     commit: str = "",
-    affected_branch: str = "",
 ) -> str:
     if event == "pr_opened":
         text = f"修复 PR 已创建：{repo}#{_normalize_pr(pr)}\nIssue #{issue.number}: {issue.url}"
@@ -229,8 +209,6 @@ def render_fix_notification_text(
         text = f"该问题已标记修复：Issue #{issue.number}: {issue.url}"
     else:
         raise ValueError(f"unsupported fix event: {event}")
-    if affected_branch:
-        text = f"{text}\n影响分支：{affected_branch}"
     return text
 
 
@@ -252,16 +230,6 @@ def parse_fix_metadata(comment_body: str) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         raise ValueError("fix metadata must be a JSON object")
     return data
-
-
-def affected_branch_from_comments(comments: tuple[GitHubIssueComment, ...]) -> str:
-    """Return the affected branch from the latest triage metadata, if any."""
-    affected = ""
-    for comment in comments:
-        metadata = parse_triage_metadata(comment.body)
-        if metadata is not None and isinstance(metadata.get("affected_branch"), str):
-            affected = str(metadata["affected_branch"])
-    return affected
 
 
 def notified_fix_keys(comments: tuple[GitHubIssueComment, ...]) -> set[str]:
@@ -307,7 +275,6 @@ def reconcile_fix_notifications(
     github: GitHubCliIssuesClient,
     lark: LarkMessengerClient | None = None,
     dry_run: bool = True,
-    default_branch: str = "",
     issue_fields: GitHubIssueFieldsClient | None = None,
     config: ProjectConfig | None = None,
 ) -> FixReconcileResult:
@@ -339,7 +306,6 @@ def reconcile_fix_notifications(
                 github=github,
                 lark=lark,
                 dry_run=dry_run,
-                default_branch=default_branch,
                 issue_fields=issue_fields,
                 config=config,
             )

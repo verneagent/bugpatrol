@@ -12,19 +12,17 @@ from uuid import uuid4
 
 from bugpatrol.agents import AgentInvocation, build_triage_agent_invocation
 from bugpatrol.clients import GitHubIssueComment, LarkMessengerClient
-from bugpatrol.config import ProjectConfig, branch_matches_patterns
+from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import triage_output_schema
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake import require_bugpatrol_managed_issue
-from bugpatrol.intake_workflow import INTAKE_REPLY_META_MARKER
 from bugpatrol.ownership import load_codeowners
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
 from bugpatrol.triage_result import (
     TriageResult,
     apply_triage_result,
     parse_triage_result,
-    reject_affected_branch,
     send_intake_topic_message,
 )
 
@@ -40,7 +38,6 @@ class TriageRunPlan:
     output_path: Path
     invocation: AgentInvocation
     context_comment_ids: tuple[str, ...] = ()
-    known_branches: tuple[str, ...] = ()
     known_assignees: tuple[str, ...] = ()
 
 
@@ -67,15 +64,10 @@ def prepare_triage_run(
     schema_path = output_dir / "triage.schema.json"
     output_path = output_dir / "triage-output.json"
     context_path.write_text(render_triage_context_markdown(context))
-    known_branches = list_matching_repo_branches(repo_path, patterns=config.branches.allowed)
     known_assignees = list_known_assignees(repo_path, config=config)
     schema_path.write_text(
         json.dumps(
-            triage_output_schema(
-                branch_patterns=config.branches.allowed,
-                known_branches=known_branches,
-                known_assignees=known_assignees,
-            ),
+            triage_output_schema(known_assignees=known_assignees),
             ensure_ascii=False,
             indent=2,
         )
@@ -94,12 +86,8 @@ def prepare_triage_run(
         output_path=output_path,
         context_comment_ids=comment_ids(comments),
         invocation=invocation,
-        known_branches=known_branches,
         known_assignees=known_assignees,
     )
-
-
-MAX_KNOWN_BRANCHES = 50
 
 
 def list_known_assignees(repo_path: Path, *, config: ProjectConfig) -> tuple[str, ...]:
@@ -122,41 +110,6 @@ def list_known_assignees(repo_path: Path, *, config: ProjectConfig) -> tuple[str
             if handle and "/" not in handle:
                 logins.add(handle)
     return tuple(sorted(logins))
-
-
-def list_matching_repo_branches(repo_path: Path, *, patterns: tuple[str, ...]) -> tuple[str, ...]:
-    """Return real branches of the repo checkout that match the allowed patterns.
-
-    Best-effort: when `repo_path` is not a git repository (e.g. a runner that
-    only materializes the PRD cache), return () and rely on pattern-based
-    validation instead.
-    """
-    completed = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repo_path),
-            "for-each-ref",
-            "--format=%(refname:short)",
-            "refs/heads",
-            "refs/remotes/origin",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if completed.returncode != 0:
-        return ()
-    branches: list[str] = []
-    for line in completed.stdout.splitlines():
-        name = line.strip()
-        if name.startswith("origin/"):
-            name = name[len("origin/") :]
-        if not name or name == "HEAD" or name in branches:
-            continue
-        if branch_matches_patterns(name, patterns):
-            branches.append(name)
-    return tuple(sorted(branches)[:MAX_KNOWN_BRANCHES])
 
 
 def execute_triage_run(
@@ -215,10 +168,7 @@ def execute_triage_run(
             lark=lark,
         )
         raise RuntimeError("triage agent exited 0 but produced no output file")
-    result = parse_triage_result(
-        json.loads(plan.output_path.read_text()),
-        branch_patterns=config.branches.allowed,
-    )
+    result = parse_triage_result(json.loads(plan.output_path.read_text()))
     if plan.known_assignees and result.assignee not in plan.known_assignees:
         mark_triage_failed(
             config=config,
@@ -233,14 +183,6 @@ def execute_triage_run(
             ),
         )
         raise RuntimeError(f"triage agent returned unknown assignee {result.assignee!r}")
-    if (
-        result.affected_branch
-        and plan.known_branches
-        and result.affected_branch not in plan.known_branches
-    ):
-        # Pattern-valid but nonexistent branch (agent fabrication): demote it
-        # to a visible rejected value instead of recording false data.
-        result = reject_affected_branch(result)
     current_comments = github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)
     if latest_triage_run_id(current_comments) != run_id:
         mark_triage_superseded(
@@ -253,14 +195,6 @@ def execute_triage_run(
         return
     if comment_ids(current_comments) != plan.context_comment_ids:
         result = mark_result_needs_review(result)
-    if not result.affected_branch:
-        # Reporters answer the branch question with a bare branch name in the
-        # topic; resolve it deterministically instead of trusting the agent.
-        branch_answer = branch_answer_from_comments(
-            current_comments, known_branches=plan.known_branches
-        )
-        if branch_answer:
-            result = replace(result, affected_branch=branch_answer, affected_branch_rejected="")
     apply_triage_result(
         repo=config.github_repo,
         issue_number=issue_number,
@@ -364,44 +298,6 @@ def mark_triage_failed(
             lark=lark,
             text="\n".join(lines),
         )
-
-
-def branch_answer_from_comments(
-    comments: tuple[GitHubIssueComment, ...],
-    *,
-    known_branches: tuple[str, ...],
-) -> str:
-    """Deterministically extract an affected-branch answer from topic replies.
-
-    When the bot asks for the affected branch in the Lark topic, reporters
-    typically reply with just the branch name. That reply is appended to the
-    issue as a follow-up comment; if its message section is exactly a known
-    branch name, use it directly instead of relying on the agent to notice.
-    """
-    answer = ""
-    for comment in comments:
-        body = comment.body or ""
-        if INTAKE_REPLY_META_MARKER not in body:
-            continue
-        text = _followup_message_text(body).strip().strip("`")
-        if text in known_branches:
-            answer = text  # keep scanning: the latest reply wins
-    return answer
-
-
-def _followup_message_text(body: str) -> str:
-    lines = body.splitlines()
-    collected: list[str] = []
-    in_message = False
-    for line in lines:
-        if line.strip() in ("## 消息", "## Message"):
-            in_message = True
-            continue
-        if in_message and line.startswith("## "):
-            break
-        if in_message:
-            collected.append(line)
-    return "\n".join(collected)
 
 
 def comment_ids(comments: tuple[GitHubIssueComment, ...]) -> tuple[str, ...]:

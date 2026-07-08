@@ -10,10 +10,6 @@ bot_open_id = "ou_cef931fa2df05ca6f8ae80cb2f3e6094"
 # 团队用 Lark 国际版客户端；驱动 API 域名与话题链接域名（applink.larksuite.com）
 platform = "lark"
 
-[branches]
-default = "main"
-allowed = ["main", "post", "chat-live", "feature-*"]
-
 [triage_agent]
 # deepseek: claude CLI + DeepSeek Anthropic 端点（需 DEEPSEEK_API_KEY）
 provider = "deepseek"
@@ -66,5 +62,4 @@ Evidence = "Evidence"
 "PRD status" = "PRD status"
 "Triage confidence" = "Triage confidence"
 "Owner reason" = "Owner reason"
-"Affected branch" = "Affected branch"
 Resolution = "Resolution"

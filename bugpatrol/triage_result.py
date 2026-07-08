@@ -5,11 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 from bugpatrol.clients import GitHubIssueComment, LarkMessengerClient
-from bugpatrol.config import ProjectConfig, branch_matches_patterns
+from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import AGENT_TRIAGE_STATUS_VALUES, NATIVE_ISSUE_TYPES, default_field_specs, validate_field_value
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
@@ -22,10 +22,6 @@ class TriageResult:
     fields: dict[str, str]
     assignee: str
     comment_markdown: str
-    affected_branch: str = ""
-    # Raw agent value that failed branch validation; kept visible instead of
-    # silently dropped, and never written to issue fields.
-    affected_branch_rejected: str = ""
     blame_suggestion: str = ""
     follow_up_questions: tuple[str, ...] = ()
 
@@ -72,11 +68,7 @@ CORE_DUPLICATE_FIELDS = (
 )
 
 
-def parse_triage_result(
-    data: dict[str, Any],
-    *,
-    branch_patterns: tuple[str, ...] = (),
-) -> TriageResult:
+def parse_triage_result(data: dict[str, Any]) -> TriageResult:
     issue_type = _required_str(data, "issue_type")
     if issue_type not in NATIVE_ISSUE_TYPES:
         raise ValueError(f"invalid issue_type: {issue_type}")
@@ -105,13 +97,6 @@ def parse_triage_result(
     if fields["Triage status"] != "Needs info":
         follow_up_questions = ()
     blame_suggestion = str(data.get("blame_suggestion") or "").strip()
-    affected_branch = str(data.get("affected_branch") or "").strip()
-    affected_branch_rejected = ""
-    if affected_branch and branch_patterns and not branch_matches_patterns(affected_branch, branch_patterns):
-        # A best-effort attribution field must not veto an otherwise valid
-        # triage result: keep the rejected value visible instead of failing.
-        affected_branch_rejected = affected_branch
-        affected_branch = ""
     assignee = _required_str(data, "assignee").lstrip("@")
     comment = _required_str(data, "comment_markdown")
     return TriageResult(
@@ -119,8 +104,6 @@ def parse_triage_result(
         fields=fields,
         assignee=assignee,
         comment_markdown=comment,
-        affected_branch=affected_branch,
-        affected_branch_rejected=affected_branch_rejected,
         blame_suggestion=blame_suggestion,
         follow_up_questions=follow_up_questions,
     )
@@ -160,13 +143,6 @@ def apply_triage_result(
         values=triage_field_values_for_write(result, config=config),
         config=config,
     )
-    ask_branch = (
-        lark is not None
-        and result.issue_type == "Bug"
-        and result.fields.get("Triage status") in ("Needs review", "Done")
-        and not result.affected_branch
-        and not _branch_question_already_sent(existing_comments)
-    )
     if not duplicate:
         if lark is not None and result.fields["Triage status"] == "Needs info":
             _send_lark_follow_up(
@@ -180,11 +156,9 @@ def apply_triage_result(
             _send_lark_triage_summary(
                 repo=repo,
                 issue_number=issue_number,
-                config=config,
                 result=result,
                 github=github,
                 lark=lark,
-                ask_branch=ask_branch,
             )
         github.add_issue_comment(
             repo=repo,
@@ -196,10 +170,7 @@ def apply_triage_result(
                     "issue": issue_number,
                     "result_fingerprint": fingerprint,
                     "decision_key": decision_key,
-                    "affected_branch": result.affected_branch,
-                    "affected_branch_rejected": result.affected_branch_rejected,
                     "blame_suggestion": result.blame_suggestion,
-                    "branch_question_sent": ask_branch,
                 },
             ),
         )
@@ -277,29 +248,8 @@ def append_triage_metadata(comment_markdown: str, metadata: dict[str, Any]) -> s
     )
 
 
-def reject_affected_branch(result: TriageResult) -> TriageResult:
-    """Demote an untrusted affected_branch to a visible rejected value."""
-    return replace(
-        result,
-        affected_branch="",
-        affected_branch_rejected=result.affected_branch,
-    )
-
-
 def render_triage_comment(result: TriageResult) -> str:
     body = result.comment_markdown.rstrip()
-    branch_line = ""
-    if result.affected_branch and "影响分支" not in body and "Affected branch" not in body:
-        branch_line = f"**影响分支：{result.affected_branch}**"
-    elif result.affected_branch_rejected and "影响分支" not in body:
-        branch_line = f"影响分支：`{result.affected_branch_rejected}`（不匹配项目允许的分支规则，未采信）"
-    if branch_line:
-        lines = body.splitlines()
-        if lines and lines[0].lstrip().startswith("#"):
-            # Keep the branch prominent: right under the comment heading.
-            body = "\n".join([lines[0], "", branch_line, *lines[1:]])
-        else:
-            body = f"{branch_line}\n\n{body}"
     if not result.blame_suggestion:
         return body
     if "Blame" in body or "归因" in body:
@@ -313,8 +263,6 @@ def triage_field_values_for_write(
     config: ProjectConfig,
 ) -> dict[str, str]:
     values = dict(result.fields)
-    if result.affected_branch and "Affected branch" in config.issue_field_names:
-        values["Affected branch"] = result.affected_branch
     if result.blame_suggestion and "Blame" in config.issue_field_names:
         values["Blame"] = result.blame_suggestion
     return values
@@ -388,7 +336,6 @@ def _send_lark_follow_up(
             issue_number=issue_number,
             issue_url=issue.url,
             questions=result.follow_up_questions,
-            affected_branch=result.affected_branch,
         ),
     )
 
@@ -397,11 +344,9 @@ def _send_lark_triage_summary(
     *,
     repo: str,
     issue_number: int,
-    config: ProjectConfig,
     result: TriageResult,
     github: GitHubCliIssuesClient,
     lark: LarkMessengerClient,
-    ask_branch: bool = False,
 ) -> None:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
     _reply_to_intake_topic(
@@ -411,8 +356,6 @@ def _send_lark_triage_summary(
             issue_number=issue_number,
             issue_url=issue.url,
             result=result,
-            ask_branch=ask_branch,
-            branch_patterns=config.branches.allowed,
         ),
     )
 
@@ -445,21 +388,11 @@ def _reply_to_intake_topic(
     lark.reply_to_message(chat_id=chat_id, message_id=message_id, text=text)
 
 
-def _branch_question_already_sent(comments: tuple[GitHubIssueComment, ...]) -> bool:
-    for comment in comments:
-        metadata = parse_triage_metadata(comment.body)
-        if metadata is not None and metadata.get("branch_question_sent"):
-            return True
-    return False
-
-
 def render_triage_summary_lark_message(
     *,
     issue_number: int,
     issue_url: str,
     result: TriageResult,
-    ask_branch: bool = False,
-    branch_patterns: tuple[str, ...] = (),
 ) -> str:
     lines = [f"分诊完成，GitHub issue #{issue_number}: {issue_url}"]
     for label, value in (
@@ -467,14 +400,9 @@ def render_triage_summary_lark_message(
         ("状态", result.fields.get("Triage status", "")),
         ("优先级", result.fields.get("Priority", "")),
         ("负责人", result.assignee),
-        ("影响分支", result.affected_branch),
     ):
         if value:
             lines.append(f"{label}：{value}")
-    if ask_branch:
-        hint = f"（如 {' / '.join(branch_patterns)}）" if branch_patterns else ""
-        lines.append("")
-        lines.append(f"未能从现有信息判断出影响分支，请在本话题回复该问题出现时所用的分支或安装包{hint}，以便修复合入后准确通知。")
     return "\n".join(lines)
 
 
@@ -483,11 +411,8 @@ def render_needs_info_lark_message(
     issue_number: int,
     issue_url: str,
     questions: tuple[str, ...],
-    affected_branch: str = "",
 ) -> str:
     lines = [f"需要补充信息，GitHub issue #{issue_number}: {issue_url}"]
-    if affected_branch:
-        lines.append(f"影响分支：{affected_branch}")
     lines.append("")
     lines.extend(f"{index}. {question}" for index, question in enumerate(questions, start=1))
     return "\n".join(lines)
