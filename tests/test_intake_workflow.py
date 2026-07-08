@@ -165,6 +165,39 @@ class IntakeWorkflowTest(unittest.TestCase):
 
         self.assertEqual(issue_fields.writes, [])
 
+    def test_followup_heals_missing_intake_fields_and_forces_enqueue(self) -> None:
+        # Crash window: issue created but watcher died before writing fields.
+        # The replayed message dedupes into the followup path, which must
+        # backfill the initial fields and enqueue triage even for an ack.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        issue_fields = FakeIssueFields({})
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark, issue_fields=issue_fields)
+
+        workflow.process(make_record(message_id="om_first", original_text="首次上报"))
+        outcome = workflow.process(make_record(message_id="om_second", original_text="收到"))
+
+        self.assertEqual(outcome.action, "updated")
+        self.assertEqual(len(issue_fields.writes), 1)
+        values = issue_fields.writes[0]["values"]
+        self.assertEqual(values["Triage status"], "Pending")
+        self.assertEqual(values["Source"], "Lark")
+        self.assertTrue(outcome.triage_signal.should_enqueue)
+        self.assertEqual(outcome.triage_signal.reason, "healed_missing_fields")
+
+    def test_followup_does_not_heal_when_status_present(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        issue_fields = FakeIssueFields({"Triage status": "Needs info"})
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark, issue_fields=issue_fields)
+
+        workflow.process(make_record(message_id="om_first", original_text="首次上报"))
+        workflow.process(make_record(message_id="om_second", original_text="收到"))
+
+        self.assertEqual(issue_fields.writes, [])
+
     def test_process_deduplicates_create_race_without_commenting(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = RaceGitHubIssuesClient()

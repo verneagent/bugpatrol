@@ -67,6 +67,7 @@ class IntakeWorkflow:
             root_id=record.root_id,
         )
         if existing is not None:
+            healed = self._heal_missing_intake_fields(record=record, issue_number=existing.number)
             comment = render_followup_comment(record, language=self._config.intake.language)
             self._github.add_issue_comment(
                 repo=self._config.github_repo,
@@ -74,6 +75,15 @@ class IntakeWorkflow:
                 body=comment,
             )
             triage_signal = classify_triage_signal("updated", record, self._config.followup_classifier)
+            if healed and not triage_signal.should_enqueue:
+                # The issue was created but crashed before its fields were
+                # written; make sure triage still runs at least once.
+                triage_signal = TriageSignal(
+                    should_enqueue=True,
+                    reason="healed_missing_fields",
+                    material_message_ids=(record.message_id,),
+                    asset_urls=tuple(item.url for item in record.attachments if item.url),
+                )
             self._mark_pending_after_final_status(
                 issue_number=existing.number,
                 triage_signal=triage_signal,
@@ -144,6 +154,30 @@ class IntakeWorkflow:
                 raise
             return f"{text}（原消息已撤回，未发送 Lark 回执）"
         return text
+
+    def _heal_missing_intake_fields(self, *, record: IntakeRecord, issue_number: int) -> bool:
+        """Backfill intake fields lost to a crash between issue create and field write.
+
+        A watcher crash in that window leaves an issue with no Triage status;
+        the replayed message then dedupes into the followup path forever, so
+        this is the only chance to repair the fields.
+        """
+        if self._issue_fields is None:
+            return False
+        github_name = self._config.issue_field_names["Triage status"]
+        values = self._issue_fields.get_issue_field_values(
+            repo=self._config.github_repo,
+            issue_number=issue_number,
+        )
+        if values.get(github_name):
+            return False
+        self._issue_fields.add_issue_field_values(
+            repo=self._config.github_repo,
+            issue_number=issue_number,
+            values=initial_intake_fields(record),
+            config=self._config,
+        )
+        return True
 
     def _mark_pending_after_final_status(self, *, issue_number: int, triage_signal: TriageSignal) -> None:
         # A new topic reply re-enqueues triage; Pending reflects that the issue
