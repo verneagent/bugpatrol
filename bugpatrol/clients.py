@@ -12,6 +12,9 @@ class GitHubIssue:
     url: str
     title: str
     body: str
+    state: str = ""
+    state_reason: str = ""
+    assignees: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

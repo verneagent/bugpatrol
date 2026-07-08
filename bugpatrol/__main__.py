@@ -11,6 +11,7 @@ from pathlib import Path
 from bugpatrol.agents import build_triage_agent_invocation
 from bugpatrol.asset_cleanup import cleanup_asset_repo
 from bugpatrol.backfill import run_lark_backfill
+from bugpatrol.close_audit import audit_issue_close
 from bugpatrol.config import load_project_config
 from bugpatrol.doctor import run_doctor
 from bugpatrol.event_watcher import iter_json_event_lines, run_lark_event_watcher
@@ -263,6 +264,13 @@ def main(argv: list[str] | None = None) -> int:
     notify_fix.add_argument("--pr", default="")
     notify_fix.add_argument("--commit", default="")
     notify_fix.add_argument("--write", action="store_true", help="send Lark notification and write metadata")
+
+    audit_close = sub.add_parser(
+        "audit-issue-close", help="check that a closed-as-completed issue references a fix commit/PR"
+    )
+    audit_close.add_argument("project_config", type=Path)
+    audit_close.add_argument("--issue", type=int, required=True)
+    audit_close.add_argument("--write", action="store_true", help="post nag comment and Lark reply when evidence is missing")
 
     reconcile_fix = sub.add_parser("reconcile-fix-notifications", help="replay missed fix notification events")
     reconcile_fix.add_argument("project_config", type=Path)
@@ -737,8 +745,6 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=not args.write,
                 github=github,
                 lark=lark,
-                issue_fields=GitHubIssueFieldsClient(gh=config.github_cli),
-                config=config,
             )
         except ValueError as error:
             if "BugPatrol Lark intake metadata" not in str(error):
@@ -762,6 +768,31 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(summary.__dict__, ensure_ascii=False))
         return 0
 
+    if args.command == "audit-issue-close":
+        config = load_project_config(args.project_config)
+        github = GitHubCliIssuesClient(gh=config.github_cli)
+        lark = None
+        if args.write:
+            app_secret = os.environ.get(config.lark.app_secret_env)
+            if not app_secret:
+                print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
+                return 2
+            lark = LarkOpenApiMessengerClient(
+                app_id=config.lark.app_id,
+                app_secret=app_secret,
+                base_url=config.lark.api_base_url,
+            )
+        summary = audit_issue_close(
+            repo=config.github_repo,
+            issue_number=args.issue,
+            config=config,
+            github=github,
+            lark=lark,
+            dry_run=not args.write,
+        )
+        print(json.dumps(summary.__dict__, ensure_ascii=False))
+        return 0
+
     if args.command == "reconcile-fix-notifications":
         config = load_project_config(args.project_config)
         candidates = fix_event_candidates_from_json(json.loads(args.input.read_text()))
@@ -782,8 +813,6 @@ def main(argv: list[str] | None = None) -> int:
             github=GitHubCliIssuesClient(gh=config.github_cli),
             lark=lark,
             dry_run=not args.write,
-            issue_fields=GitHubIssueFieldsClient(gh=config.github_cli),
-            config=config,
         )
         print(
             json.dumps(

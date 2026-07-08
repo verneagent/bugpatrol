@@ -10,6 +10,17 @@ bot_open_id = "ou_cef931fa2df05ca6f8ae80cb2f3e6094"
 # 团队用 Lark 国际版客户端；驱动 API 域名与话题链接域名（applink.larksuite.com）
 platform = "lark"
 
+# GitHub login -> Lark open_id，用于分诊/追问消息里真正 @ 到人
+[lark.user_open_ids]
+garlanddiego = "ou_5935e6148d74f4d907c821d151e1bd09"
+wind2star = "ou_d9b2bf738170fabc6f01c03906918a25"
+jerry-emperor = "ou_27beb065e275d58b7bc3b72a4fba3823"
+AndyCokeZero = "ou_5db6d610a1f5fa40cebfc2c297bc81a4"
+naohn42 = "ou_64b0e007a0c85d79a0f1ba1c9b5c74a6"
+Sobit-Riki = "ou_afdd297fa43ac3e34c2389661f39b713"
+TristinMax = "ou_620062e9f017860d0e9676a5268c578b"
+SoxiaLiSA = "ou_a1c691f849e65bf147d32c912bc96345"
+
 [triage_agent]
 # deepseek: claude CLI + DeepSeek Anthropic 端点（需 DEEPSEEK_API_KEY）
 provider = "deepseek"
@@ -62,4 +73,3 @@ Evidence = "Evidence"
 "PRD status" = "PRD status"
 "Triage confidence" = "Triage confidence"
 "Owner reason" = "Owner reason"
-Resolution = "Resolution"

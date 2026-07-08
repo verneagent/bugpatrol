@@ -58,6 +58,9 @@ class FakeGithub:
     def add_assignee(self, **kwargs: object) -> None:
         self.calls.append(("add_assignee", kwargs))
 
+    def close_issue_as_duplicate(self, **kwargs: object) -> None:
+        self.calls.append(("close_issue_as_duplicate", kwargs))
+
     def list_issue_comments(self, **kwargs: object) -> tuple[GitHubIssueComment, ...]:
         self.calls.append(("list_issue_comments", kwargs))
         return tuple(
@@ -416,6 +419,91 @@ class TriageResultTest(unittest.TestCase):
         self.assertIn("优先级：High", message)
         self.assertIn("负责人：garlanddiego", message)
 
+    def test_parse_triage_result_requires_duplicate_of_for_duplicate_verdict(self) -> None:
+        data = dict(VALID)
+        data["triage_verdict"] = "重复"
+
+        with self.assertRaisesRegex(ValueError, "duplicate_of"):
+            parse_triage_result(data)
+
+    def test_parse_triage_result_rejects_duplicate_of_without_duplicate_verdict(self) -> None:
+        data = dict(VALID)
+        data["duplicate_of"] = 5
+
+        with self.assertRaisesRegex(ValueError, "duplicate_of"):
+            parse_triage_result(data)
+
+    def test_parse_triage_result_accepts_duplicate(self) -> None:
+        data = dict(VALID)
+        data["triage_verdict"] = "重复"
+        data["duplicate_of"] = 5
+
+        result = parse_triage_result(data)
+
+        self.assertEqual(result.duplicate_of, 5)
+        self.assertEqual(result.fields["Triage verdict"], "重复")
+
+    def test_apply_duplicate_closes_issue_and_skips_assignee(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        data = dict(VALID)
+        data["triage_verdict"] = "重复"
+        data["duplicate_of"] = 5
+        result = parse_triage_result(data)
+
+        summary = apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+        )
+
+        call_names = [name for name, _ in github.calls]
+        self.assertIn("close_issue_as_duplicate", call_names)
+        self.assertNotIn("add_assignee", call_names)
+        close_kwargs = dict(github.calls[call_names.index("close_issue_as_duplicate")][1])
+        self.assertEqual(close_kwargs["duplicate_of"], 5)
+        self.assertTrue(summary.closed_as_duplicate)
+        self.assertFalse(summary.assignee_written)
+
+    def test_apply_duplicate_rejects_self_reference(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        data = dict(VALID)
+        data["triage_verdict"] = "重复"
+        data["duplicate_of"] = 1
+        result = parse_triage_result(data)
+
+        with self.assertRaisesRegex(ValueError, "different issue"):
+            apply_triage_result(
+                repo=config.github_repo,
+                issue_number=1,
+                config=config,
+                result=result,
+                github=github,  # type: ignore[arg-type]
+                issue_fields=issue_fields,  # type: ignore[arg-type]
+            )
+
+    def test_render_triage_summary_lark_message_for_duplicate(self) -> None:
+        data = dict(VALID)
+        data["triage_verdict"] = "重复"
+        data["duplicate_of"] = 5
+        result = parse_triage_result(data)
+
+        message = render_triage_summary_lark_message(
+            issue_number=9,
+            issue_url="https://github.test/o/r/issues/9",
+            result=result,
+        )
+
+        self.assertIn("重复于 #5", message)
+        self.assertIn("https://github.test/o/r/issues/5", message)
+        self.assertNotIn("负责人", message)
+
     def test_render_needs_info_lark_message_lists_questions(self) -> None:
         message = render_needs_info_lark_message(
             issue_number=7,
@@ -426,6 +514,77 @@ class TriageResultTest(unittest.TestCase):
         self.assertIn("#7", message)
         self.assertIn("1. 问题一", message)
         self.assertIn("2. 问题二", message)
+        self.assertNotIn("<at", message)
+
+    def test_render_needs_info_lark_message_mentions_reporter(self) -> None:
+        message = render_needs_info_lark_message(
+            issue_number=7,
+            issue_url="https://github.test/o/r/issues/7",
+            questions=("问题一",),
+            reporter_open_id="ou_reporter",
+        )
+
+        self.assertIn('<at user_id="ou_reporter"></at>', message)
+
+    def test_render_triage_summary_lark_message_mentions_assignee(self) -> None:
+        result = parse_triage_result(dict(VALID))
+        message = render_triage_summary_lark_message(
+            issue_number=9,
+            issue_url="https://github.test/o/r/issues/9",
+            result=result,
+            assignee_open_id="ou_dev",
+        )
+
+        self.assertIn('负责人：<at user_id="ou_dev">garlanddiego</at>', message)
+
+    def test_apply_needs_info_lark_follow_up_mentions_reporter(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        lark = FakeLarkMessengerClient()
+        data = dict(VALID)
+        data["triage_status"] = "Needs info"
+        data["follow_up_questions"] = ["请补充复现账号"]
+        result = parse_triage_result(data)
+
+        apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+            lark=lark,
+        )
+
+        self.assertEqual(len(lark.replies), 1)
+        self.assertIn('<at user_id="ou_1"></at>', lark.replies[0].text)
+
+    def test_apply_triage_summary_mentions_mapped_assignee(self) -> None:
+        from dataclasses import replace as dc_replace
+
+        base_config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = dc_replace(
+            base_config,
+            lark=dc_replace(base_config.lark, user_open_ids={"garlanddiego": "ou_dev"}),
+        )
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        lark = FakeLarkMessengerClient()
+        result = parse_triage_result(dict(VALID))
+
+        apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+            lark=lark,
+        )
+
+        self.assertEqual(len(lark.replies), 1)
+        self.assertIn('<at user_id="ou_dev">garlanddiego</at>', lark.replies[0].text)
 
 
 def managed_issue_body() -> str:

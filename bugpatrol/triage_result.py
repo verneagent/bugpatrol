@@ -24,6 +24,7 @@ class TriageResult:
     comment_markdown: str
     blame_suggestion: str = ""
     follow_up_questions: tuple[str, ...] = ()
+    duplicate_of: int = 0
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ class TriageApplySummary:
     comment_added: bool
     duplicate_comment_skipped: bool
     result_fingerprint: str
+    closed_as_duplicate: bool = False
 
 
 @dataclass(frozen=True)
@@ -97,6 +99,13 @@ def parse_triage_result(data: dict[str, Any]) -> TriageResult:
     if fields["Triage status"] != "Needs info":
         follow_up_questions = ()
     blame_suggestion = str(data.get("blame_suggestion") or "").strip()
+    duplicate_of = data.get("duplicate_of", 0)
+    if not isinstance(duplicate_of, int) or isinstance(duplicate_of, bool) or duplicate_of < 0:
+        raise ValueError(f"duplicate_of must be a non-negative integer, got: {duplicate_of!r}")
+    if fields["Triage verdict"] == "重复" and duplicate_of == 0:
+        raise ValueError("Triage verdict 重复 requires duplicate_of to name the existing issue")
+    if duplicate_of > 0 and fields["Triage verdict"] != "重复":
+        raise ValueError("duplicate_of is only allowed when Triage verdict is 重复")
     assignee = _required_str(data, "assignee").lstrip("@")
     comment = _required_str(data, "comment_markdown")
     return TriageResult(
@@ -106,6 +115,7 @@ def parse_triage_result(data: dict[str, Any]) -> TriageResult:
         comment_markdown=comment,
         blame_suggestion=blame_suggestion,
         follow_up_questions=follow_up_questions,
+        duplicate_of=duplicate_of,
     )
 
 
@@ -121,6 +131,8 @@ def apply_triage_result(
 ) -> TriageApplySummary:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
     require_bugpatrol_managed_issue(issue)
+    if result.duplicate_of == issue_number:
+        raise ValueError(f"duplicate_of must reference a different issue, got #{result.duplicate_of}")
     fingerprint = triage_result_fingerprint(result)
     decision_key = triage_decision_key(result)
     existing_comments = github.list_issue_comments(repo=repo, issue_number=issue_number)
@@ -159,6 +171,7 @@ def apply_triage_result(
                 result=result,
                 github=github,
                 lark=lark,
+                config=config,
             )
         github.add_issue_comment(
             repo=repo,
@@ -174,14 +187,24 @@ def apply_triage_result(
                 },
             ),
         )
-    github.add_assignee(repo=repo, issue_number=issue_number, assignee=result.assignee)
+    closed_as_duplicate = False
+    if result.duplicate_of:
+        github.close_issue_as_duplicate(
+            repo=repo,
+            issue_number=issue_number,
+            duplicate_of=result.duplicate_of,
+        )
+        closed_as_duplicate = True
+    else:
+        github.add_assignee(repo=repo, issue_number=issue_number, assignee=result.assignee)
     return TriageApplySummary(
         issue_type_written=True,
         fields_written=True,
-        assignee_written=True,
+        assignee_written=not result.duplicate_of,
         comment_added=not duplicate,
         duplicate_comment_skipped=duplicate,
         result_fingerprint=fingerprint,
+        closed_as_duplicate=closed_as_duplicate,
     )
 
 
@@ -230,6 +253,7 @@ def triage_decision_payload(result: TriageResult) -> dict[str, object]:
         "fields": {field: result.fields.get(field, "") for field in CORE_DUPLICATE_FIELDS},
         "assignee": result.assignee,
         "follow_up_questions": result.follow_up_questions,
+        "duplicate_of": result.duplicate_of,
     }
     return payload
 
@@ -329,6 +353,7 @@ def _send_lark_follow_up(
     lark: LarkMessengerClient,
 ) -> None:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
+    metadata = parse_intake_metadata(issue.body or "") or {}
     _reply_to_intake_topic(
         issue_body=issue.body or "",
         lark=lark,
@@ -336,6 +361,7 @@ def _send_lark_follow_up(
             issue_number=issue_number,
             issue_url=issue.url,
             questions=result.follow_up_questions,
+            reporter_open_id=_metadata_str(metadata, "reporter_open_id"),
         ),
     )
 
@@ -347,6 +373,7 @@ def _send_lark_triage_summary(
     result: TriageResult,
     github: GitHubCliIssuesClient,
     lark: LarkMessengerClient,
+    config: ProjectConfig,
 ) -> None:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
     _reply_to_intake_topic(
@@ -356,6 +383,7 @@ def _send_lark_triage_summary(
             issue_number=issue_number,
             issue_url=issue.url,
             result=result,
+            assignee_open_id=(config.lark.user_open_ids or {}).get(result.assignee, ""),
         ),
     )
 
@@ -393,13 +421,21 @@ def render_triage_summary_lark_message(
     issue_number: int,
     issue_url: str,
     result: TriageResult,
+    assignee_open_id: str = "",
 ) -> str:
     lines = [f"分诊完成，GitHub issue #{issue_number}: {issue_url}"]
+    if result.duplicate_of:
+        duplicate_url = f"{issue_url.rsplit('/', 1)[0]}/{result.duplicate_of}"
+        lines.append(f"结论：重复，已关闭。重复于 #{result.duplicate_of}: {duplicate_url}")
+        return "\n".join(lines)
+    assignee = result.assignee
+    if assignee and assignee_open_id:
+        assignee = f'<at user_id="{assignee_open_id}">{result.assignee}</at>'
     for label, value in (
         ("结论", result.fields.get("Triage verdict", "")),
         ("状态", result.fields.get("Triage status", "")),
         ("优先级", result.fields.get("Priority", "")),
-        ("负责人", result.assignee),
+        ("负责人", assignee),
     ):
         if value:
             lines.append(f"{label}：{value}")
@@ -411,8 +447,10 @@ def render_needs_info_lark_message(
     issue_number: int,
     issue_url: str,
     questions: tuple[str, ...],
+    reporter_open_id: str = "",
 ) -> str:
-    lines = [f"需要补充信息，GitHub issue #{issue_number}: {issue_url}"]
+    prefix = f'<at user_id="{reporter_open_id}"></at> ' if reporter_open_id else ""
+    lines = [f"{prefix}需要补充信息，GitHub issue #{issue_number}: {issue_url}"]
     lines.append("")
     lines.extend(f"{index}. {question}" for index, question in enumerate(questions, start=1))
     return "\n".join(lines)

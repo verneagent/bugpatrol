@@ -29,6 +29,8 @@ class LarkConfig:
     app_secret_env: str
     bot_open_id: str
     sender_names: dict[str, str] | None = None
+    # GitHub login -> Lark open_id, used to render real @mentions.
+    user_open_ids: dict[str, str] | None = None
     message_url_template: str = ""
     # "lark" (international) or "feishu" (China); drives API base URL and
     # the default message link domain.
@@ -202,6 +204,11 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
         isinstance(key, str) and isinstance(value, str) for key, value in sender_names.items()
     ):
         raise ValueError("lark.sender_names must be a string map")
+    user_open_ids = lark.get("user_open_ids") or {}
+    if not isinstance(user_open_ids, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in user_open_ids.items()
+    ):
+        raise ValueError("lark.user_open_ids must be a string map")
     platform = str(lark.get("platform") or "lark")
     if platform not in _LARK_PLATFORM_API_BASE_URLS:
         raise ValueError('lark.platform must be "lark" or "feishu"')
@@ -216,6 +223,7 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             app_secret_env=_required_str(lark, "app_secret_env"),
             bot_open_id=_required_str(lark, "bot_open_id"),
             sender_names=dict(sender_names),
+            user_open_ids=dict(user_open_ids),
             message_url_template=str(lark.get("message_url_template") or "")
             or _default_message_url_template(platform),
             platform=platform,

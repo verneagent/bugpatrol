@@ -29,7 +29,7 @@ def default_field_specs() -> dict[str, FieldSpec]:
         FieldSpec("Intake version", ("v2", "manual", "unknown"), "Which intake path created it."),
         FieldSpec(
             "Triage verdict",
-            ("代码 Bug", "PRD 错误", "PRD 缺失", "Case 错误", "信息不足", "预期行为"),
+            ("代码 Bug", "PRD 错误", "PRD 缺失", "Case 错误", "信息不足", "预期行为", "重复"),
             "The product/engineering verdict after triage.",
         ),
         FieldSpec("Platform", ("iOS", "Android", "Web", "Desktop", "多平台", "未知"), "Affected platform."),
@@ -77,6 +77,7 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
         "triage_confidence",
         "assignee",
         "owner_reason",
+        "duplicate_of",
         "prd_refs",
         "likely_locations",
         "summary_cn",
@@ -98,6 +99,11 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
         "triage_confidence": {"type": "string", "enum": list(default_field_specs()["Triage confidence"].values)},
         "assignee": {"type": "string", "minLength": 1},
         "owner_reason": {"type": "string", "enum": list(default_field_specs()["Owner reason"].values)},
+        "duplicate_of": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Existing GitHub issue number this issue duplicates. Use 0 unless triage_verdict is 重复.",
+        },
         "prd_refs": {
             "type": "array",
             "items": {

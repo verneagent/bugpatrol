@@ -190,7 +190,30 @@ class GitHubCliIssuesClient:
             url=str(data["html_url"]),
             title=str(data["title"]),
             body=str(data.get("body") or ""),
+            state=str(data.get("state") or ""),
+            state_reason=str(data.get("state_reason") or ""),
+            assignees=tuple(
+                str(item["login"])
+                for item in data.get("assignees") or ()
+                if isinstance(item, dict) and item.get("login")
+            ),
         )
+
+    def list_issue_timeline(self, *, repo: str, issue_number: int) -> tuple[dict, ...]:
+        result = self._run(
+            [
+                "api",
+                "-H",
+                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                "-H",
+                "Accept: application/vnd.github+json",
+                f"/repos/{repo}/issues/{issue_number}/timeline?per_page=100",
+            ]
+        )
+        data = json.loads(result.stdout)
+        if not isinstance(data, list):
+            raise GitHubCliError(f"unexpected timeline response for {repo}#{issue_number}")
+        return tuple(item for item in data if isinstance(item, dict))
 
     def get_pull_request(self, *, repo: str, pr: str) -> GitHubPullRequest:
         result = self._run(
@@ -261,6 +284,48 @@ class GitHubCliIssuesClient:
                 reason,
                 "--comment",
                 "Closed automatically by bugpatrol live e2e cleanup.",
+            ]
+        )
+
+    def close_issue_as_duplicate(self, *, repo: str, issue_number: int, duplicate_of: int) -> None:
+        owner, name = repo.split("/", 1)
+        result = self._run(
+            [
+                "api",
+                "graphql",
+                "-f",
+                "query=query($owner: String!, $name: String!, $issue: Int!, $duplicate: Int!) {"
+                " repository(owner: $owner, name: $name) {"
+                " issue(number: $issue) { id }"
+                " duplicate: issue(number: $duplicate) { id } } }",
+                "-f",
+                f"owner={owner}",
+                "-f",
+                f"name={name}",
+                "-F",
+                f"issue={issue_number}",
+                "-F",
+                f"duplicate={duplicate_of}",
+            ]
+        )
+        data = json.loads(result.stdout)
+        repository = data.get("data", {}).get("repository") or {}
+        issue_id = (repository.get("issue") or {}).get("id")
+        duplicate_id = (repository.get("duplicate") or {}).get("id")
+        if not isinstance(issue_id, str) or not isinstance(duplicate_id, str):
+            raise GitHubCliError(f"cannot resolve issue node ids for {repo}#{issue_number} / #{duplicate_of}")
+        self._run(
+            [
+                "api",
+                "graphql",
+                "-f",
+                "query=mutation($issue: ID!, $duplicate: ID!) {"
+                " closeIssue(input: {issueId: $issue, stateReason: DUPLICATE, duplicateIssueId: $duplicate}) {"
+                " issue { number state } } }",
+                "-f",
+                f"issue={issue_id}",
+                "-f",
+                f"duplicate={duplicate_id}",
             ]
         )
 
