@@ -618,5 +618,49 @@ def managed_issue_body() -> str:
     )
 
 
+class IntakeTopicReplyTest(unittest.TestCase):
+    def _issue_body(self) -> str:
+        return render_issue_body(
+            IntakeRecord(
+                reporter_name="Diego",
+                reporter_open_id="ou_reporter",
+                created_at="2026-06-30T10:00:00Z",
+                chat_id="oc_chat",
+                root_id="om_root",
+                message_id="om_msg",
+                original_text="发完图片后卡在 thinking",
+                lark_topic_url="https://lark.example/topic/om_root",
+                attachments=(),
+            )
+        )
+
+    def test_tolerates_withdrawn_source_message(self) -> None:
+        from bugpatrol.lark import LarkOpenApiError
+        from bugpatrol.triage_result import _reply_to_intake_topic
+
+        lark = FakeLarkMessengerClient()
+
+        def failing_reply(**kwargs: object) -> None:
+            raise LarkOpenApiError('Lark HTTP 400: {"code":230011,"msg":"The message was withdrawn."}')
+
+        lark.reply_to_message = failing_reply  # type: ignore[method-assign]
+
+        _reply_to_intake_topic(issue_body=self._issue_body(), lark=lark, text="分诊完成")
+
+    def test_reraises_other_lark_errors(self) -> None:
+        from bugpatrol.lark import LarkOpenApiError
+        from bugpatrol.triage_result import _reply_to_intake_topic
+
+        lark = FakeLarkMessengerClient()
+
+        def failing_reply(**kwargs: object) -> None:
+            raise LarkOpenApiError('Lark HTTP 500: {"code":9999,"msg":"boom"}')
+
+        lark.reply_to_message = failing_reply  # type: ignore[method-assign]
+
+        with self.assertRaises(LarkOpenApiError):
+            _reply_to_intake_topic(issue_body=self._issue_body(), lark=lark, text="分诊完成")
+
+
 if __name__ == "__main__":
     unittest.main()

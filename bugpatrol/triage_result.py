@@ -14,6 +14,7 @@ from bugpatrol.fields import AGENT_TRIAGE_STATUS_VALUES, NATIVE_ISSUE_TYPES, def
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake import parse_intake_metadata, require_bugpatrol_managed_issue
+from bugpatrol.lark import is_message_withdrawn_error
 
 
 @dataclass(frozen=True)
@@ -422,7 +423,13 @@ def _reply_to_intake_topic(
     message_id = _metadata_str(metadata, "message_id")
     if not chat_id or not message_id:
         return
-    lark.reply_to_message(chat_id=chat_id, message_id=message_id, text=text)
+    try:
+        lark.reply_to_message(chat_id=chat_id, message_id=message_id, text=text)
+    except Exception as error:
+        # The GitHub side of the run is already applied; a withdrawn source
+        # message must not fail the run over a best-effort Lark notification.
+        if not is_message_withdrawn_error(error):
+            raise
 
 
 def render_triage_summary_lark_message(
