@@ -95,6 +95,7 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
         "likely_locations",
         "summary_cn",
         "blame_suggestion",
+        "suspected_owner",
         "follow_up_questions",
         "comment_markdown",
     ],
@@ -148,7 +149,11 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "Best-effort person, team, PR, commit, or code area that may have introduced the issue. Use an empty string when unknown.",
         },
-        "follow_up_questions": {"type": "array", "items": {"type": "string"}},
+        "suspected_owner": {
+        "type": "string",
+        "description": "GitHub login of the person who most likely introduced the issue (from git history/PR evidence). Not the assignee. Use an empty string when evidence is insufficient.",
+    },
+    "follow_up_questions": {"type": "array", "items": {"type": "string"}},
         "comment_markdown": {"type": "string", "minLength": 1},
     },
 }
@@ -169,6 +174,11 @@ def triage_output_schema(
             "type": "string",
             "enum": list(known_assignees),
             "description": "GitHub login of the dev owner. Must be one of the listed logins, never a display name.",
+        }
+        schema["properties"]["suspected_owner"] = {
+            "type": "string",
+            "enum": [*known_assignees, ""],
+            "description": "GitHub login of the person who most likely introduced the issue. Not the assignee. Use an empty string when evidence is insufficient.",
         }
     return schema
 

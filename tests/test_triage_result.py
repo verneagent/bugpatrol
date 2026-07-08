@@ -130,21 +130,38 @@ class TriageResultTest(unittest.TestCase):
 
         self.assertEqual(result.follow_up_questions, ())
 
-    def test_blame_suggestion_is_visible_and_written_when_field_is_mapped(self) -> None:
+    def test_suspected_owner_is_visible_and_written_when_field_is_mapped(self) -> None:
         base_config = load_project_config(Path("projects/todo-sandbox.toml"))
         config = replace(
             base_config,
-            issue_field_names={**base_config.issue_field_names, "Blame": "Blame"},
+            issue_field_names={**base_config.issue_field_names, "Owner": "Owner"},
         )
         data = dict(VALID)
         data["blame_suggestion"] = "可能由 PR #123 的 push token 绑定改动引入"
+        data["suspected_owner"] = "@AndyCokeZero"
         result = parse_triage_result(data)
 
         values = triage_field_values_for_write(result, config=config)
         comment = render_triage_comment(result)
 
-        self.assertEqual(values["Blame"], "可能由 PR #123 的 push token 绑定改动引入")
-        self.assertIn("Blame 建议：可能由 PR #123", comment)
+        self.assertEqual(result.suspected_owner, "AndyCokeZero")
+        self.assertEqual(values["Owner"], "AndyCokeZero")
+        self.assertIn("疑似引入人（Owner）：AndyCokeZero", comment)
+        self.assertIn("归因线索：可能由 PR #123", comment)
+
+    def test_suspected_owner_not_written_when_empty_or_unmapped(self) -> None:
+        base_config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config_without_owner = replace(
+            base_config,
+            issue_field_names={k: v for k, v in base_config.issue_field_names.items() if k != "Owner"},
+        )
+        data = dict(VALID)
+        data["suspected_owner"] = "AndyCokeZero"
+        result = parse_triage_result(data)
+
+        self.assertNotIn("Owner", triage_field_values_for_write(result, config=config_without_owner))
+        empty = parse_triage_result(dict(VALID))
+        self.assertNotIn("Owner", triage_field_values_for_write(empty, config=base_config))
 
     def test_apply_triage_result_writes_type_fields_comment_and_assignee(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

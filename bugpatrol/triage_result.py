@@ -23,6 +23,7 @@ class TriageResult:
     assignee: str
     comment_markdown: str
     blame_suggestion: str = ""
+    suspected_owner: str = ""
     follow_up_questions: tuple[str, ...] = ()
     duplicate_of: int = 0
 
@@ -99,6 +100,7 @@ def parse_triage_result(data: dict[str, Any]) -> TriageResult:
     if fields["Triage status"] != "Needs info":
         follow_up_questions = ()
     blame_suggestion = str(data.get("blame_suggestion") or "").strip()
+    suspected_owner = str(data.get("suspected_owner") or "").strip().lstrip("@")
     duplicate_of = data.get("duplicate_of", 0)
     if not isinstance(duplicate_of, int) or isinstance(duplicate_of, bool) or duplicate_of < 0:
         raise ValueError(f"duplicate_of must be a non-negative integer, got: {duplicate_of!r}")
@@ -114,6 +116,7 @@ def parse_triage_result(data: dict[str, Any]) -> TriageResult:
         assignee=assignee,
         comment_markdown=comment,
         blame_suggestion=blame_suggestion,
+        suspected_owner=suspected_owner,
         follow_up_questions=follow_up_questions,
         duplicate_of=duplicate_of,
     )
@@ -184,6 +187,7 @@ def apply_triage_result(
                     "result_fingerprint": fingerprint,
                     "decision_key": decision_key,
                     "blame_suggestion": result.blame_suggestion,
+                    "suspected_owner": result.suspected_owner,
                 },
             ),
         )
@@ -274,11 +278,16 @@ def append_triage_metadata(comment_markdown: str, metadata: dict[str, Any]) -> s
 
 def render_triage_comment(result: TriageResult) -> str:
     body = result.comment_markdown.rstrip()
-    if not result.blame_suggestion:
+    if not result.blame_suggestion and not result.suspected_owner:
         return body
     if "Blame" in body or "归因" in body:
         return body
-    return f"{body}\n\nBlame 建议：{result.blame_suggestion}"
+    parts = []
+    if result.suspected_owner:
+        parts.append(f"疑似引入人（Owner）：{result.suspected_owner}")
+    if result.blame_suggestion:
+        parts.append(f"归因线索：{result.blame_suggestion}")
+    return f"{body}\n\n" + "\n".join(parts)
 
 
 def triage_field_values_for_write(
@@ -287,8 +296,8 @@ def triage_field_values_for_write(
     config: ProjectConfig,
 ) -> dict[str, str]:
     values = dict(result.fields)
-    if result.blame_suggestion and "Blame" in config.issue_field_names:
-        values["Blame"] = result.blame_suggestion
+    if result.suspected_owner and "Owner" in config.issue_field_names:
+        values["Owner"] = result.suspected_owner
     return values
 
 
