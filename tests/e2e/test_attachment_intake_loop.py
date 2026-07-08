@@ -224,7 +224,7 @@ class AttachmentIntakeLoopE2ETest(unittest.TestCase):
         self.assertEqual(second.processed, 1)
         self.assertEqual(second.outcomes[0].action, "updated")
         self.assertEqual(second.outcomes[0].triage_signal.reason, "material_followup")
-        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Needs review"})
+        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Pending"})
         self.assertEqual(len(github.created), 1)
         self.assertIn("Lark app (cli_external_reporter)", github.created[0].issue.body)
         self.assertEqual(len(github.created[0].comments), 2)

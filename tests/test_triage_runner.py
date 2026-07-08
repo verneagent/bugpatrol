@@ -169,7 +169,7 @@ class TriageRunnerTest(unittest.TestCase):
         self.assertEqual(issue_fields.writes, [])
         self.assertEqual(github.comments, ["Follow-up comment"])
 
-    def test_execute_triage_run_marks_needs_review_when_comments_changed(self) -> None:
+    def test_execute_triage_run_reports_stale_context_when_comments_changed(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGithub()
         issue_fields = FakeIssueFields()
@@ -209,7 +209,7 @@ class TriageRunnerTest(unittest.TestCase):
 
             with patch("subprocess.run") as run:
                 run.return_value = subprocess.CompletedProcess(["true"], 0)
-                execute_triage_run(
+                status = execute_triage_run(
                     config=config,
                     issue_number=7,
                     plan=plan,
@@ -217,12 +217,46 @@ class TriageRunnerTest(unittest.TestCase):
                     issue_fields=issue_fields,  # type: ignore[arg-type]
                 )
 
-        self.assertEqual(issue_fields.writes[0]["values"], {"Triage status": "Running"})
-        self.assertEqual(issue_fields.writes[1]["values"]["Triage status"], "Needs review")
-        self.assertIn("new issue comments arrived", github.comments[-1])
+        self.assertEqual(status, "stale_context")
+        # Result is not applied: caller retries with fresh context instead.
+        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Running"})
+        self.assertEqual(github.issue_types, [])
         # CI runners hand the agent a never-closing stdin pipe; claude -p
         # blocks on it forever unless stdin is DEVNULL.
         self.assertEqual(run.call_args.kwargs.get("stdin"), subprocess.DEVNULL)
+
+    def test_execute_triage_run_applies_stale_context_on_final_attempt(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "output.json"
+            output.write_text(valid_triage_output())
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=output,
+                invocation=AgentInvocation(provider="codex", command=["true"]),
+                context_comment_ids=("1",),
+            )
+            github.comments.append("New material after context generation")
+
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["true"], 0)
+                status = execute_triage_run(
+                    config=config,
+                    issue_number=7,
+                    plan=plan,
+                    github=github,  # type: ignore[arg-type]
+                    issue_fields=issue_fields,  # type: ignore[arg-type]
+                    accept_stale_context=True,
+                )
+
+        self.assertEqual(status, "applied")
+        self.assertIn("new issue comments kept arriving", github.comments[-1])
+        statuses = [w["values"].get("Triage status") for w in issue_fields.writes if "Triage status" in w["values"]]
+        self.assertNotIn("Needs review", statuses)
 
     def test_execute_triage_run_skips_apply_when_superseded(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
@@ -246,7 +280,7 @@ class TriageRunnerTest(unittest.TestCase):
 
             with patch("bugpatrol.triage_runner.uuid4", return_value="run-old"):
                 with patch("subprocess.run", side_effect=run_agent):
-                    execute_triage_run(
+                    status = execute_triage_run(
                         config=config,
                         issue_number=7,
                         plan=plan,
@@ -254,8 +288,9 @@ class TriageRunnerTest(unittest.TestCase):
                         issue_fields=issue_fields,  # type: ignore[arg-type]
                     )
 
-        self.assertEqual(issue_fields.writes[0]["values"], {"Triage status": "Running"})
-        self.assertEqual(issue_fields.writes[1]["values"], {"Triage status": "Needs review"})
+        self.assertEqual(status, "superseded")
+        # The newer run owns the status field; the superseded run must not touch it.
+        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Running"})
         self.assertEqual(github.issue_types, [])
         self.assertEqual(github.assignees, [])
         self.assertIn("superseded", github.comments[-1])

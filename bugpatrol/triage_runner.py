@@ -120,7 +120,8 @@ def execute_triage_run(
     github: GitHubCliIssuesClient,
     issue_fields: GitHubIssueFieldsClient,
     lark: LarkMessengerClient | None = None,
-) -> None:
+    accept_stale_context: bool = False,
+) -> str:
     issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
     require_bugpatrol_managed_issue(issue)
     run_id = str(uuid4())
@@ -190,11 +191,12 @@ def execute_triage_run(
             issue_number=issue_number,
             run_id=run_id,
             github=github,
-            issue_fields=issue_fields,
         )
-        return
+        return "superseded"
     if comment_ids(current_comments) != plan.context_comment_ids:
-        result = mark_result_needs_review(result)
+        if not accept_stale_context:
+            return "stale_context"
+        result = annotate_result_stale_context(result)
     apply_triage_result(
         repo=config.github_repo,
         issue_number=issue_number,
@@ -204,6 +206,7 @@ def execute_triage_run(
         issue_fields=issue_fields,
         lark=lark,
     )
+    return "applied"
 
 
 def record_triage_run_start(
@@ -248,14 +251,8 @@ def mark_triage_superseded(
     issue_number: int,
     run_id: str,
     github: GitHubCliIssuesClient,
-    issue_fields: GitHubIssueFieldsClient,
 ) -> None:
-    issue_fields.add_issue_field_values(
-        repo=config.github_repo,
-        issue_number=issue_number,
-        values={"Triage status": "Needs review"},
-        config=config,
-    )
+    # The newer run owns the status field; this run only leaves an audit trail.
     github.add_issue_comment(
         repo=config.github_repo,
         issue_number=issue_number,
@@ -333,17 +330,15 @@ def latest_triage_run_id(comments: tuple[GitHubIssueComment, ...]) -> str:
     return latest
 
 
-def mark_result_needs_review(result: TriageResult) -> TriageResult:
-    fields = dict(result.fields)
-    fields["Triage status"] = "Needs review"
+def annotate_result_stale_context(result: TriageResult) -> TriageResult:
     comment = "\n".join(
         [
             result.comment_markdown.rstrip(),
             "",
-            "> BugPatrol note: new issue comments arrived after this triage context was generated. Review before treating this result as final.",
+            "> BugPatrol note: new issue comments kept arriving during triage retries; this result may not reflect the very latest comments.",
         ]
     )
-    return replace(result, fields=fields, comment_markdown=comment)
+    return replace(result, comment_markdown=comment)
 
 
 def render_triage_failed_comment(*, exit_code: int, reason: str = "") -> str:

@@ -74,7 +74,7 @@ class IntakeWorkflow:
                 body=comment,
             )
             triage_signal = classify_triage_signal("updated", record, self._config.followup_classifier)
-            self._mark_needs_review_after_final_status(
+            self._mark_pending_after_final_status(
                 issue_number=existing.number,
                 triage_signal=triage_signal,
             )
@@ -145,7 +145,9 @@ class IntakeWorkflow:
             return f"{text}（原消息已撤回，未发送 Lark 回执）"
         return text
 
-    def _mark_needs_review_after_final_status(self, *, issue_number: int, triage_signal: TriageSignal) -> None:
+    def _mark_pending_after_final_status(self, *, issue_number: int, triage_signal: TriageSignal) -> None:
+        # A new topic reply re-enqueues triage; Pending reflects that the issue
+        # is simply waiting for the next run — no human review needed.
         if self._issue_fields is None or not triage_signal.should_enqueue:
             return
         github_name = self._config.issue_field_names["Triage status"]
@@ -158,7 +160,7 @@ class IntakeWorkflow:
         self._issue_fields.add_issue_field_values(
             repo=self._config.github_repo,
             issue_number=issue_number,
-            values={"Triage status": "Needs review"},
+            values={"Triage status": "Pending"},
             config=self._config,
         )
 

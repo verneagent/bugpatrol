@@ -649,21 +649,31 @@ def main(argv: list[str] | None = None) -> int:
         config = load_project_config(args.project_config)
         github = GitHubCliIssuesClient(gh=config.github_cli)
         issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
-        plan = prepare_triage_run(
-            config=config,
-            issue_number=args.issue,
-            repo_path=args.repo_path,
-            output_dir=args.output_dir,
-            github=github,
-        )
-        if args.execute:
-            execute_triage_run(
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            plan = prepare_triage_run(
+                config=config,
+                issue_number=args.issue,
+                repo_path=args.repo_path,
+                output_dir=args.output_dir,
+                github=github,
+            )
+            if not args.execute:
+                break
+            status = execute_triage_run(
                 config=config,
                 issue_number=args.issue,
                 plan=plan,
                 github=github,
                 issue_fields=issue_fields,
                 lark=_optional_lark_client(config),
+                accept_stale_context=attempt == max_attempts,
+            )
+            if status != "stale_context":
+                break
+            print(
+                f"new comments arrived during triage run (attempt {attempt}); retrying with fresh context",
+                file=sys.stderr,
             )
         print(
             json.dumps(

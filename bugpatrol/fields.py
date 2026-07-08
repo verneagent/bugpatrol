@@ -22,7 +22,7 @@ def default_field_specs() -> dict[str, FieldSpec]:
         FieldSpec("Priority", ("Urgent", "High", "Medium", "Low"), "Impact and urgency."),
         FieldSpec(
             "Triage status",
-            ("Pending", "Running", "Needs info", "Needs review", "Done", "Failed", "Skipped"),
+            ("Pending", "Running", "Needs info", "Done", "Failed", "Skipped"),
             "Automation state for triage.",
         ),
         FieldSpec("Source", ("Lark", "GitHub", "Manual", "Import"), "Where the issue came from."),
@@ -41,7 +41,19 @@ def default_field_specs() -> dict[str, FieldSpec]:
         ),
         FieldSpec(
             "Capability",
-            ("Auth", "Quest", "Buddy", "Match", "Message", "Me", "Contacts", "Notifications", "Unknown"),
+            (
+                "Auth",
+                "Quest",
+                "Buddy",
+                "Match",
+                "Message",
+                "Post",
+                "Live chat",
+                "Me",
+                "Contacts",
+                "Notifications",
+                "Unknown",
+            ),
             "Product capability area.",
         ),
         FieldSpec("Evidence", ("截图", "视频", "日志", "文字描述", "多种", "无"), "Evidence provided."),
@@ -58,7 +70,7 @@ def default_field_specs() -> dict[str, FieldSpec]:
 
 # Terminal states an agent may return. "Pending"/"Running"/"Failed" are
 # watcher/runner lifecycle states and must never come from the agent.
-AGENT_TRIAGE_STATUS_VALUES = ("Needs info", "Needs review", "Done", "Skipped")
+AGENT_TRIAGE_STATUS_VALUES = ("Needs info", "Done", "Skipped")
 
 TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",

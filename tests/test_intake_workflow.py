@@ -140,7 +140,7 @@ class IntakeWorkflowTest(unittest.TestCase):
         self.assertEqual(len(lark.replies), 2)
         self.assertIn("已追加到 GitHub issue #1", lark.replies[1].text)
 
-    def test_material_followup_after_done_marks_needs_review(self) -> None:
+    def test_material_followup_after_done_marks_pending(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGitHubIssuesClient()
         lark = FakeLarkMessengerClient()
@@ -151,9 +151,9 @@ class IntakeWorkflowTest(unittest.TestCase):
         outcome = workflow.process(make_record(message_id="om_second", original_text="补充：安卓也会卡住"))
 
         self.assertEqual(outcome.action, "updated")
-        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Needs review"})
+        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Pending"})
 
-    def test_ack_followup_after_done_does_not_mark_needs_review(self) -> None:
+    def test_ack_followup_after_done_does_not_change_status(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGitHubIssuesClient()
         lark = FakeLarkMessengerClient()
