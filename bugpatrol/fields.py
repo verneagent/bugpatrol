@@ -49,6 +49,7 @@ def default_field_specs() -> dict[str, FieldSpec]:
                 "Message",
                 "Post",
                 "Live chat",
+                "Community",
                 "Me",
                 "Contacts",
                 "Notifications",
