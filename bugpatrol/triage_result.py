@@ -42,6 +42,37 @@ class TriageApplySummary:
 
 
 @dataclass(frozen=True)
+class TriageRunStats:
+    """Wall-clock cost of a triage run, for completion reporting."""
+
+    duration_seconds: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    model: str = ""
+
+
+def _format_duration(seconds: float) -> str:
+    total = int(round(seconds))
+    if total < 60:
+        return f"{total}s"
+    return f"{total // 60}m{total % 60:02d}s"
+
+
+def format_run_stats(stats: TriageRunStats | None) -> str:
+    """One-line 用时/模型/token summary, or "" when nothing to report."""
+    if stats is None:
+        return ""
+    parts: list[str] = []
+    if stats.duration_seconds > 0:
+        parts.append(f"用时 {_format_duration(stats.duration_seconds)}")
+    if stats.model:
+        parts.append(f"模型 {stats.model}")
+    if stats.input_tokens or stats.output_tokens:
+        parts.append(f"token 输入{stats.input_tokens:,}/输出{stats.output_tokens:,}")
+    return " · ".join(parts)
+
+
+@dataclass(frozen=True)
 class TriageFieldChange:
     field: str
     current: str
@@ -133,6 +164,7 @@ def apply_triage_result(
     github: GitHubCliIssuesClient,
     issue_fields: GitHubIssueFieldsClient,
     lark: LarkMessengerClient | None = None,
+    run_stats: TriageRunStats | None = None,
 ) -> TriageApplySummary:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
     require_bugpatrol_managed_issue(issue)
@@ -177,12 +209,13 @@ def apply_triage_result(
                 github=github,
                 lark=lark,
                 config=config,
+                run_stats=run_stats,
             )
         github.add_issue_comment(
             repo=repo,
             issue_number=issue_number,
             body=append_triage_metadata(
-                _with_runner_attribution(render_triage_comment(result)),
+                _with_runner_attribution(render_triage_comment(result), run_stats=run_stats),
                 {
                     "version": 1,
                     "issue": issue_number,
@@ -278,11 +311,20 @@ def append_triage_metadata(comment_markdown: str, metadata: dict[str, Any]) -> s
     )
 
 
-def _with_runner_attribution(comment_markdown: str) -> str:
+def _with_runner_attribution(
+    comment_markdown: str,
+    run_stats: TriageRunStats | None = None,
+) -> str:
+    footer: list[str] = []
     runner = triage_runner_name()
-    if not runner:
+    if runner:
+        footer.append(f"分诊执行机：`{runner}`")
+    stats_line = format_run_stats(run_stats)
+    if stats_line:
+        footer.append(stats_line)
+    if not footer:
         return comment_markdown
-    return f"{comment_markdown.rstrip()}\n\n> 分诊执行机：`{runner}`"
+    return f"{comment_markdown.rstrip()}\n\n> " + "\n> ".join(footer)
 
 
 def triage_runner_name() -> str:
@@ -397,6 +439,7 @@ def _send_lark_triage_summary(
     github: GitHubCliIssuesClient,
     lark: LarkMessengerClient,
     config: ProjectConfig,
+    run_stats: TriageRunStats | None = None,
 ) -> None:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
     _reply_to_intake_topic(
@@ -408,6 +451,7 @@ def _send_lark_triage_summary(
             result=result,
             assignee_open_id=(config.lark.user_open_ids or {}).get(result.assignee, ""),
             runner_name=triage_runner_name(),
+            run_stats=run_stats,
         ),
     )
 
@@ -453,6 +497,7 @@ def render_triage_summary_lark_message(
     result: TriageResult,
     assignee_open_id: str = "",
     runner_name: str = "",
+    run_stats: TriageRunStats | None = None,
 ) -> str:
     lines = [f"分诊完成，GitHub issue [#{issue_number}]({issue_url})"]
     if result.duplicate_of:
@@ -472,6 +517,9 @@ def render_triage_summary_lark_message(
                 lines.append(f"{label}：{value}")
     if runner_name:
         lines.append(f"分诊执行机：{runner_name}")
+    stats_line = format_run_stats(run_stats)
+    if stats_line:
+        lines.append(stats_line)
     return "\n".join(lines)
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,42 @@ class AgentInvocation:
     # Extra environment for the agent process (e.g. third-party endpoint
     # overrides). Merged over os.environ at execution time; never printed.
     env: dict[str, str] = field(default_factory=dict)
+    # Model name actually used, for run-completion reporting.
+    model: str = ""
+
+
+def parse_claude_token_usage(stdout: str) -> tuple[int, int]:
+    """Best-effort (input, output) token counts from `claude -p --output-format json`.
+
+    Returns (0, 0) when the stdout can't be parsed (e.g. codex, or an older
+    CLI). Cache tokens are folded into the input count.
+    """
+    data: object = None
+    text = stdout.strip()
+    if text:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            for line in reversed(text.splitlines()):
+                candidate = line.strip()
+                if candidate.startswith("{") and candidate.endswith("}"):
+                    try:
+                        data = json.loads(candidate)
+                        break
+                    except json.JSONDecodeError:
+                        continue
+    if not isinstance(data, dict):
+        return (0, 0)
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        return (0, 0)
+    input_tokens = 0
+    for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
+        value = usage.get(key)
+        if isinstance(value, int):
+            input_tokens += value
+    output = usage.get("output_tokens")
+    return (input_tokens, output if isinstance(output, int) else 0)
 
 
 def build_triage_agent_invocation(
@@ -72,7 +109,10 @@ def build_triage_agent_invocation(
         }
     else:
         raise ValueError(f"unsupported triage agent provider: {provider}")
-    return AgentInvocation(provider=provider, command=command, env=env)
+    model = config.triage_agent.model
+    if provider == "deepseek" and not model:
+        model = DEEPSEEK_DEFAULT_MODEL
+    return AgentInvocation(provider=provider, command=command, env=env, model=model)
 
 
 def _common_prompt(
@@ -150,7 +190,19 @@ def _build_claude_command(
     )
     # Non-interactive `claude -p` auto-denies file writes by default, which
     # would block writing the output JSON. Runs happen on trusted runners.
-    command = ["claude", "-p", prompt, "--permission-mode", "acceptEdits"]
+    # stream-json (+ --verbose, which it requires under -p) emits the full
+    # turn-by-turn conversation so the runner can persist a turn log for
+    # debugging and parse token usage from the final result event.
+    command = [
+        "claude",
+        "-p",
+        prompt,
+        "--permission-mode",
+        "acceptEdits",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+    ]
     model = config.triage_agent.model or default_model
     if model:
         command.extend(["--model", model])

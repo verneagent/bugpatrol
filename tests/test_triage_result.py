@@ -534,6 +534,35 @@ class TriageResultTest(unittest.TestCase):
         self.assertIn("分诊执行机：minici32g-bugpatrol", message)
         self.assertIn("[#9](https://github.test/o/r/issues/9)", message)
 
+    def test_render_triage_summary_lark_message_includes_run_stats(self) -> None:
+        from bugpatrol.triage_result import TriageRunStats
+
+        message = render_triage_summary_lark_message(
+            issue_number=9,
+            issue_url="https://github.test/o/r/issues/9",
+            result=parse_triage_result(dict(VALID)),
+            run_stats=TriageRunStats(
+                duration_seconds=83.4,
+                input_tokens=12345,
+                output_tokens=678,
+                model="deepseek-v4-pro[1m]",
+            ),
+        )
+
+        self.assertIn("用时 1m23s", message)
+        self.assertIn("模型 deepseek-v4-pro[1m]", message)
+        self.assertIn("token 输入12,345/输出678", message)
+
+    def test_format_run_stats_omits_missing_pieces(self) -> None:
+        from bugpatrol.triage_result import TriageRunStats, format_run_stats
+
+        self.assertEqual(format_run_stats(None), "")
+        self.assertEqual(format_run_stats(TriageRunStats()), "")
+        self.assertEqual(
+            format_run_stats(TriageRunStats(duration_seconds=5)),
+            "用时 5s",
+        )
+
     def test_triage_runner_name_prefers_bugpatrol_env(self) -> None:
         import os
         from unittest.mock import patch as mock_patch

@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import uuid4
 
-from bugpatrol.agents import AgentInvocation, build_triage_agent_invocation
+from bugpatrol.agents import AgentInvocation, build_triage_agent_invocation, parse_claude_token_usage
 from bugpatrol.clients import GitHubIssueComment, LarkMessengerClient
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import triage_output_schema
@@ -21,6 +22,7 @@ from bugpatrol.ownership import load_codeowners
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
 from bugpatrol.triage_result import (
     TriageResult,
+    TriageRunStats,
     apply_triage_result,
     parse_triage_result,
     send_intake_topic_message,
@@ -158,7 +160,26 @@ def execute_triage_run(
     agent_env = {**os.environ, **plan.invocation.env} if plan.invocation.env else None
     # stdin must be closed: in CI runners stdin is a pipe that never reaches
     # EOF, and `claude -p` blocks reading it forever after finishing its work.
-    completed = subprocess.run(plan.invocation.command, check=False, env=agent_env, stdin=subprocess.DEVNULL)
+    started = time.monotonic()
+    completed = subprocess.run(
+        plan.invocation.command,
+        check=False,
+        env=agent_env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+    )
+    duration_seconds = time.monotonic() - started
+    # Persist the turn-by-turn stream so a failed or surprising run can be
+    # analysed on the runner afterwards, and derive token usage from it.
+    _write_turn_log(plan.output_path.parent, completed.stdout, completed.stderr)
+    input_tokens, output_tokens = parse_claude_token_usage(completed.stdout or "")
+    run_stats = TriageRunStats(
+        duration_seconds=duration_seconds,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        model=plan.invocation.model,
+    )
     if completed.returncode != 0:
         mark_triage_failed(
             config=config,
@@ -219,8 +240,16 @@ def execute_triage_run(
         github=github,
         issue_fields=issue_fields,
         lark=lark,
+        run_stats=run_stats,
     )
     return "applied"
+
+
+def _write_turn_log(output_dir: Path, stdout: str | None, stderr: str | None) -> None:
+    if stdout:
+        (output_dir / "agent-turns.jsonl").write_text(stdout)
+    if stderr:
+        (output_dir / "agent-stderr.log").write_text(stderr)
 
 
 def record_triage_run_start(
