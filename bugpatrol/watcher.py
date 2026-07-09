@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.ledger import JsonMessageLedger, MessageLedger
 from bugpatrol.lease import FileLease
-from bugpatrol.lark import LarkOpenApiMessengerClient
+from bugpatrol.lark import LarkOpenApiError, LarkOpenApiMessengerClient
 from bugpatrol.resources import (
     LocalResourceStore,
     ResourceDescriber,
@@ -25,6 +26,11 @@ from bugpatrol.resources import (
     ResourceTransformer,
 )
 from bugpatrol.triage_queue import CommandTriageDispatcher, TriageRequest, TriageRequestQueue
+
+
+# Transient Lark scan failures tolerated before the watcher gives up and
+# crashes (surfacing a persistent outage to launchd/operators).
+MAX_CONSECUTIVE_SCAN_FAILURES = 10
 
 
 @dataclass(frozen=True)
@@ -130,15 +136,45 @@ def run_polling_watcher(
         lease.acquire()
     try:
         with ThreadPoolExecutor(max_workers=parallel_topics) as executor:
+            consecutive_scan_failures = 0
             while True:
                 iterations += 1
-                scan = scan_topic_batches(
-                    config=config,
-                    lark=lark,
-                    limit=limit,
-                    processed_ledger=ledger,
-                    exclude_roots=frozenset(in_flight),
-                )
+                try:
+                    scan = scan_topic_batches(
+                        config=config,
+                        lark=lark,
+                        limit=limit,
+                        processed_ledger=ledger,
+                        exclude_roots=frozenset(in_flight),
+                    )
+                except LarkOpenApiError as error:
+                    # Transient Lark/network failures (timeouts, expired
+                    # tokens) must not kill the watcher; retry next poll.
+                    # Persistent failures still crash so launchd/operators see
+                    # them instead of an eternally silent loop.
+                    consecutive_scan_failures += 1
+                    if consecutive_scan_failures >= MAX_CONSECUTIVE_SCAN_FAILURES:
+                        raise
+                    print(
+                        f"watch-lark: scan failed ({consecutive_scan_failures}/"
+                        f"{MAX_CONSECUTIVE_SCAN_FAILURES}), retrying next poll: {error}",
+                        file=sys.stderr,
+                    )
+                    if logger is not None:
+                        logger.write(
+                            {
+                                "event": "watch_scan_error",
+                                "iteration": iterations,
+                                "error": str(error),
+                            }
+                        )
+                    if lease is not None:
+                        lease.refresh()
+                    if once or (max_iterations is not None and iterations >= max_iterations):
+                        raise
+                    time.sleep(interval_seconds)
+                    continue
+                consecutive_scan_failures = 0
                 for batch in scan.topics:
                     in_flight[batch.root_key] = executor.submit(
                         process_topic_batch,

@@ -90,7 +90,7 @@ class IntakeWorkflow:
             )
             reply = self._reply_best_effort(
                 record=record,
-                text=f"已追加到 GitHub issue #{existing.number}: {existing.url}",
+                text=f"已追加到 GitHub issue [#{existing.number}]({existing.url})",
             )
             return IntakeOutcome(
                 action="updated",
@@ -110,7 +110,7 @@ class IntakeWorkflow:
         if raced is not None:
             reply = self._reply_best_effort(
                 record=record,
-                text=f"已创建 GitHub issue #{raced.number}: {raced.url}",
+                text=f"已创建 GitHub issue [#{raced.number}]({raced.url})",
             )
             return IntakeOutcome(
                 action="deduplicated",

@@ -138,7 +138,7 @@ class IntakeWorkflowTest(unittest.TestCase):
         self.assertIn("## Lark 话题更新", github.created[0].comments[0])
         self.assertIn("## 消息", github.created[0].comments[0])
         self.assertEqual(len(lark.replies), 2)
-        self.assertIn("已追加到 GitHub issue #1", lark.replies[1].text)
+        self.assertIn("已追加到 GitHub issue [#1](", lark.replies[1].text)
 
     def test_material_followup_after_done_marks_pending(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
@@ -211,7 +211,7 @@ class IntakeWorkflowTest(unittest.TestCase):
         self.assertFalse(outcome.triage_signal.should_enqueue)
         self.assertEqual(github.created, [])
         self.assertEqual(github.comments, [])
-        self.assertIn("已创建 GitHub issue #9", lark.replies[0].text)
+        self.assertIn("已创建 GitHub issue [#9](", lark.replies[0].text)
 
     def test_rejects_records_from_unconfigured_chat(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

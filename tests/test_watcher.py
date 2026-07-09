@@ -11,10 +11,10 @@ from bugpatrol.backfill import BackfillEvent, TopicResult
 from bugpatrol.config import load_project_config
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lease import FileLease, LeaseHeldError
-from bugpatrol.lark import LarkMessage
+from bugpatrol.lark import LarkMessage, LarkOpenApiError
 from bugpatrol.testing.fakes import FakeGitHubIssuesClient, FakeLarkMessengerClient
 from bugpatrol.triage_queue import TriageRequest, TriageRequestQueue
-from bugpatrol.watcher import dispatch_due_triage, run_polling_watcher
+from bugpatrol.watcher import MAX_CONSECUTIVE_SCAN_FAILURES, dispatch_due_triage, run_polling_watcher
 
 
 class FakeHistoryLark(FakeLarkMessengerClient):
@@ -50,7 +50,54 @@ class FakeTwoTopicLark(FakeLarkMessengerClient):
         ]
 
 
+class FlakyThenHealthyLark(FakeHistoryLark):
+    def __init__(self, *, failures: int) -> None:
+        super().__init__()
+        self._failures = failures
+        self.scan_calls = 0
+
+    def list_chat_messages(self, *, chat_id: str, limit: int = 20) -> list[LarkMessage]:
+        self.scan_calls += 1
+        if self.scan_calls <= self._failures:
+            raise LarkOpenApiError("Lark request failed: <urlopen error [Errno 60] Operation timed out>")
+        return super().list_chat_messages(chat_id=chat_id, limit=limit)
+
+
 class WatcherTest(unittest.TestCase):
+    def test_run_polling_watcher_survives_transient_lark_scan_errors(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FlakyThenHealthyLark(failures=2)
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        result = run_polling_watcher(
+            config=config,
+            lark=lark,  # type: ignore[arg-type]
+            workflow=workflow,
+            max_iterations=3,
+            interval_seconds=0,
+        )
+
+        self.assertEqual(result.iterations, 3)
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(len(github.created), 1)
+
+    def test_run_polling_watcher_gives_up_after_persistent_scan_errors(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FlakyThenHealthyLark(failures=99)
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        with self.assertRaises(LarkOpenApiError):
+            run_polling_watcher(
+                config=config,
+                lark=lark,  # type: ignore[arg-type]
+                workflow=workflow,
+                max_iterations=99,
+                interval_seconds=0,
+            )
+        self.assertEqual(lark.scan_calls, MAX_CONSECUTIVE_SCAN_FAILURES)
+
     def test_run_polling_watcher_once_processes_one_scan(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGitHubIssuesClient()
