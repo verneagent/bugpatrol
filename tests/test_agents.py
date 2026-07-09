@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -8,6 +9,7 @@ from bugpatrol.agents import (
     DEEPSEEK_ANTHROPIC_BASE_URL,
     DEEPSEEK_DEFAULT_MODEL,
     build_triage_agent_invocation,
+    parse_claude_token_usage,
 )
 from bugpatrol.config import load_project_config, parse_project_config
 
@@ -164,6 +166,27 @@ class AgentsTest(unittest.TestCase):
         )
 
         self.assertEqual(invocation.env, {})
+
+
+class ParseClaudeTokenUsageTest(unittest.TestCase):
+    def test_splits_real_input_from_cache(self) -> None:
+        # Shape emitted by the deepseek `result` event in stream-json output.
+        stdout = json.dumps(
+            {
+                "type": "result",
+                "usage": {
+                    "input_tokens": 36705,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 604160,
+                    "output_tokens": 11525,
+                },
+            }
+        )
+        self.assertEqual(parse_claude_token_usage(stdout), (36705, 604160, 11525))
+
+    def test_returns_zeros_when_unparseable(self) -> None:
+        self.assertEqual(parse_claude_token_usage(""), (0, 0, 0))
+        self.assertEqual(parse_claude_token_usage("not json"), (0, 0, 0))
 
 
 if __name__ == "__main__":

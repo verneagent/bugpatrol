@@ -47,6 +47,7 @@ class TriageRunStats:
 
     duration_seconds: float = 0.0
     input_tokens: int = 0
+    cached_input_tokens: int = 0
     output_tokens: int = 0
     model: str = ""
 
@@ -67,8 +68,11 @@ def format_run_stats(stats: TriageRunStats | None) -> str:
         parts.append(f"用时 {_format_duration(stats.duration_seconds)}")
     if stats.model:
         parts.append(f"模型 {stats.model}")
-    if stats.input_tokens or stats.output_tokens:
-        parts.append(f"token 输入{stats.input_tokens:,}/输出{stats.output_tokens:,}")
+    if stats.input_tokens or stats.cached_input_tokens or stats.output_tokens:
+        inp = f"输入{stats.input_tokens:,}"
+        if stats.cached_input_tokens:
+            inp += f"（+cache {stats.cached_input_tokens:,}）"
+        parts.append(f"token {inp}/输出{stats.output_tokens:,}")
     return " · ".join(parts)
 
 

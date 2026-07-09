@@ -544,6 +544,7 @@ class TriageResultTest(unittest.TestCase):
             run_stats=TriageRunStats(
                 duration_seconds=83.4,
                 input_tokens=12345,
+                cached_input_tokens=604160,
                 output_tokens=678,
                 model="deepseek-v4-pro[1m]",
             ),
@@ -551,7 +552,7 @@ class TriageResultTest(unittest.TestCase):
 
         self.assertIn("用时 1m23s", message)
         self.assertIn("模型 deepseek-v4-pro[1m]", message)
-        self.assertIn("token 输入12,345/输出678", message)
+        self.assertIn("token 输入12,345（+cache 604,160）/输出678", message)
 
     def test_format_run_stats_omits_missing_pieces(self) -> None:
         from bugpatrol.triage_result import TriageRunStats, format_run_stats

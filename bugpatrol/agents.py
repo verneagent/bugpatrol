@@ -24,11 +24,13 @@ class AgentInvocation:
     model: str = ""
 
 
-def parse_claude_token_usage(stdout: str) -> tuple[int, int]:
-    """Best-effort (input, output) token counts from `claude -p --output-format json`.
+def parse_claude_token_usage(stdout: str) -> tuple[int, int, int]:
+    """Best-effort (input, cached_input, output) token counts from `claude -p`.
 
-    Returns (0, 0) when the stdout can't be parsed (e.g. codex, or an older
-    CLI). Cache tokens are folded into the input count.
+    ``input`` is the freshly-processed prompt tokens; ``cached_input`` is the
+    cache-creation + cache-read tokens (cheap, reported separately so the real
+    cost is legible). Returns (0, 0, 0) when the stdout can't be parsed (e.g.
+    codex, or an older CLI).
     """
     data: object = None
     text = stdout.strip()
@@ -45,17 +47,18 @@ def parse_claude_token_usage(stdout: str) -> tuple[int, int]:
                     except json.JSONDecodeError:
                         continue
     if not isinstance(data, dict):
-        return (0, 0)
+        return (0, 0, 0)
     usage = data.get("usage")
     if not isinstance(usage, dict):
-        return (0, 0)
-    input_tokens = 0
-    for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
+        return (0, 0, 0)
+
+    def _int(key: str) -> int:
         value = usage.get(key)
-        if isinstance(value, int):
-            input_tokens += value
-    output = usage.get("output_tokens")
-    return (input_tokens, output if isinstance(output, int) else 0)
+        return value if isinstance(value, int) else 0
+
+    input_tokens = _int("input_tokens")
+    cached_input = _int("cache_creation_input_tokens") + _int("cache_read_input_tokens")
+    return (input_tokens, cached_input, _int("output_tokens"))
 
 
 def build_triage_agent_invocation(

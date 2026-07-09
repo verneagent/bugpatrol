@@ -173,10 +173,13 @@ def execute_triage_run(
     # Persist the turn-by-turn stream so a failed or surprising run can be
     # analysed on the runner afterwards, and derive token usage from it.
     _write_turn_log(plan.output_path.parent, completed.stdout, completed.stderr)
-    input_tokens, output_tokens = parse_claude_token_usage(completed.stdout or "")
+    input_tokens, cached_input_tokens, output_tokens = parse_claude_token_usage(
+        completed.stdout or ""
+    )
     run_stats = TriageRunStats(
         duration_seconds=duration_seconds,
         input_tokens=input_tokens,
+        cached_input_tokens=cached_input_tokens,
         output_tokens=output_tokens,
         model=plan.invocation.model,
     )
