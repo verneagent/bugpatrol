@@ -230,6 +230,16 @@ def apply_triage_result(
                 },
             ),
         )
+    elif lark is not None:
+        # Decision unchanged: don't spam a duplicate comment/summary, but still
+        # ping the topic so the reporter knows the run completed (didn't hang).
+        _send_lark_triage_unchanged(
+            repo=repo,
+            issue_number=issue_number,
+            github=github,
+            lark=lark,
+            run_stats=run_stats,
+        )
     closed_as_duplicate = False
     if result.duplicate_of:
         github.close_issue_as_duplicate(
@@ -458,6 +468,43 @@ def _send_lark_triage_summary(
             run_stats=run_stats,
         ),
     )
+
+
+def _send_lark_triage_unchanged(
+    *,
+    repo: str,
+    issue_number: int,
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient,
+    run_stats: TriageRunStats | None = None,
+) -> None:
+    issue = github.get_issue(repo=repo, issue_number=issue_number)
+    _reply_to_intake_topic(
+        issue_body=issue.body or "",
+        lark=lark,
+        text=render_triage_unchanged_lark_message(
+            issue_number=issue_number,
+            issue_url=issue.url,
+            runner_name=triage_runner_name(),
+            run_stats=run_stats,
+        ),
+    )
+
+
+def render_triage_unchanged_lark_message(
+    *,
+    issue_number: int,
+    issue_url: str,
+    runner_name: str = "",
+    run_stats: TriageRunStats | None = None,
+) -> str:
+    lines = [f"分诊完成，结论无变化，GitHub issue [#{issue_number}]({issue_url})"]
+    if runner_name:
+        lines.append(f"分诊执行机：{runner_name}")
+    stats_line = format_run_stats(run_stats)
+    if stats_line:
+        lines.append(stats_line)
+    return "\n".join(lines)
 
 
 def send_intake_topic_message(

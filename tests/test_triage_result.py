@@ -416,10 +416,14 @@ class TriageResultTest(unittest.TestCase):
 
         self.assertTrue(first.comment_added)
         self.assertFalse(second.comment_added)
-        self.assertEqual(len(lark.replies), 1)
+        # First run pings with the follow-up questions; the idempotent second
+        # run still pings so the reporter knows it ran, but with an unchanged note.
+        self.assertEqual(len(lark.replies), 2)
         self.assertEqual(lark.replies[0].chat_id, config.lark.chat_id)
         self.assertEqual(lark.replies[0].message_id, "om_1")
         self.assertIn("请补充复现账号", lark.replies[0].text)
+        self.assertIn("结论无变化", lark.replies[1].text)
+        self.assertEqual(lark.replies[1].message_id, "om_1")
 
     def test_render_triage_summary_lark_message_includes_fields(self) -> None:
         result = parse_triage_result(dict(VALID))
