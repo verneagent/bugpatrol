@@ -668,7 +668,14 @@ def main(argv: list[str] | None = None) -> int:
                 issue_fields=issue_fields,
                 lark=_optional_lark_client(config),
                 accept_stale_context=attempt == max_attempts,
+                final_attempt=attempt == max_attempts,
             )
+            if status == "no_output":
+                print(
+                    f"triage agent produced no output (attempt {attempt}); retrying",
+                    file=sys.stderr,
+                )
+                continue
             if status != "stale_context":
                 break
             print(

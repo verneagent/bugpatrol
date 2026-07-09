@@ -322,6 +322,36 @@ class TriageRunnerTest(unittest.TestCase):
 
         self.assertIn("BugPatrol triage failed", github.comments[-1])
 
+    def test_execute_triage_run_retries_silently_missing_output_before_final_attempt(self) -> None:
+        config = load_project_config(Path("projects/full.example.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=root / "output.json",
+                invocation=AgentInvocation(provider="claude", command=["true"]),
+                context_comment_ids=("1",),
+            )
+
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["true"], 0)
+                status = execute_triage_run(
+                    config=config,
+                    issue_number=7,
+                    plan=plan,
+                    github=github,  # type: ignore[arg-type]
+                    issue_fields=issue_fields,  # type: ignore[arg-type]
+                    final_attempt=False,
+                )
+
+        self.assertEqual(status, "no_output")
+        # No Failed status or failure comment yet: the caller retries.
+        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Running"})
+        self.assertNotIn("BugPatrol triage failed", "".join(github.comments))
+
     def test_render_triage_failed_comment_is_actionable(self) -> None:
         comment = render_triage_failed_comment(exit_code=2)
 

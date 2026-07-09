@@ -121,6 +121,7 @@ def execute_triage_run(
     issue_fields: GitHubIssueFieldsClient,
     lark: LarkMessengerClient | None = None,
     accept_stale_context: bool = False,
+    final_attempt: bool = True,
 ) -> str:
     issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
     require_bugpatrol_managed_issue(issue)
@@ -160,6 +161,10 @@ def execute_triage_run(
         )
         raise RuntimeError(f"triage agent failed with exit {completed.returncode}")
     if not plan.output_path.exists():
+        # Models occasionally end the turn silently without writing the
+        # output file; retry instead of failing the run outright.
+        if not final_attempt:
+            return "no_output"
         mark_triage_failed(
             config=config,
             issue_number=issue_number,
