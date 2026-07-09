@@ -24,6 +24,7 @@ from bugpatrol.triage_result import (
     apply_triage_result,
     parse_triage_result,
     send_intake_topic_message,
+    triage_runner_name,
 )
 
 
@@ -112,6 +113,14 @@ def list_known_assignees(repo_path: Path, *, config: ProjectConfig) -> tuple[str
     return tuple(sorted(logins))
 
 
+def _render_triage_start_message(*, issue_number: int, issue_url: str) -> str:
+    text = f"开始分诊，GitHub issue [#{issue_number}]({issue_url})"
+    runner = triage_runner_name()
+    if runner:
+        text += f"\n分诊执行机：{runner}"
+    return text
+
+
 def execute_triage_run(
     *,
     config: ProjectConfig,
@@ -137,7 +146,7 @@ def execute_triage_run(
             issue_number=issue_number,
             github=github,
             lark=lark,
-            text=f"开始分诊，GitHub issue #{issue_number}: {issue.url}",
+            text=_render_triage_start_message(issue_number=issue_number, issue_url=issue.url),
         )
     record_triage_run_start(
         config=config,
