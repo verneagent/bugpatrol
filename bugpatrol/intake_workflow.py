@@ -127,7 +127,7 @@ class IntakeWorkflow:
         )
         reply = self._reply_best_effort(
             record=record,
-            text=f"已创建 GitHub issue #{issue.number}: {issue.url}",
+            text=f"已创建 GitHub issue [#{issue.number}]({issue.url})",
         )
         return IntakeOutcome(
             action="created",

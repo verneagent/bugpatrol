@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -181,7 +182,7 @@ def apply_triage_result(
             repo=repo,
             issue_number=issue_number,
             body=append_triage_metadata(
-                render_triage_comment(result),
+                _with_runner_attribution(render_triage_comment(result)),
                 {
                     "version": 1,
                     "issue": issue_number,
@@ -275,6 +276,18 @@ def append_triage_metadata(comment_markdown: str, metadata: dict[str, Any]) -> s
         f"{json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2)}\n"
         f"{TRIAGE_META_END}"
     )
+
+
+def _with_runner_attribution(comment_markdown: str) -> str:
+    runner = triage_runner_name()
+    if not runner:
+        return comment_markdown
+    return f"{comment_markdown.rstrip()}\n\n> 分诊执行机：`{runner}`"
+
+
+def triage_runner_name() -> str:
+    """Name of the CI runner executing this triage, for attribution."""
+    return os.environ.get("BUGPATROL_RUNNER_NAME") or os.environ.get("RUNNER_NAME", "")
 
 
 def render_triage_comment(result: TriageResult) -> str:
@@ -394,6 +407,7 @@ def _send_lark_triage_summary(
             issue_url=issue.url,
             result=result,
             assignee_open_id=(config.lark.user_open_ids or {}).get(result.assignee, ""),
+            runner_name=triage_runner_name(),
         ),
     )
 
@@ -438,23 +452,26 @@ def render_triage_summary_lark_message(
     issue_url: str,
     result: TriageResult,
     assignee_open_id: str = "",
+    runner_name: str = "",
 ) -> str:
-    lines = [f"分诊完成，GitHub issue #{issue_number}: {issue_url}"]
+    lines = [f"分诊完成，GitHub issue [#{issue_number}]({issue_url})"]
     if result.duplicate_of:
         duplicate_url = f"{issue_url.rsplit('/', 1)[0]}/{result.duplicate_of}"
-        lines.append(f"结论：重复，已关闭。重复于 #{result.duplicate_of}: {duplicate_url}")
-        return "\n".join(lines)
-    assignee = result.assignee
-    if assignee and assignee_open_id:
-        assignee = f'<at user_id="{assignee_open_id}">{result.assignee}</at>'
-    for label, value in (
-        ("结论", result.fields.get("Triage verdict", "")),
-        ("状态", result.fields.get("Triage status", "")),
-        ("优先级", result.fields.get("Priority", "")),
-        ("负责人", assignee),
-    ):
-        if value:
-            lines.append(f"{label}：{value}")
+        lines.append(f"结论：重复，已关闭。重复于 [#{result.duplicate_of}]({duplicate_url})")
+    else:
+        assignee = result.assignee
+        if assignee and assignee_open_id:
+            assignee = f'<at user_id="{assignee_open_id}">{result.assignee}</at>'
+        for label, value in (
+            ("结论", result.fields.get("Triage verdict", "")),
+            ("状态", result.fields.get("Triage status", "")),
+            ("优先级", result.fields.get("Priority", "")),
+            ("负责人", assignee),
+        ):
+            if value:
+                lines.append(f"{label}：{value}")
+    if runner_name:
+        lines.append(f"分诊执行机：{runner_name}")
     return "\n".join(lines)
 
 
@@ -466,7 +483,7 @@ def render_needs_info_lark_message(
     reporter_open_id: str = "",
 ) -> str:
     prefix = f'<at user_id="{reporter_open_id}"></at> ' if reporter_open_id else ""
-    lines = [f"{prefix}需要补充信息，GitHub issue #{issue_number}: {issue_url}"]
+    lines = [f"{prefix}需要补充信息，GitHub issue [#{issue_number}]({issue_url})"]
     lines.append("")
     lines.extend(f"{index}. {question}" for index, question in enumerate(questions, start=1))
     return "\n".join(lines)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -12,6 +13,32 @@ from uuid import uuid4
 
 class LarkOpenApiError(RuntimeError):
     pass
+
+
+# Markdown link, e.g. [#3890](https://github.com/...). Messages containing one
+# are sent as rich-text ("post") so the link renders as clickable custom text.
+_MD_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
+_AT_TAG_RE = re.compile(r'<at user_id="([^"]+)">([^<]*)</at>')
+
+
+def build_post_content(text: str) -> dict[str, object]:
+    """Convert message text with markdown links / <at> tags to Lark post content."""
+    paragraphs: list[list[dict[str, object]]] = []
+    for line in text.split("\n"):
+        runs: list[dict[str, object]] = []
+        pos = 0
+        for match in re.finditer(f"{_MD_LINK_RE.pattern}|{_AT_TAG_RE.pattern}", line):
+            if match.start() > pos:
+                runs.append({"tag": "text", "text": line[pos : match.start()]})
+            if match.group(1) is not None:
+                runs.append({"tag": "a", "text": match.group(1), "href": match.group(2)})
+            else:
+                runs.append({"tag": "at", "user_id": match.group(3)})
+            pos = match.end()
+        if pos < len(line):
+            runs.append({"tag": "text", "text": line[pos:]})
+        paragraphs.append(runs)
+    return {"zh_cn": {"content": paragraphs}}
 
 
 # Lark error code returned when acting on a withdrawn/recalled message.
@@ -66,6 +93,13 @@ class LarkOpenApiMessengerClient:
 
     def reply_to_message(self, *, chat_id: str, message_id: str, text: str) -> None:
         del chat_id
+        if _MD_LINK_RE.search(text):
+            self._reply_to_message(
+                message_id=message_id,
+                msg_type="post",
+                content=build_post_content(text),
+            )
+            return
         self._reply_to_message(
             message_id=message_id,
             msg_type="text",

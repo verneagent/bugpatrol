@@ -81,7 +81,7 @@ class IntakeWorkflowTest(unittest.TestCase):
         self.assertIn("## Lark 上报", github.created[0].issue.body)
         self.assertIn("## 原始消息", github.created[0].issue.body)
         self.assertEqual(len(lark.replies), 1)
-        self.assertIn("已创建 GitHub issue #1", lark.replies[0].text)
+        self.assertIn("已创建 GitHub issue [#1](", lark.replies[0].text)
 
     def test_process_survives_withdrawn_reply_target(self) -> None:
         from bugpatrol.lark import LarkOpenApiError

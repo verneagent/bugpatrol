@@ -4,10 +4,54 @@ import json
 import unittest
 from unittest.mock import MagicMock, patch
 
-from bugpatrol.lark import LarkOpenApiMessengerClient, parse_lark_message
+from bugpatrol.lark import LarkOpenApiMessengerClient, build_post_content, parse_lark_message
+
+
+class BuildPostContentTest(unittest.TestCase):
+    def test_converts_markdown_links_and_at_tags(self) -> None:
+        text = '<at user_id="ou_1"></at> 需要补充信息，GitHub issue [#3890](https://github.com/o/r/issues/3890)\n\n1. 问题'
+        content = build_post_content(text)
+        paragraphs = content["zh_cn"]["content"]
+        self.assertEqual(len(paragraphs), 3)
+        self.assertEqual(paragraphs[0][0], {"tag": "at", "user_id": "ou_1"})
+        self.assertIn(
+            {"tag": "a", "text": "#3890", "href": "https://github.com/o/r/issues/3890"},
+            paragraphs[0],
+        )
+        self.assertEqual(paragraphs[1], [])
+        self.assertEqual(paragraphs[2], [{"tag": "text", "text": "1. 问题"}])
+
+    def test_plain_text_line_is_single_run(self) -> None:
+        content = build_post_content("hello world")
+        self.assertEqual(content["zh_cn"]["content"], [[{"tag": "text", "text": "hello world"}]])
 
 
 class LarkOpenApiMessengerClientTest(unittest.TestCase):
+    def test_reply_to_message_with_markdown_link_sends_post(self) -> None:
+        client = LarkOpenApiMessengerClient(app_id="app", app_secret="secret")
+
+        with patch("urllib.request.urlopen") as urlopen:
+            token_response = MagicMock()
+            token_response.__enter__.return_value.read.return_value = json.dumps(
+                {"code": 0, "tenant_access_token": "token"}
+            ).encode()
+            reply_response = MagicMock()
+            reply_response.__enter__.return_value.read.return_value = json.dumps({"code": 0}).encode()
+            urlopen.side_effect = [token_response, reply_response]
+
+            client.reply_to_message(
+                chat_id="oc_1",
+                message_id="om_1",
+                text="分诊完成，GitHub issue [#9](https://github.com/o/r/issues/9)",
+            )
+
+        payload = json.loads(urlopen.call_args_list[1].args[0].data.decode())
+        self.assertEqual(payload["msg_type"], "post")
+        content = json.loads(payload["content"])
+        self.assertIn(
+            {"tag": "a", "text": "#9", "href": "https://github.com/o/r/issues/9"},
+            content["zh_cn"]["content"][0],
+        )
     def test_send_chat_message_gets_token_and_posts_text(self) -> None:
         client = LarkOpenApiMessengerClient(app_id="app", app_secret="secret")
 

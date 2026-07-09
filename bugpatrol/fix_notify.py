@@ -184,14 +184,15 @@ def render_fix_notification_text(
     pr: str = "",
     commit: str = "",
 ) -> str:
+    issue_link = f"Issue [#{issue.number}]({issue.url})"
     if event == "pr_opened":
-        text = f"修复 PR 已创建：{repo}#{_normalize_pr(pr)}\nIssue #{issue.number}: {issue.url}"
+        text = f"修复 PR 已创建：{repo}#{_normalize_pr(pr)}\n{issue_link}"
     elif event == "pr_merged":
-        text = f"修复 PR 已合并：{repo}#{_normalize_pr(pr)}\nIssue #{issue.number}: {issue.url}"
+        text = f"修复 PR 已合并：{repo}#{_normalize_pr(pr)}\n{issue_link}"
     elif event == "commit_linked":
-        text = f"关联修复 commit：{repo}@{commit}\nIssue #{issue.number}: {issue.url}"
+        text = f"关联修复 commit：{repo}@{commit}\n{issue_link}"
     elif event == "issue_fixed":
-        text = f"该问题已标记修复：Issue #{issue.number}: {issue.url}"
+        text = f"该问题已标记修复：{issue_link}"
     else:
         raise ValueError(f"unsupported fix event: {event}")
     return text

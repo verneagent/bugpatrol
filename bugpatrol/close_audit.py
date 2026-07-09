@@ -160,6 +160,6 @@ def _render_nag_lark_text(*, issue, config: ProjectConfig) -> str:
         if open_id
     )
     return (
-        f"{mentions}Issue #{issue.number} 被标记为已修复关闭，但没有关联修复 commit/PR，"
-        f"请在 issue 里补充修复出处：{issue.url}"
+        f"{mentions}Issue [#{issue.number}]({issue.url}) 被标记为已修复关闭，"
+        f"但没有关联修复 commit/PR，请在 issue 里补充修复出处。"
     )

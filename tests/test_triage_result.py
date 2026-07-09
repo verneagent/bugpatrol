@@ -517,9 +517,35 @@ class TriageResultTest(unittest.TestCase):
             result=result,
         )
 
-        self.assertIn("重复于 #5", message)
+        self.assertIn("重复于 [#5](", message)
         self.assertIn("https://github.test/o/r/issues/5", message)
         self.assertNotIn("负责人", message)
+
+    def test_render_triage_summary_lark_message_includes_runner_name(self) -> None:
+        result = parse_triage_result(dict(VALID))
+
+        message = render_triage_summary_lark_message(
+            issue_number=9,
+            issue_url="https://github.test/o/r/issues/9",
+            result=result,
+            runner_name="minici32g-bugpatrol",
+        )
+
+        self.assertIn("分诊执行机：minici32g-bugpatrol", message)
+        self.assertIn("[#9](https://github.test/o/r/issues/9)", message)
+
+    def test_triage_runner_name_prefers_bugpatrol_env(self) -> None:
+        import os
+        from unittest.mock import patch as mock_patch
+
+        from bugpatrol.triage_result import triage_runner_name
+
+        with mock_patch.dict(os.environ, {"RUNNER_NAME": "gh-runner", "BUGPATROL_RUNNER_NAME": "custom"}):
+            self.assertEqual(triage_runner_name(), "custom")
+        env = {k: v for k, v in os.environ.items() if k != "BUGPATROL_RUNNER_NAME"}
+        env["RUNNER_NAME"] = "gh-runner"
+        with mock_patch.dict(os.environ, env, clear=True):
+            self.assertEqual(triage_runner_name(), "gh-runner")
 
     def test_render_needs_info_lark_message_lists_questions(self) -> None:
         message = render_needs_info_lark_message(
