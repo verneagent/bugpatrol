@@ -87,7 +87,10 @@ class TriageRunnerTest(unittest.TestCase):
 
             self.assertTrue(plan.context_path.exists())
             self.assertTrue(plan.schema_path.exists())
-            self.assertEqual(plan.output_path, output_dir / "triage-output.json")
+            # Paths handed to the agent are resolved to absolute (it runs with
+            # cwd set to the checkout, not the runner workspace).
+            self.assertEqual(plan.output_path, output_dir.resolve() / "triage-output.json")
+            self.assertEqual(plan.agent_cwd, root.resolve())
             self.assertIn("Todo empty state missing", plan.context_path.read_text())
             self.assertIn("Follow-up comment", plan.context_path.read_text())
             self.assertIn("triage-context.md", plan.invocation.command[-1])

@@ -54,6 +54,10 @@ class TriageRunPlan:
     schema_path: Path
     output_path: Path
     invocation: AgentInvocation
+    # Working directory for the agent subprocess: the repo checkout (main or a
+    # branch worktree), so the agent reads CODEOWNERS/source/git of the right
+    # branch in-place. None keeps the runner's own cwd (used by unit tests).
+    agent_cwd: Path | None = None
     context_comment_ids: tuple[str, ...] = ()
     known_assignees: tuple[str, ...] = ()
     # Human-facing note about which branch was analyzed (empty for main), shown
@@ -74,6 +78,12 @@ def prepare_triage_run(
     issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
     require_bugpatrol_managed_issue(issue)
     output_dir.mkdir(parents=True, exist_ok=True)
+    # The agent runs with cwd=repo_path, so every path handed to it must be
+    # absolute (a relative "prompts/triage.zh.md" would resolve against the
+    # checkout, not the runner workspace, and vanish).
+    output_dir = output_dir.resolve()
+    prompt_path = prompt_path.resolve()
+    repo_path = repo_path.resolve()
     comments = github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)
     known_assignees = list_known_assignees(repo_path, config=config)
     context = build_triage_context(
@@ -104,11 +114,15 @@ def prepare_triage_run(
         schema_path=schema_path,
         output_path=output_path,
         context_path=context_path,
+        # Re-admit the runner-side workspace (prompt + output dir) that sits
+        # outside the checkout the agent is cwd'd into.
+        workspace_dirs=(prompt_path.parent, output_dir),
     )
     return TriageRunPlan(
         context_path=context_path,
         schema_path=schema_path,
         output_path=output_path,
+        agent_cwd=repo_path,
         context_comment_ids=comment_ids(comments),
         invocation=invocation,
         known_assignees=known_assignees,
@@ -236,6 +250,7 @@ def execute_triage_run(
         plan.invocation.command,
         check=False,
         env=agent_env,
+        cwd=plan.agent_cwd,
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,

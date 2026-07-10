@@ -6,6 +6,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Sequence
 
 from bugpatrol.config import ProjectConfig
 
@@ -69,6 +70,7 @@ def build_triage_agent_invocation(
     schema_path: Path,
     output_path: Path,
     context_path: Path | None = None,
+    workspace_dirs: Sequence[Path] = (),
 ) -> AgentInvocation:
     provider = config.triage_agent.provider
     env: dict[str, str] = {}
@@ -89,6 +91,7 @@ def build_triage_agent_invocation(
             schema_path=schema_path,
             output_path=output_path,
             context_path=context_path,
+            workspace_dirs=workspace_dirs,
         )
     elif provider == "deepseek":
         # DeepSeek's Anthropic-compatible endpoint driven through the claude
@@ -103,6 +106,7 @@ def build_triage_agent_invocation(
             schema_path=schema_path,
             output_path=output_path,
             context_path=context_path,
+            workspace_dirs=workspace_dirs,
             default_model=DEEPSEEK_DEFAULT_MODEL,
         )
         env = {
@@ -177,6 +181,7 @@ def _build_claude_command(
     schema_path: Path,
     output_path: Path,
     context_path: Path | None,
+    workspace_dirs: Sequence[Path] = (),
     default_model: str = "",
 ) -> list[str]:
     prompt = "\n".join(
@@ -191,21 +196,27 @@ def _build_claude_command(
             f"Write final JSON to: {output_path}",
         ]
     )
-    # Non-interactive `claude -p` auto-denies file writes by default, which
-    # would block writing the output JSON. Runs happen on trusted runners.
-    # stream-json (+ --verbose, which it requires under -p) emits the full
-    # turn-by-turn conversation so the runner can persist a turn log for
-    # debugging and parse token usage from the final result event.
+    # The agent runs with cwd set to the repo checkout (main or a branch
+    # worktree), so CODEOWNERS, source, and git history/blame of the right
+    # branch are naturally in scope. `--dangerously-skip-permissions` is
+    # required because non-interactive `claude -p` cannot answer approval
+    # prompts: without it every Bash call (gh dedup search, git log) and the
+    # output-JSON write is auto-denied. Runs happen on trusted runners.
+    # `--add-dir` re-admits the runner-side workspace (prompt/context/schema/
+    # output) that lives outside the checkout. stream-json (+ --verbose, which
+    # it requires under -p) emits the full turn-by-turn conversation so the
+    # runner can persist a turn log and parse token usage from the result event.
     command = [
         "claude",
         "-p",
         prompt,
-        "--permission-mode",
-        "acceptEdits",
+        "--dangerously-skip-permissions",
         "--output-format",
         "stream-json",
         "--verbose",
     ]
+    for workspace in workspace_dirs:
+        command.extend(["--add-dir", str(workspace)])
     model = config.triage_agent.model or default_model
     if model:
         command.extend(["--model", model])

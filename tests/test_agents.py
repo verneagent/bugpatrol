@@ -84,15 +84,23 @@ class AgentsTest(unittest.TestCase):
             schema_path=Path("triage.schema.json"),
             output_path=Path("triage-output.json"),
             context_path=None,
+            workspace_dirs=(Path("/runner/bugpatrol/prompts"), Path("/runner/out")),
         )
 
         self.assertEqual(invocation.provider, "claude")
         self.assertEqual(invocation.command[0], "claude")
-        # Non-interactive `claude -p` must not auto-deny the output file write.
-        self.assertIn("--permission-mode", invocation.command)
+        # Non-interactive `claude -p` cannot answer approval prompts, so the
+        # runner bypasses them wholesale (Bash dedup/git + output write).
+        self.assertIn("--dangerously-skip-permissions", invocation.command)
+        self.assertNotIn("--permission-mode", invocation.command)
+        # Each workspace dir outside the checkout is re-admitted via --add-dir.
         self.assertEqual(
-            invocation.command[invocation.command.index("--permission-mode") + 1],
-            "acceptEdits",
+            [
+                invocation.command[i + 1]
+                for i, token in enumerate(invocation.command)
+                if token == "--add-dir"
+            ],
+            ["/runner/bugpatrol/prompts", "/runner/out"],
         )
 
 
@@ -111,7 +119,7 @@ class AgentsTest(unittest.TestCase):
 
         self.assertEqual(invocation.provider, "deepseek")
         self.assertEqual(invocation.command[0], "claude")
-        self.assertIn("--permission-mode", invocation.command)
+        self.assertIn("--dangerously-skip-permissions", invocation.command)
         self.assertEqual(
             invocation.command[invocation.command.index("--model") + 1],
             DEEPSEEK_DEFAULT_MODEL,
