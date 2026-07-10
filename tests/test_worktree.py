@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from bugpatrol.worktree import resolve_triage_branch
+from bugpatrol.worktree import resolve_reference_branch, resolve_triage_branch
 
 
 class FakeGitDriver:
@@ -98,6 +98,43 @@ class ResolveTriageBranchTest(unittest.TestCase):
 
         self.assertEqual(resolution.status, "deleted_fallback")
         self.assertTrue(resolution.needs_info)
+
+
+class ResolveReferenceBranchTest(unittest.TestCase):
+    def test_existing_branch_is_analyzed(self) -> None:
+        driver = FakeGitDriver(existing_branches={"feature/x"})
+        resolution = resolve_reference_branch(
+            driver, repo="org/weaver", branch="feature/x"
+        )
+
+        self.assertEqual(resolution.repo, "org/weaver")
+        self.assertEqual(resolution.analyzed_branch, "feature/x")
+        self.assertEqual(resolution.ref, "origin/feature/x")
+        self.assertEqual(resolution.status, "branch")
+        self.assertIn("feature/x", resolution.note)
+        self.assertEqual(driver.fetched, ["feature/x"])
+
+    def test_missing_branch_falls_back_to_main_no_needs_info(self) -> None:
+        driver = FakeGitDriver()
+        resolution = resolve_reference_branch(
+            driver, repo="org/weaver", branch="feature/x"
+        )
+
+        self.assertEqual(resolution.analyzed_branch, "main")
+        self.assertEqual(resolution.ref, "origin/main")
+        self.assertEqual(resolution.status, "main")
+        self.assertIn("按 main", resolution.note)
+        self.assertFalse(hasattr(resolution, "needs_info"))
+
+    def test_main_branch_skips_git(self) -> None:
+        driver = FakeGitDriver()
+        resolution = resolve_reference_branch(driver, repo="org/weaver", branch="main")
+
+        self.assertEqual(resolution.analyzed_branch, "main")
+        self.assertEqual(resolution.ref, "origin/main")
+        self.assertEqual(resolution.status, "main")
+        self.assertEqual(resolution.note, "")
+        self.assertEqual(driver.fetched, [])
 
 
 if __name__ == "__main__":

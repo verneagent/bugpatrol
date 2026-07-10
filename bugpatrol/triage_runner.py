@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Sequence
 from uuid import uuid4
 
 from bugpatrol.agents import (
@@ -36,6 +37,7 @@ from bugpatrol.worktree import (
 )
 from bugpatrol.triage_context import (
     AssigneeIdentity,
+    ReferenceRepoContext,
     build_triage_context,
     render_triage_context_markdown,
 )
@@ -79,6 +81,7 @@ def prepare_triage_run(
     github: GitHubCliIssuesClient,
     prompt_path: Path = Path("prompts/triage.zh.md"),
     branch_note: str = "",
+    reference_repos: Sequence[ReferenceRepoContext] = (),
 ) -> TriageRunPlan:
     issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
     require_bugpatrol_managed_issue(issue)
@@ -89,6 +92,17 @@ def prepare_triage_run(
     output_dir = output_dir.resolve()
     prompt_path = prompt_path.resolve()
     repo_path = repo_path.resolve()
+    # Resolve each reference-repo checkout to an absolute path and fail loud if
+    # a declared one is missing — a silently absent ref would let the agent
+    # cross-check nothing while still posting a confident triage.
+    resolved_refs: list[ReferenceRepoContext] = []
+    for ref in reference_repos:
+        ref_path = Path(ref.path).resolve()
+        if not ref_path.is_dir():
+            raise FileNotFoundError(
+                f"reference repo {ref.repo!r} checkout not found at {ref_path}"
+            )
+        resolved_refs.append(replace(ref, path=str(ref_path)))
     comments = github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)
     known_assignees = list_known_assignees(repo_path, config=config)
     context = build_triage_context(
@@ -100,6 +114,7 @@ def prepare_triage_run(
             known_assignees,
             codeowners_identities=load_codeowners_identities(repo_path),
         ),
+        reference_repos=tuple(resolved_refs),
     )
     context_path = output_dir / "triage-context.md"
     schema_path = output_dir / "triage.schema.json"
@@ -119,9 +134,14 @@ def prepare_triage_run(
         schema_path=schema_path,
         output_path=output_path,
         context_path=context_path,
-        # Re-admit the runner-side workspace (prompt + output dir) that sits
-        # outside the checkout the agent is cwd'd into.
-        workspace_dirs=(prompt_path.parent, output_dir),
+        # Re-admit the runner-side workspace (prompt + output dir) plus each
+        # reference-repo checkout that all sit outside the checkout the agent
+        # is cwd'd into.
+        workspace_dirs=(
+            prompt_path.parent,
+            output_dir,
+            *(Path(ref.path) for ref in resolved_refs),
+        ),
     )
     return TriageRunPlan(
         context_path=context_path,

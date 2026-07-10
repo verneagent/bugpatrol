@@ -70,6 +70,28 @@ class TriageAgentConfig:
 
 
 @dataclass(frozen=True)
+class ReferenceRepo:
+    """A sibling repo triage may read read-only to reason about cross-repo bugs.
+
+    `path` is where the runner checks the repo out (relative to the runner
+    workspace, or absolute); the workflow supplies the concrete checkout at
+    run time. `branch_map` maps a main-repo branch to the reference-repo branch;
+    unmapped branches default to the same name (and fall back to the reference
+    repo's main when that branch does not exist).
+    """
+
+    repo: str
+    path: str
+    purpose: str = ""
+    branch_map: dict[str, str] | None = None
+
+    def branch_for(self, main_branch: str) -> str:
+        if self.branch_map and main_branch in self.branch_map:
+            return self.branch_map[main_branch]
+        return main_branch
+
+
+@dataclass(frozen=True)
 class PrdConfig:
     root_wiki_node: str
     cache_path: str = ""
@@ -147,6 +169,7 @@ class ProjectConfig:
     owners: OwnersConfig
     followup_classifier: FollowupClassifierConfig
     issue_field_names: dict[str, str]
+    reference_repos: tuple[ReferenceRepo, ...] = ()
 
     @property
     def project(self) -> str:
@@ -300,6 +323,7 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             for name, value in field_names.items()
             if isinstance(value, str)
         },
+        reference_repos=_parse_reference_repos(data),
     )
 
 
@@ -359,6 +383,55 @@ def _parse_branch_chats(lark: dict[str, Any], *, main_chat_id: str) -> dict[str,
             raise ValueError(f"duplicate lark.branch_chats chat_id: {chat_id}")
         result[chat_id] = branch
     return result
+
+
+def _parse_reference_repos(data: dict[str, Any]) -> tuple[ReferenceRepo, ...]:
+    """Parse optional `[[triage.reference_repos]]` sibling-repo declarations.
+
+    Bounded by the config's array length; each entry is a table with `repo`,
+    `path`, optional `purpose`, and an optional `branch_map` (main-repo branch
+    -> reference-repo branch). Duplicate `repo` values are rejected.
+    """
+    triage = data.get("triage")
+    if triage is None:
+        return ()
+    if not isinstance(triage, dict):
+        raise ValueError("[triage] must be a table")
+    entries = triage.get("reference_repos")
+    if entries is None:
+        return ()
+    if not isinstance(entries, list):
+        raise ValueError("triage.reference_repos must be an array of tables")
+    result: list[ReferenceRepo] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("each [[triage.reference_repos]] entry must be a table")
+        repo = _required_str(entry, "repo")
+        path = _required_str(entry, "path")
+        if repo in seen:
+            raise ValueError(f"duplicate triage.reference_repos repo: {repo}")
+        seen.add(repo)
+        branch_map_raw = entry.get("branch_map")
+        branch_map: dict[str, str] | None = None
+        if branch_map_raw is not None:
+            if not isinstance(branch_map_raw, dict) or not all(
+                isinstance(key, str) and isinstance(value, str)
+                for key, value in branch_map_raw.items()
+            ):
+                raise ValueError(
+                    "triage.reference_repos branch_map must be a string map"
+                )
+            branch_map = dict(branch_map_raw)
+        result.append(
+            ReferenceRepo(
+                repo=repo,
+                path=path,
+                purpose=str(entry.get("purpose") or ""),
+                branch_map=branch_map,
+            )
+        )
+    return tuple(result)
 
 
 def _optional_owner_map(data: dict[str, Any], key: str) -> dict[str, tuple[str, ...]]:

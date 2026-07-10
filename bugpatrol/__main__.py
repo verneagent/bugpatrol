@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -41,10 +42,18 @@ from bugpatrol.resources import (
     ResourcePolicy,
     ResourceTransformer,
 )
-from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
+from bugpatrol.triage_context import (
+    ReferenceRepoContext,
+    build_triage_context,
+    render_triage_context_markdown,
+)
 from bugpatrol.triage_result import apply_triage_result, build_triage_dry_run_report, parse_triage_result
 from bugpatrol.triage_runner import execute_triage_run, prepare_triage_run, resolve_issue_branch
-from bugpatrol.worktree import triage_worktree
+from bugpatrol.worktree import (
+    SubprocessGitDriver,
+    resolve_reference_branch,
+    triage_worktree,
+)
 from bugpatrol.watcher import GitHubTriageStatusReader, run_polling_watcher
 
 
@@ -139,6 +148,65 @@ def _optional_lark_client(config) -> LarkOpenApiMessengerClient | None:  # type:
             app_secret=app_secret,
             base_url=config.lark.api_base_url,
         )
+
+
+def _parse_reference_repo_args(values: list[str] | None) -> dict[str, Path]:
+    """Parse repeated ``--reference-repo REPO=PATH`` into a repo->checkout map."""
+    checkouts: dict[str, Path] = {}
+    for raw in values or ():
+        repo, sep, path = raw.partition("=")
+        if not sep or not repo or not path:
+            raise ValueError(f"--reference-repo must be REPO=PATH, got {raw!r}")
+        if repo in checkouts:
+            raise ValueError(f"duplicate --reference-repo for {repo}")
+        checkouts[repo] = Path(path)
+    return checkouts
+
+
+def _enter_reference_worktrees(
+    stack: contextlib.ExitStack,
+    *,
+    reference_repos,  # type: ignore[no-untyped-def]
+    checkouts: dict[str, Path],
+    main_declared_branch: str,
+) -> tuple[ReferenceRepoContext, ...]:
+    """Resolve + check out each configured reference repo at the right branch.
+
+    Bounded by the configured reference-repo list. A declared reference repo
+    with no supplied checkout is a hard error (fail loud) — a silently missing
+    sibling would let triage cross-check nothing.
+    """
+    contexts: list[ReferenceRepoContext] = []
+    for ref in reference_repos:
+        checkout = checkouts.get(ref.repo)
+        if checkout is None:
+            raise ValueError(
+                f"reference repo {ref.repo!r} is configured but no checkout was "
+                f"supplied; pass --reference-repo {ref.repo}=<path>"
+            )
+        checkout = checkout.resolve()
+        if not checkout.is_dir():
+            raise FileNotFoundError(
+                f"reference repo {ref.repo!r} checkout not found at {checkout}"
+            )
+        ref_branch = ref.branch_for(main_declared_branch)
+        resolution = resolve_reference_branch(
+            SubprocessGitDriver(checkout),
+            repo=ref.repo,
+            branch=ref_branch,
+        )
+        worktree_path = stack.enter_context(
+            triage_worktree(base_repo=checkout, ref=resolution.ref)
+        )
+        contexts.append(
+            ReferenceRepoContext(
+                repo=ref.repo,
+                path=str(worktree_path),
+                analyzed_branch=resolution.analyzed_branch,
+                purpose=ref.purpose,
+            )
+        )
+    return tuple(contexts)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -249,6 +317,16 @@ def main(argv: list[str] | None = None) -> int:
     run_triage.add_argument("--repo-path", type=Path, required=True)
     run_triage.add_argument("--output-dir", type=Path, default=Path(".bugpatrol/triage-run"))
     run_triage.add_argument("--execute", action="store_true")
+    run_triage.add_argument(
+        "--reference-repo",
+        action="append",
+        default=None,
+        metavar="REPO=PATH",
+        help=(
+            "checkout path for a configured [[triage.reference_repos]] repo; "
+            "repeatable, e.g. --reference-repo org/weaver=/cache/weaver"
+        ),
+    )
 
     reconcile_triage_parser = sub.add_parser(
         "reconcile-triage", help="triage intook issues that never got a triage result"
@@ -656,7 +734,9 @@ def main(argv: list[str] | None = None) -> int:
         github = GitHubCliIssuesClient(gh=config.github_cli)
         issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
 
-        def _run_triage_attempts(*, repo_path, branch_note: str):
+        reference_checkouts = _parse_reference_repo_args(args.reference_repo)
+
+        def _run_triage_attempts(*, repo_path, branch_note: str, reference_repos):
             max_attempts = 3
             for attempt in range(1, max_attempts + 1):
                 plan = prepare_triage_run(
@@ -666,6 +746,7 @@ def main(argv: list[str] | None = None) -> int:
                     output_dir=args.output_dir,
                     github=github,
                     branch_note=branch_note,
+                    reference_repos=reference_repos,
                 )
                 if not args.execute:
                     return plan
@@ -699,11 +780,29 @@ def main(argv: list[str] | None = None) -> int:
             base_repo=args.repo_path,
             github=github,
         )
-        if resolution.status == "main":
-            plan = _run_triage_attempts(repo_path=args.repo_path, branch_note="")
-        else:
-            with triage_worktree(base_repo=args.repo_path, ref=resolution.ref) as worktree_path:
-                plan = _run_triage_attempts(repo_path=worktree_path, branch_note=resolution.note)
+        # One ExitStack owns the (optional) main-repo worktree plus one nested
+        # detached worktree per reference repo, so every worktree is torn down
+        # even if a later step raises.
+        with contextlib.ExitStack() as stack:
+            if resolution.status == "main":
+                repo_path = args.repo_path
+                branch_note = ""
+            else:
+                repo_path = stack.enter_context(
+                    triage_worktree(base_repo=args.repo_path, ref=resolution.ref)
+                )
+                branch_note = resolution.note
+            reference_contexts = _enter_reference_worktrees(
+                stack,
+                reference_repos=config.reference_repos,
+                checkouts=reference_checkouts,
+                main_declared_branch=resolution.declared_branch,
+            )
+            plan = _run_triage_attempts(
+                repo_path=repo_path,
+                branch_note=branch_note,
+                reference_repos=reference_contexts,
+            )
         print(
             json.dumps(
                 {

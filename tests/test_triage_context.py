@@ -7,6 +7,7 @@ from pathlib import Path
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment
 from bugpatrol.triage_context import (
     AssigneeIdentity,
+    ReferenceRepoContext,
     build_triage_context,
     extract_media_evidence,
     render_triage_context_markdown,
@@ -97,6 +98,48 @@ class TriageContextTest(unittest.TestCase):
         self.assertIn("## Media Evidence", markdown)
         self.assertIn("https://assets/repro.mp4", markdown)
         self.assertIn("Video shows export progress freezing", markdown)
+
+    def test_context_renders_reference_repos_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            issue = GitHubIssue(
+                number=1,
+                url="https://github.test/o/r/issues/1",
+                title="Call drops",
+                body="Live call disconnects.",
+            )
+            refs = (
+                ReferenceRepoContext(
+                    repo="org/weaver",
+                    path="/cache/weaver",
+                    analyzed_branch="feature/live",
+                    purpose="backend signalling",
+                ),
+            )
+
+            context = build_triage_context(
+                issue=issue, prd_root=root, reference_repos=refs
+            )
+            markdown = render_triage_context_markdown(context)
+
+        self.assertEqual(context.reference_repos, refs)
+        self.assertIn("## Reference Repos", markdown)
+        self.assertIn("`org/weaver` at `/cache/weaver` (branch `feature/live`)", markdown)
+        self.assertIn("Purpose: backend signalling", markdown)
+
+    def test_context_omits_reference_repos_block_when_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            issue = GitHubIssue(
+                number=1,
+                url="https://github.test/o/r/issues/1",
+                title="x",
+                body="y",
+            )
+            context = build_triage_context(issue=issue, prd_root=root)
+            markdown = render_triage_context_markdown(context)
+
+        self.assertNotIn("## Reference Repos", markdown)
 
     def test_extract_media_evidence(self) -> None:
         media = extract_media_evidence(

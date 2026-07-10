@@ -182,6 +182,56 @@ class ConfigTest(unittest.TestCase):
                 )
             )
 
+    def test_reference_repos_default_empty(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        parsed = parse_project_config(self._minimal_data(config))
+        self.assertEqual(parsed.reference_repos, ())
+
+    def test_reference_repos_parse_with_branch_map(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["triage"] = {
+            "reference_repos": [
+                {
+                    "repo": "org/weaver",
+                    "path": "weaver",
+                    "purpose": "backend API",
+                    "branch_map": {"2026/chat-live": "feature/live"},
+                }
+            ]
+        }
+        parsed = parse_project_config(data)
+        self.assertEqual(len(parsed.reference_repos), 1)
+        ref = parsed.reference_repos[0]
+        self.assertEqual(ref.repo, "org/weaver")
+        self.assertEqual(ref.path, "weaver")
+        self.assertEqual(ref.purpose, "backend API")
+        self.assertEqual(ref.branch_for("2026/chat-live"), "feature/live")
+        self.assertEqual(ref.branch_for("main"), "main")
+
+    def test_reference_repos_reject_duplicate_repo(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["triage"] = {
+            "reference_repos": [
+                {"repo": "org/weaver", "path": "weaver"},
+                {"repo": "org/weaver", "path": "weaver2"},
+            ]
+        }
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            parse_project_config(data)
+
+    def test_reference_repos_reject_bad_branch_map(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["triage"] = {
+            "reference_repos": [
+                {"repo": "org/weaver", "path": "weaver", "branch_map": {"a": 1}},
+            ]
+        }
+        with self.assertRaisesRegex(ValueError, "branch_map"):
+            parse_project_config(data)
+
     def test_validation_rejects_missing_field(self) -> None:
         config = load_project_config(Path("projects/example.toml"))
         broken = parse_project_config(

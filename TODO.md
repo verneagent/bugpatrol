@@ -15,57 +15,77 @@ Project-neutral implementation items:
   - Manual trigger.
   - Separate triage and notify reconcile jobs or clearly separated steps.
 
-## Branch per topic group
+## Cross-repo triage references
 
-Goal: some issues repro on a feature-branch build, not main. Do NOT make triage
-infer the branch. Instead, one Lark topic group represents one feature branch;
-the poster picks the group, so the branch is declared, not detected. Triage then
-analyzes against that branch.
+Goal: an app repo's bug sometimes lives in a sibling repo (e.g. fived's frontend
+calls weaver's backend). Let triage read declared reference repos read-only,
+without inferring which repo. Must not depend on a runner's pre-existing local
+checkout.
 
-- Config: declare branch-scoped chats. The main `[lark].chat_id` defaults to
-  `main`; add `[[lark.branch_chats]]` entries mapping `chat_id -> branch`.
-- Watcher (single process): scan the main chat plus all `branch_chats` in one
-  loop. Dedup already keys on `chat_id`, so groups stay isolated. Tag each new
-  issue with its source group's branch.
-- Intake metadata (source of truth): stamp `target_branch` into
-  `BUGPATROL_INTAKE_META`. Also record a best-effort `branch_tip_sha` via
-  `git ls-remote origin refs/heads/<branch>` so a later-deleted branch can still
-  be classified as merged vs abandoned.
-- Visible mirror: write a `text`-type org issue field "Branch" (not
-  single_select — branches are dynamic) at intake for humans to see/filter. Add
-  `Branch = "Branch"` to `[issue_field_names]`. Triage still reads the meta, not
-  the field.
-- Triage isolation: run each triage in an ephemeral detached `git worktree` off
-  `origin/<branch>` at a unique path (`worktree add --detach`), then
-  `worktree remove --force` in a `finally`; `worktree prune` on startup. Shares
-  the object DB (cheap) and gives each run its own working tree + index, so
-  concurrent runs cannot override each other regardless of runner scheduling.
-  `run-triage` owns this (it learns the branch only after reading the issue).
-- Triage branch resolution (handles a merged+deleted branch):
-  1. Branch exists on remote -> worktree @ `origin/<branch>`.
-  2. Branch gone AND `branch_tip_sha` is an ancestor of `origin/main`
-     (`git merge-base --is-ancestor`) -> merged; worktree @ `origin/main`,
-     annotate "feature/x merged into main".
-  3. Branch gone AND SHA not in main / no SHA -> try worktree @ the recorded SHA
-     (often still fetchable while the PR exists); else fall back to `origin/main`
-     with a strong caveat (branch deleted, not confirmed merged) and optionally
-     lower confidence / mark needs-info.
-  4. `target_branch` == main or absent (legacy issues) -> worktree @
-     `origin/main`. Same code path, no branching in logic.
-- Reporting: show the analyzed branch in the triage comment header and the Lark
-  notify so nobody assumes it was main.
-- Ops: retire a `[[lark.branch_chats]]` entry (archive the group) after its
-  branch merges. The system tolerates lag — a late topic in a retired group
-  still lands on main via resolution case 2.
-- Follow-up replies inherit the root issue's branch (meta already fixed; do not
-  re-decide per reply).
-- Consider gating `commit_linked` fix events on the branch containing the
-  commit (currently only `pr_opened`/`pr_merged` are branch-gated).
+- Config: `[[triage.reference_repos]]` with `repo`, `path`, `purpose`, and an
+  optional `branch_map` (main-repo branch -> reference-repo branch).
+- Branch correlation: default the reference branch to the main repo's resolved
+  `target_branch` (same name); `branch_map` overrides only on name mismatch.
+- Reference resolution is a *thinner* variant of `resolve_triage_branch`
+  (`worktree.resolve_reference_branch`): mapped branch exists on the ref remote
+  -> use it; else quietly fall back to `origin/main`. No `tip`/`merged`/
+  `deleted_fallback`, no `needs_info` — a missing branch just means this repo
+  doesn't participate, it must not pollute the main issue's needs-info.
+- Isolation: one ephemeral detached `triage_worktree` per reference repo at the
+  resolved ref; manage nested worktree lifetimes with `contextlib.ExitStack`.
+  Feed each worktree path into `workspace_dirs` so `--add-dir` admits it; agent
+  `cwd` stays the main repo's worktree.
+- Context: inject a `## Reference Repos` block (path + purpose + the branch
+  actually analyzed) so the agent knows where to cross-check.
+- Guard: a declared ref path that failed to materialize must fail loud, not
+  silently degrade. Reuse `detect_sandbox_denial` for `--add-dir` scope misses.
+- Touches: config.py (`ReferenceRepo`), worktree.py (`resolve_reference_branch`),
+  triage_runner/__main__ (nested worktrees + workspace_dirs + context), workflow
+  template (ref checkout), plus unit tests.
+
+## Runner checkout & credential hardening
+
+Goal: keep secrets off the runner disk and stop piggybacking triage on human dev
+checkouts. Applies to the example workflows and the deployed ones alike.
+
+- Credentials from the workflow, not the box: inject `DEEPSEEK_API_KEY` and the
+  Lark app secret via Actions `secrets` in the step env; the code already reads
+  both from `os.environ`, so no code change. Mint the bot token in-workflow with
+  `actions/create-github-app-token` (App id/key as secrets) — no on-disk private
+  key, no `gh-bot-token.sh` fallback. Remove the migrated vars from runner `.env`
+  afterward; keep only machine-specific non-secrets (proxy vars, runner name).
+- Runner-owned cache clone, not a dev checkout: bootstrap a clone-or-fetch of the
+  app repo (and reference repos, and the public tool) under a runner-owned cache
+  root, decoupled from any `~/clover` dev tree. Self-heals on a fresh runner.
+- Per-runner isolation (one physical machine may host several triage runners —
+  e.g. two already share one mini): namespace the cache root by `$RUNNER_NAME`
+  (`$HOME/.bugpatrol-cache/$RUNNER_NAME`) so two runners never share a clone. A
+  self-hosted runner is single-concurrency, so a per-runner cache makes all git
+  ops (fetch / worktree add / prune / merge) serial and race-free by
+  construction; the only hazard is two runners sharing one cache. Write the
+  credential helper as *repo-local* config in each cache (never `git config
+  --global`, which is shared per-user) so concurrent runners don't race global
+  git state and no token persists across jobs.
+- Persistent full-history clone (not per-job shallow checkout): branch resolution
+  needs history for `merge-base --is-ancestor` / `cat-file -e`; a shallow clone
+  breaks the `merged`/`tip` cases. Persistent cache also avoids re-downloading a
+  large repo every run.
+- On-demand private fetch: point `base_repo` at the cache clone and give its
+  `origin` auth via a git credential helper echoing `GH_TOKEN`, so
+  `resolve_triage_branch`'s on-demand `git fetch origin <branch>` works without
+  persisting a token in `.git/config`.
+- Branch worktrees already work unchanged (`resolve_triage_branch` +
+  `triage_worktree`); the only change is pointing `base_repo` at the cache and
+  ensuring auth for the on-demand fetch. Per-issue concurrency serializes; cross
+  runs stay isolated by per-uuid worktrees over a shared object DB.
+
+Project-specific rollout (secret creation, runner `.env` edits, deleting on-disk
+keys) is tracked outside this repo.
 
 ## Operations
 
-- Add stale `Running` thresholds to config with conservative defaults.
-- Document replay and outage recovery procedures in `docs/OPERATIONS.md`.
+- Document outage recovery procedures in `docs/OPERATIONS.md` (replay is already
+  covered by the Replay Triage / Rollback sections).
 - Add local e2e coverage for triage reconcile and notify event collection.
 
 Keep project-specific rollout notes outside this repo.

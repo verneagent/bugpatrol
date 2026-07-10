@@ -11,6 +11,7 @@ from bugpatrol.agents import AgentInvocation
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment
 from bugpatrol.config import load_project_config
 from bugpatrol.intake import IntakeRecord, render_issue_body
+from bugpatrol.triage_context import ReferenceRepoContext
 from bugpatrol.triage_runner import (
     TriageRunPlan,
     append_triage_run_metadata,
@@ -111,6 +112,60 @@ class TriageRunnerTest(unittest.TestCase):
                 )
 
             self.assertFalse(output_dir.exists())
+
+    def test_prepare_triage_run_injects_reference_repo_context(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = replace(config, triage_agent=replace(config.triage_agent, provider="claude"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / config.prd.cache_path).mkdir(parents=True, exist_ok=True)
+            ref_checkout = root / "weaver"
+            ref_checkout.mkdir()
+            output_dir = root / "run"
+            plan = prepare_triage_run(
+                config=config,
+                issue_number=7,
+                repo_path=root,
+                output_dir=output_dir,
+                github=FakeGithub(),  # type: ignore[arg-type]
+                reference_repos=(
+                    ReferenceRepoContext(
+                        repo="org/weaver",
+                        path=str(ref_checkout),
+                        analyzed_branch="feature/live",
+                        purpose="backend",
+                    ),
+                ),
+            )
+
+            context_text = plan.context_path.read_text()
+            self.assertIn("## Reference Repos", context_text)
+            self.assertIn("org/weaver", context_text)
+            # The reference checkout is re-admitted for the agent via --add-dir.
+            self.assertIn("--add-dir", plan.invocation.command)
+            self.assertIn(str(ref_checkout.resolve()), plan.invocation.command)
+
+    def test_prepare_triage_run_fails_loud_on_missing_reference_checkout(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / config.prd.cache_path).mkdir(parents=True, exist_ok=True)
+            output_dir = root / "run"
+            with self.assertRaisesRegex(FileNotFoundError, "org/weaver"):
+                prepare_triage_run(
+                    config=config,
+                    issue_number=7,
+                    repo_path=root,
+                    output_dir=output_dir,
+                    github=FakeGithub(),  # type: ignore[arg-type]
+                    reference_repos=(
+                        ReferenceRepoContext(
+                            repo="org/weaver",
+                            path=str(root / "does-not-exist"),
+                            analyzed_branch="main",
+                        ),
+                    ),
+                )
 
     def test_comment_ids_ignore_triage_run_metadata_comments(self) -> None:
         comments = (

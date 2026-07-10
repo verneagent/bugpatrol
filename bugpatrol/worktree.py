@@ -37,6 +37,20 @@ class BranchResolution:
     needs_info: bool = False
 
 
+@dataclass(frozen=True)
+class ReferenceResolution:
+    # The reference repo (owner/name) this resolution is for.
+    repo: str
+    # What we actually analyze in the reference repo ("main" or the branch).
+    analyzed_branch: str
+    # Git ref to check the reference worktree out at.
+    ref: str
+    # Human-facing note for the triage context. Empty when analyzing main.
+    note: str
+    # One of: branch, main.
+    status: str
+
+
 class GitDriver(Protocol):
     def fetch_branch(self, branch: str) -> None:
         """Best-effort fetch of a branch's ref; tolerate a missing branch."""
@@ -118,6 +132,48 @@ def resolve_triage_branch(
         ),
         status="deleted_fallback",
         needs_info=True,
+    )
+
+
+def resolve_reference_branch(
+    driver: GitDriver,
+    *,
+    repo: str,
+    branch: str,
+) -> ReferenceResolution:
+    """Resolve the ref a triage run should analyze in a reference repo.
+
+    A *thinner* variant of `resolve_triage_branch`: only two outcomes, and a
+    missing branch just means this reference repo doesn't participate at that
+    branch — it quietly falls back to main and NEVER flags needs-info (that
+    would pollute the main issue for a repo the reporter didn't even declare).
+
+      1. `branch` exists on the ref remote -> analyze it.
+      2. otherwise -> analyze main.
+    """
+    if branch and branch != "main":
+        driver.fetch_branch(branch)
+        if driver.remote_branch_exists(branch):
+            return ReferenceResolution(
+                repo=repo,
+                analyzed_branch=branch,
+                ref=f"origin/{branch}",
+                note=f"参考库 `{repo}`：分析分支 `{branch}`",
+                status="branch",
+            )
+        return ReferenceResolution(
+            repo=repo,
+            analyzed_branch="main",
+            ref="origin/main",
+            note=f"参考库 `{repo}`：无 `{branch}` 分支，按 main 分析",
+            status="main",
+        )
+    return ReferenceResolution(
+        repo=repo,
+        analyzed_branch="main",
+        ref="origin/main",
+        note="",
+        status="main",
     )
 
 

@@ -28,12 +28,21 @@ class AssigneeIdentity:
 
 
 @dataclass(frozen=True)
+class ReferenceRepoContext:
+    repo: str
+    path: str
+    analyzed_branch: str
+    purpose: str = ""
+
+
+@dataclass(frozen=True)
 class TriageContext:
     issue: GitHubIssue
     comments: tuple[GitHubIssueComment, ...]
     prd_hits: tuple[PrdSearchHit, ...]
     media: tuple[MediaEvidence, ...]
     roster: tuple[AssigneeIdentity, ...] = ()
+    reference_repos: tuple[ReferenceRepoContext, ...] = ()
 
 
 def build_triage_context(
@@ -44,6 +53,7 @@ def build_triage_context(
     prd_include_globs: tuple[str, ...] = ("**/*.md",),
     prd_limit: int = 5,
     roster: tuple[AssigneeIdentity, ...] = (),
+    reference_repos: tuple[ReferenceRepoContext, ...] = (),
 ) -> TriageContext:
     docs = load_prd_documents(prd_root, include_globs=prd_include_globs)
     comments_text = "\n".join(comment.body for comment in comments)
@@ -57,7 +67,14 @@ def build_triage_context(
             for item in extract_media_evidence(comment.body, source=f"comment {comment.id}")
         ),
     )
-    return TriageContext(issue=issue, comments=comments, prd_hits=hits, media=media, roster=roster)
+    return TriageContext(
+        issue=issue,
+        comments=comments,
+        prd_hits=hits,
+        media=media,
+        roster=roster,
+        reference_repos=reference_repos,
+    )
 
 
 def render_triage_context_markdown(context: TriageContext) -> str:
@@ -106,6 +123,24 @@ def render_triage_context_markdown(context: TriageContext) -> str:
     for identity in context.roster:
         aliases = " / ".join(identity.aliases) if identity.aliases else "(no aliases)"
         lines.append(f"- `{identity.login}` — {aliases}")
+    if context.reference_repos:
+        lines.extend(
+            [
+                "",
+                "## Reference Repos",
+                "",
+                (
+                    "These sibling repos are checked out read-only for "
+                    "cross-repo reasoning (e.g. a frontend bug whose backend "
+                    "lives here). Cross-check them but only edit the main repo."
+                ),
+                "",
+            ]
+        )
+        for ref in context.reference_repos:
+            lines.append(f"- `{ref.repo}` at `{ref.path}` (branch `{ref.analyzed_branch}`)")
+            if ref.purpose:
+                lines.append(f"  - Purpose: {ref.purpose}")
     lines.extend(
         [
             "",

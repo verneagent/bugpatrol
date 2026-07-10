@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from bugpatrol.__main__ import main
+from bugpatrol.__main__ import _parse_reference_repo_args, main
 from bugpatrol.clients import GitHubIssue
 from bugpatrol.config import load_project_config
 
@@ -23,6 +23,26 @@ class FakeGithub:
 
     def list_issue_comments(self, **kwargs: object) -> tuple[object, ...]:
         return ()
+
+
+class ReferenceRepoArgsTest(unittest.TestCase):
+    def test_parses_repo_equals_path_pairs(self) -> None:
+        parsed = _parse_reference_repo_args(
+            ["org/weaver=/cache/weaver", "org/aux=./aux"]
+        )
+        self.assertEqual(parsed["org/weaver"], Path("/cache/weaver"))
+        self.assertEqual(parsed["org/aux"], Path("./aux"))
+
+    def test_none_yields_empty_map(self) -> None:
+        self.assertEqual(_parse_reference_repo_args(None), {})
+
+    def test_rejects_missing_equals(self) -> None:
+        with self.assertRaisesRegex(ValueError, "REPO=PATH"):
+            _parse_reference_repo_args(["org/weaver"])
+
+    def test_rejects_duplicate_repo(self) -> None:
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            _parse_reference_repo_args(["org/weaver=/a", "org/weaver=/b"])
 
 
 class CliTest(unittest.TestCase):

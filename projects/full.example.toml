@@ -17,6 +17,18 @@ runner_labels = ["self-hosted", "bugpatrol-example-triage"]
 model = ""
 effort = ""
 
+# Optional sibling repos triage may read read-only to reason about cross-repo
+# bugs (e.g. this app's frontend calls a backend that lives in another repo).
+# The workflow supplies each checkout at run time via
+# `--reference-repo <repo>=<path>`. `branch_map` maps a main-repo branch to a
+# reference-repo branch; unmapped branches default to the same name and fall
+# back to the reference repo's main when that branch does not exist.
+# [[triage.reference_repos]]
+# repo = "example-org/backend"
+# path = "backend"
+# purpose = "REST API the app frontend calls"
+# branch_map = { "release/2026" = "release/2026" }
+
 [prd]
 root_wiki_node = "LOCAL_PRD_DOCS"
 cache_path = "docs/prd"
