@@ -356,12 +356,32 @@ def parse_lark_message(item: dict[str, object], *, default_chat_id: str) -> Lark
         sender_type=sender_type,
         create_time=str(item.get("create_time") or ""),
         msg_type=str(item.get("msg_type") or ""),
-        text=_extract_text(content),
+        text=_resolve_mentions(_extract_text(content), item.get("mentions")),
         raw_content=content,
         sender_id=sender_raw_id,
         sender_id_type=sender_id_type,
         deleted=bool(item.get("deleted")),
     )
+
+
+def _resolve_mentions(text: str, mentions: object) -> str:
+    """Replace Lark @mention placeholders (@_user_1, ...) with the real name.
+
+    Lark stores @mentions in message text as opaque placeholders and puts the
+    resolved identities in a sibling `mentions` array. Without this, an
+    instruction like "这个给 @Naohn" reaches triage as "这个给@_user_1", so the
+    "Lark @mention" owner path can never fire.
+    """
+    if not text or not isinstance(mentions, list):
+        return text
+    for mention in mentions:
+        if not isinstance(mention, dict):
+            continue
+        key = mention.get("key")
+        name = mention.get("name")
+        if isinstance(key, str) and key and isinstance(name, str) and name:
+            text = text.replace(key, f"@{name}")
+    return text
 
 
 def _extract_text(content: str) -> str:

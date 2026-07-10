@@ -314,6 +314,25 @@ class LarkOpenApiMessengerClientTest(unittest.TestCase):
         self.assertEqual(parsed.sender_id, "cli_reporter")
         self.assertEqual(parsed.sender_id_type, "app_id")
 
+    def test_parse_lark_message_resolves_at_mentions(self) -> None:
+        parsed = parse_lark_message(
+            {
+                "message_id": "om_1",
+                "msg_type": "text",
+                "body": {"content": json.dumps({"text": "这个给@_user_1"}, ensure_ascii=False)},
+                "mentions": [
+                    {
+                        "key": "@_user_1",
+                        "name": "Naohn",
+                        "id": {"open_id": "ou_naohn"},
+                    }
+                ],
+            },
+            default_chat_id="oc_1",
+        )
+
+        self.assertEqual(parsed.text, "这个给@Naohn")
+
     def test_parse_lark_app_sender_dict_id(self) -> None:
         parsed = parse_lark_message(
             {
