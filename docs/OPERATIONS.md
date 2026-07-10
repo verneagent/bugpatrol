@@ -49,6 +49,36 @@ python -m bugpatrol apply-triage-result projects/example.toml \
   --dry-run
 ```
 
+## Outage Recovery
+
+When the watcher was down or a webhook delivery was missed, two idempotent
+reconcile passes bring GitHub and Lark back in sync. Both skip work that already
+completed (managed-issue markers and `BUGPATROL_FIX_META` dedup), so re-running
+them is safe.
+
+Replay triage for intook issues that never produced a triage result:
+
+```bash
+python -m bugpatrol reconcile-triage projects/example.toml \
+  --repo-path /path/to/project \
+  --output-dir .bugpatrol/runs/reconcile \
+  --execute
+```
+
+Replay fix notifications from GitHub state — recently merged PRs, closed
+managed issues, and their linked commits — instead of a hand-authored JSON file:
+
+```bash
+python -m bugpatrol reconcile-fix-notifications projects/example.toml \
+  --from-github \
+  --write
+```
+
+Preview either without applying by dropping `--execute` / `--write`. Bound the
+GitHub scan with `--pr-limit` and `--closed-issue-limit` on large repos. The
+`examples/github-actions/bugpatrol-reconcile.yml` workflow runs both on a
+schedule (and on manual dispatch) as a standing safety net.
+
 ## Rollback
 
 Stop the watcher first. Then:

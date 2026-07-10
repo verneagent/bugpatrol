@@ -3,11 +3,38 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from bugpatrol.clients import GitHubPullRequest
 from bugpatrol.config import load_project_config
-from bugpatrol.fix_notify import FixEventCandidate, apply_fix_notification, reconcile_fix_notifications
+from bugpatrol.fix_notify import (
+    FixEventCandidate,
+    apply_fix_notification,
+    collect_fix_candidates_from_github,
+    reconcile_fix_notifications,
+)
 from bugpatrol.intake import IntakeRecord
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.testing.fakes import FakeGitHubIssuesClient, FakeLarkMessengerClient
+
+
+class _CollectingFakeGitHub(FakeGitHubIssuesClient):
+    """Fake that also serves the merged-PR / timeline surfaces reconcile scans."""
+
+    def list_issues(self, *, repo: str, state: str = "open"):
+        return tuple(item.issue for item in self.created if item.repo == repo)
+
+    def list_merged_pull_requests(self, *, repo: str, limit: int = 30):
+        return (
+            GitHubPullRequest(
+                number=456,
+                url=f"https://github.test/{repo}/pull/456",
+                title="Fix",
+                body="Closes #1",
+                closing_issue_numbers=(1,),
+            ),
+        )
+
+    def list_issue_timeline(self, *, repo: str, issue_number: int):
+        return ({"event": "referenced", "commit_id": "deadbeef"},)
 
 
 class FixNotifyLoopE2ETest(unittest.TestCase):
@@ -90,6 +117,66 @@ class FixNotifyLoopE2ETest(unittest.TestCase):
         self.assertEqual(rerun.duplicate_skipped, 1)
         self.assertEqual(len(lark.replies), 2)
         self.assertEqual(len(github.created[0].comments), 1)
+
+
+    def test_collect_from_github_then_reconcile_dedupes_on_rerun(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = _CollectingFakeGitHub()
+        lark = FakeLarkMessengerClient()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        issue = workflow.process(
+            IntakeRecord(
+                reporter_name="Reporter",
+                reporter_open_id="ou_1",
+                created_at="2026-07-01T00:00:00Z",
+                chat_id=config.lark.chat_id,
+                root_id="om_root",
+                message_id="om_1",
+                original_text="bug",
+            )
+        ).issue
+
+        candidates = collect_fix_candidates_from_github(
+            repo=config.github_repo,
+            github=github,  # type: ignore[arg-type]
+        )
+        # Merged PR, closed managed issue, and the linked commit all surface.
+        self.assertIn(
+            FixEventCandidate(event="pr_merged", issue_number=issue.number, pr="456"),
+            candidates,
+        )
+        self.assertIn(
+            FixEventCandidate(event="issue_fixed", issue_number=issue.number), candidates
+        )
+        self.assertIn(
+            FixEventCandidate(
+                event="commit_linked", issue_number=issue.number, commit="deadbeef"
+            ),
+            candidates,
+        )
+
+        first = reconcile_fix_notifications(
+            repo=config.github_repo,
+            candidates=candidates,
+            dry_run=False,
+            github=github,  # type: ignore[arg-type]
+            lark=lark,
+        )
+        rerun_candidates = collect_fix_candidates_from_github(
+            repo=config.github_repo,
+            github=github,  # type: ignore[arg-type]
+        )
+        rerun = reconcile_fix_notifications(
+            repo=config.github_repo,
+            candidates=rerun_candidates,
+            dry_run=False,
+            github=github,  # type: ignore[arg-type]
+            lark=lark,
+        )
+
+        self.assertGreaterEqual(first.sent, 1)
+        self.assertEqual(rerun.sent, 0)
+        self.assertEqual(rerun.duplicate_skipped, first.sent)
 
 
 if __name__ == "__main__":
