@@ -74,3 +74,16 @@ Evidence = "Evidence"
 "Triage confidence" = "Triage confidence"
 "Owner reason" = "Owner reason"
 Owner = "Owner"
+
+# GitHub login -> human aliases (Lark 名 / 简写 / 别称). Lets triage map a
+# free-form "assign 给 X" reference to the right login. The login itself is
+# always matched; names seeded from the CODEOWNERS header.
+[owners.identities]
+garlanddiego = ["Diego"]
+wind2star = ["Wind2star"]
+jerry-emperor = ["Jerry"]
+AndyCokeZero = ["Andy"]
+naohn42 = ["Naohn"]
+Sobit-Riki = ["RikiRiki"]
+TristinMax = ["Tristin", "杨总"]
+SoxiaLiSA = ["Nanami"]
