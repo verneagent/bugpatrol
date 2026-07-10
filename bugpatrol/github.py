@@ -244,6 +244,48 @@ class GitHubCliIssuesClient:
             base_ref=str(data.get("baseRefName") or ""),
         )
 
+    def list_merged_pull_requests(
+        self, *, repo: str, limit: int = 30
+    ) -> tuple[GitHubPullRequest, ...]:
+        """Recent merged PRs with their closing-issue references.
+
+        Bounded by `limit`. Timeline-linked issues are left empty here (one API
+        call per PR would be wasteful for reconcile); reconcile resolves the
+        associated issue from closingIssuesReferences plus title/body refs.
+        """
+        result = self._run(
+            [
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "merged",
+                "--limit",
+                str(limit),
+                "--json",
+                "number,url,title,body,closingIssuesReferences",
+            ]
+        )
+        pulls: list[GitHubPullRequest] = []
+        for data in json.loads(result.stdout):
+            closing = data.get("closingIssuesReferences")
+            closing_numbers: list[int] = []
+            if isinstance(closing, list):
+                for item in closing:
+                    if isinstance(item, dict) and isinstance(item.get("number"), int):
+                        closing_numbers.append(int(item["number"]))
+            pulls.append(
+                GitHubPullRequest(
+                    number=int(data["number"]),
+                    url=str(data.get("url") or ""),
+                    title=str(data.get("title") or ""),
+                    body=str(data.get("body") or ""),
+                    closing_issue_numbers=tuple(closing_numbers),
+                )
+            )
+        return tuple(pulls)
+
     def _timeline_issue_numbers_for_pr(self, *, repo: str, pr_number: int) -> tuple[int, ...]:
         try:
             result = self._run(

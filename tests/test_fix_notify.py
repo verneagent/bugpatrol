@@ -4,14 +4,16 @@ import unittest
 from pathlib import Path
 
 from bugpatrol.config import load_project_config
-from bugpatrol.clients import GitHubPullRequest
+from bugpatrol.clients import GitHubIssue, GitHubPullRequest
 from bugpatrol.fix_notify import (
     FixEventCandidate,
     apply_fix_notification,
     associated_issue_numbers_from_pr,
+    collect_fix_candidates_from_github,
     fix_event_candidates_from_json,
     fix_notification_key,
     issue_numbers_from_timeline_events,
+    linked_commits_from_timeline,
     notified_fix_keys,
     parse_fix_metadata,
     reconcile_fix_notifications,
@@ -239,6 +241,85 @@ class FixNotifyTest(unittest.TestCase):
             candidates,
             (FixEventCandidate(event="commit_linked", issue_number=7, commit="abc"),),
         )
+
+    def test_linked_commits_from_timeline_dedupes_fix_events(self) -> None:
+        events = [
+            {"event": "referenced", "commit_id": "abc"},
+            {"event": "closed", "commit_id": "def"},
+            {"event": "referenced", "commit_id": "abc"},
+            {"event": "labeled", "commit_id": "ghi"},
+            {"event": "closed", "commit_id": None},
+        ]
+
+        self.assertEqual(linked_commits_from_timeline(events), ("abc", "def"))
+
+    def test_collect_fix_candidates_from_github_gathers_managed_only(self) -> None:
+        managed_body = '<!-- BUGPATROL_INTAKE_META:{"chat_id":"oc_1","root_id":"om_1"} -->'
+
+        class CollectorFake:
+            def list_merged_pull_requests(self, *, repo: str, limit: int = 30):
+                return (
+                    GitHubPullRequest(
+                        number=50,
+                        url="https://github.test/o/r/pull/50",
+                        title="Fix",
+                        body="Closes #1",
+                        closing_issue_numbers=(1,),
+                    ),
+                    GitHubPullRequest(
+                        number=51,
+                        url="https://github.test/o/r/pull/51",
+                        title="Fix",
+                        body="Closes #9",
+                        closing_issue_numbers=(9,),
+                    ),
+                )
+
+            def get_issue(self, *, repo: str, issue_number: int) -> GitHubIssue:
+                body = managed_body if issue_number == 1 else "unmanaged"
+                return GitHubIssue(
+                    number=issue_number,
+                    url=f"https://github.test/o/r/issues/{issue_number}",
+                    title="bug",
+                    body=body,
+                )
+
+            def list_issues(self, *, repo: str, state: str = "open"):
+                return (
+                    GitHubIssue(
+                        number=1,
+                        url="https://github.test/o/r/issues/1",
+                        title="bug",
+                        body=managed_body,
+                    ),
+                    GitHubIssue(
+                        number=9,
+                        url="https://github.test/o/r/issues/9",
+                        title="bug",
+                        body="unmanaged",
+                    ),
+                )
+
+            def list_issue_timeline(self, *, repo: str, issue_number: int):
+                if issue_number == 1:
+                    return ({"event": "referenced", "commit_id": "cafef00d"},)
+                return ()
+
+        candidates = collect_fix_candidates_from_github(
+            repo="o/r",
+            github=CollectorFake(),  # type: ignore[arg-type]
+        )
+
+        self.assertIn(
+            FixEventCandidate(event="pr_merged", issue_number=1, pr="50"), candidates
+        )
+        self.assertIn(FixEventCandidate(event="issue_fixed", issue_number=1), candidates)
+        self.assertIn(
+            FixEventCandidate(event="commit_linked", issue_number=1, commit="cafef00d"),
+            candidates,
+        )
+        # Unmanaged issue #9 must not appear in any form.
+        self.assertFalse(any(c.issue_number == 9 for c in candidates))
 
     def test_notify_fix_dry_run_does_not_send_or_write(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

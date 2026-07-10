@@ -306,6 +306,93 @@ def reconcile_fix_notifications(
     )
 
 
+def collect_fix_candidates_from_github(
+    *,
+    repo: str,
+    github: GitHubCliIssuesClient,
+    pr_limit: int = 30,
+    closed_issue_limit: int = 100,
+) -> tuple[FixEventCandidate, ...]:
+    """Gather fix candidates from GitHub instead of a hand-authored JSON file.
+
+    Sources (all resolved to BugPatrol-managed issues only):
+      - recently merged PRs -> `pr_merged` per managed closing/referenced issue,
+      - recently closed managed issues -> `issue_fixed`,
+      - fix-related commits on those issues' timelines -> `commit_linked`.
+
+    Candidates already covered by BUGPATROL_FIX_META are not filtered here; the
+    downstream reconcile treats them as duplicates and skips the re-notify, so
+    the dedup stays in one place. Bounded by `pr_limit` / `closed_issue_limit`
+    to keep the API-call count (and timeline lookups) finite.
+    """
+    candidates: list[FixEventCandidate] = []
+    seen: set[tuple[str, int | None, str, str]] = set()
+    managed_cache: dict[int, bool] = {}
+
+    def _managed(issue_number: int) -> bool:
+        if issue_number not in managed_cache:
+            issue = github.get_issue(repo=repo, issue_number=issue_number)
+            managed_cache[issue_number] = parse_intake_metadata(issue.body or "") is not None
+        return managed_cache[issue_number]
+
+    def _add(candidate: FixEventCandidate) -> None:
+        marker = (candidate.event, candidate.issue_number, candidate.pr, candidate.commit)
+        if marker in seen:
+            return
+        seen.add(marker)
+        candidates.append(candidate)
+
+    for pull in github.list_merged_pull_requests(repo=repo, limit=pr_limit):
+        for issue_number in associated_issue_numbers_from_pr(pull):
+            if _managed(issue_number):
+                _add(
+                    FixEventCandidate(
+                        event="pr_merged",
+                        issue_number=issue_number,
+                        pr=str(pull.number),
+                    )
+                )
+
+    for issue in github.list_issues(repo=repo, state="closed")[:closed_issue_limit]:
+        if parse_intake_metadata(issue.body or "") is None:
+            continue
+        managed_cache[issue.number] = True
+        _add(FixEventCandidate(event="issue_fixed", issue_number=issue.number))
+        timeline = github.list_issue_timeline(repo=repo, issue_number=issue.number)
+        for commit in linked_commits_from_timeline(timeline):
+            _add(
+                FixEventCandidate(
+                    event="commit_linked",
+                    issue_number=issue.number,
+                    commit=commit,
+                )
+            )
+
+    return tuple(candidates)
+
+
+def linked_commits_from_timeline(
+    events: tuple[dict[str, Any], ...] | list[object],
+) -> tuple[str, ...]:
+    """Commit SHAs referenced by fix-related issue timeline events.
+
+    `referenced` and `closed` events carry the `commit_id` of a commit that
+    mentions or closes the issue — the signal for a `commit_linked` fix event.
+    """
+    commits: list[str] = []
+    seen: set[str] = set()
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("event") not in ("referenced", "closed"):
+            continue
+        commit = event.get("commit_id")
+        if isinstance(commit, str) and commit and commit not in seen:
+            seen.add(commit)
+            commits.append(commit)
+    return tuple(commits)
+
+
 def fix_event_candidates_from_json(data: object) -> tuple[FixEventCandidate, ...]:
     if not isinstance(data, list):
         raise ValueError("fix reconcile input must be a JSON array")

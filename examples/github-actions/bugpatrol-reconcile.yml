@@ -1,0 +1,112 @@
+name: BugPatrol reconcile
+
+# Periodic safety net for events the live watchers/webhooks missed:
+#   - triage-reconcile: intook issues that never produced a triage result.
+#   - notify-reconcile: fix events (merged PRs, closed managed issues, linked
+#     commits) that never fired a Lark fix notification.
+# Both jobs are idempotent — already-covered items are skipped downstream via
+# BUGPATROL_INTAKE_META / BUGPATROL_FIX_META — so re-runs are safe.
+
+on:
+  schedule:
+    # Hourly. Adjust to taste; keep it coarse to bound API usage.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Which reconcile to run
+        required: false
+        default: both
+        type: choice
+        options:
+          - both
+          - triage
+          - notify
+      write:
+        description: Apply changes (post comments / send Lark). Off = dry run.
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: bugpatrol-reconcile-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  triage-reconcile:
+    if: >-
+      github.event_name == 'schedule' ||
+      inputs.target == 'both' || inputs.target == 'triage'
+    runs-on: ${{ vars.BUGPATROL_TRIAGE_RUNNER_LABEL || 'self-hosted' }}
+    steps:
+      # Same in-workflow token + per-runner cache clone as bugpatrol-triage.yml.
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.BUGPATROL_APP_ID }}
+          private-key: ${{ secrets.BUGPATROL_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Checkout BugPatrol tool
+        uses: actions/checkout@v5
+        with:
+          repository: verneagent/bugpatrol
+          path: .bugpatrol/tool
+
+      - name: Bootstrap app repo cache
+        id: app-cache
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          repo_path="$(bash "$GITHUB_WORKSPACE/.bugpatrol/tool/examples/github-actions/bugpatrol-cache-bootstrap.sh" "${{ github.repository }}")"
+          echo "repo_path=$repo_path" >> "$GITHUB_OUTPUT"
+
+      - name: Reconcile triage
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BUGPATROL_PROJECT_CONFIG: ${{ vars.BUGPATROL_PROJECT_CONFIG }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+        run: |
+          args=(
+            "$BUGPATROL_PROJECT_CONFIG"
+            --repo-path "${{ steps.app-cache.outputs.repo_path }}"
+            --output-dir "$GITHUB_WORKSPACE/.bugpatrol/runs/reconcile"
+          )
+          # Scheduled runs always apply; manual runs honor the write toggle.
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.write }}" == "true" ]]; then
+            args+=(--execute)
+          fi
+          PYTHONPATH="$GITHUB_WORKSPACE/.bugpatrol/tool" \
+          python3 -m bugpatrol reconcile-triage "${args[@]}"
+
+  notify-reconcile:
+    if: >-
+      github.event_name == 'schedule' ||
+      inputs.target == 'both' || inputs.target == 'notify'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout BugPatrol tool
+        uses: actions/checkout@v5
+        with:
+          repository: verneagent/bugpatrol
+          path: .bugpatrol/tool
+
+      - name: Reconcile fix notifications
+        env:
+          GH_TOKEN: ${{ secrets.BUGPATROL_GH_TOKEN || github.token }}
+          BUGPATROL_PROJECT_CONFIG: ${{ vars.BUGPATROL_PROJECT_CONFIG }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+        run: |
+          args=(
+            "$BUGPATROL_PROJECT_CONFIG"
+            --from-github
+          )
+          # Scheduled runs always apply; manual runs honor the write toggle.
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.write }}" == "true" ]]; then
+            args+=(--write)
+          fi
+          PYTHONPATH="$GITHUB_WORKSPACE/.bugpatrol/tool" \
+          python3 -m bugpatrol reconcile-fix-notifications "${args[@]}"

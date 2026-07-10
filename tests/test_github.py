@@ -159,6 +159,36 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
         )
         self.assertIn("/repos/o/r/issues/7/timeline", run.call_args_list[1].args[0])
 
+    def test_list_merged_pull_requests_reads_closing_refs(self) -> None:
+        client = GitHubCliIssuesClient()
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(
+                ["gh"],
+                0,
+                json.dumps(
+                    [
+                        {
+                            "number": 7,
+                            "url": "https://github.com/o/r/pull/7",
+                            "title": "Fix thing",
+                            "body": "Closes #2",
+                            "closingIssuesReferences": [{"number": 2}],
+                        }
+                    ]
+                ),
+                "",
+            )
+            pulls = client.list_merged_pull_requests(repo="o/r", limit=5)
+
+        self.assertEqual(len(pulls), 1)
+        self.assertEqual(pulls[0].number, 7)
+        self.assertEqual(pulls[0].closing_issue_numbers, (2,))
+        self.assertEqual(pulls[0].timeline_issue_numbers, ())
+        args = run.call_args.args[0]
+        self.assertIn("merged", args)
+        self.assertIn("5", args)
+
     def test_raises_on_gh_failure(self) -> None:
         client = GitHubCliIssuesClient()
 

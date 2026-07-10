@@ -20,6 +20,7 @@ from bugpatrol.fields import TRIAGE_OUTPUT_SCHEMA, default_field_specs
 from bugpatrol.fix_notify import (
     FIX_EVENTS,
     apply_fix_notification,
+    collect_fix_candidates_from_github,
     fix_event_candidates_from_json,
     reconcile_fix_notifications,
     resolve_single_issue_from_pr,
@@ -353,7 +354,23 @@ def main(argv: list[str] | None = None) -> int:
 
     reconcile_fix = sub.add_parser("reconcile-fix-notifications", help="replay missed fix notification events")
     reconcile_fix.add_argument("project_config", type=Path)
-    reconcile_fix.add_argument("--input", type=Path, required=True, help="JSON array of fix notification events")
+    reconcile_fix.add_argument(
+        "--input",
+        type=Path,
+        help="JSON array of fix notification events (omit with --from-github)",
+    )
+    reconcile_fix.add_argument(
+        "--from-github",
+        action="store_true",
+        help="collect candidates from GitHub (merged PRs, closed managed issues, linked commits)",
+    )
+    reconcile_fix.add_argument("--pr-limit", type=int, default=30, help="merged PRs to scan with --from-github")
+    reconcile_fix.add_argument(
+        "--closed-issue-limit",
+        type=int,
+        default=100,
+        help="closed issues to scan with --from-github",
+    )
     reconcile_fix.add_argument("--write", action="store_true", help="send Lark notifications and write metadata")
 
     cleanup_assets = sub.add_parser("cleanup-assets", help="dry-run or delete materialized asset repo files")
@@ -936,7 +953,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "reconcile-fix-notifications":
         config = load_project_config(args.project_config)
-        candidates = fix_event_candidates_from_json(json.loads(args.input.read_text()))
+        if bool(args.from_github) == bool(args.input):
+            print("provide exactly one of --input or --from-github", file=sys.stderr)
+            return 2
+        github = GitHubCliIssuesClient(gh=config.github_cli)
+        if args.from_github:
+            candidates = collect_fix_candidates_from_github(
+                repo=config.github_repo,
+                github=github,
+                pr_limit=args.pr_limit,
+                closed_issue_limit=args.closed_issue_limit,
+            )
+        else:
+            candidates = fix_event_candidates_from_json(json.loads(args.input.read_text()))
         lark = None
         if args.write:
             app_secret = os.environ.get(config.lark.app_secret_env)
@@ -951,7 +980,7 @@ def main(argv: list[str] | None = None) -> int:
         result = reconcile_fix_notifications(
             repo=config.github_repo,
             candidates=candidates,
-            github=GitHubCliIssuesClient(gh=config.github_cli),
+            github=github,
             lark=lark,
             dry_run=not args.write,
         )
