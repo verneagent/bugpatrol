@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from bugpatrol.config import ProjectConfig
 from bugpatrol.intake import Attachment, IntakeRecord
@@ -21,6 +22,11 @@ from bugpatrol.resources import (
     ResourceTransformer,
     materialize_lark_attachments,
 )
+
+
+# branch name -> best-effort remote tip SHA (or "" when unavailable). Injected
+# by the watcher so backfill stays decoupled from GitHub/git access.
+BranchTipResolver = Callable[[str], str]
 
 
 @dataclass(frozen=True)
@@ -79,6 +85,7 @@ def run_lark_backfill(
     resource_transformer: ResourceTransformer | None = None,
     processed_ledger: MessageLedger | None = None,
     root_allowlist: tuple[str, ...] = (),
+    branch_tip_resolver: BranchTipResolver | None = None,
 ) -> BackfillResult:
     if resource_dir is not None and resource_store is not None:
         raise ValueError("resource_dir and resource_store are mutually exclusive")
@@ -143,6 +150,7 @@ def run_lark_backfill(
             resource_policy=resource_policy,
             resource_redactor=resource_redactor,
             resource_transformer=resource_transformer,
+            branch_tip_resolver=branch_tip_resolver,
         )
         events.append(event)
         if outcome is None:
@@ -172,6 +180,7 @@ def _intake_one_message(
     resource_policy: ResourcePolicy | None = None,
     resource_redactor: ResourceRedactor | None = None,
     resource_transformer: ResourceTransformer | None = None,
+    branch_tip_resolver: BranchTipResolver | None = None,
 ) -> tuple[IntakeOutcome | None, BackfillEvent]:
     if (
         config.intake.skip_orphan_replies
@@ -187,10 +196,16 @@ def _intake_one_message(
             action="skipped",
             reason="orphan_reply",
         )
+    target_branch = config.lark.branch_for_chat(message.chat_id)
+    branch_tip_sha = ""
+    if target_branch != "main" and branch_tip_resolver is not None:
+        branch_tip_sha = branch_tip_resolver(target_branch)
     record = intake_record_from_lark_message(
         message,
         sender_names=config.lark.sender_names or {},
         message_url_template=config.lark.message_url_template,
+        target_branch=target_branch,
+        branch_tip_sha=branch_tip_sha,
     )
     if dry_run:
         return None, BackfillEvent(
@@ -224,13 +239,15 @@ def scan_topic_batches(
     limit: int = 20,
     processed_ledger: MessageLedger | None = None,
     exclude_roots: frozenset[str] = frozenset(),
+    chat_id: str | None = None,
 ) -> ScanResult:
     """Cheap scan phase: filter messages and group the workable ones by topic.
 
-    Topics whose root key is in `exclude_roots` (already in flight on a
-    worker) are left untouched so the next scan can pick them up again.
+    Scans `chat_id` (defaults to the main chat). Topics whose root key is in
+    `exclude_roots` (already in flight on a worker) are left untouched so the
+    next scan can pick them up again.
     """
-    messages = lark.list_chat_messages(chat_id=config.lark.chat_id, limit=limit)
+    messages = lark.list_chat_messages(chat_id=chat_id or config.lark.chat_id, limit=limit)
     skipped_events: list[BackfillEvent] = []
     groups: dict[str, list[LarkMessage]] = {}
     since_ms = config.intake.since_ms()
@@ -271,6 +288,7 @@ def process_topic_batch(
     resource_policy: ResourcePolicy | None = None,
     resource_redactor: ResourceRedactor | None = None,
     resource_transformer: ResourceTransformer | None = None,
+    branch_tip_resolver: BranchTipResolver | None = None,
 ) -> TopicResult:
     """Process one topic's messages in order. Never raises: an error stops the
     topic and is reported in the result so unprocessed messages retry on the
@@ -292,6 +310,7 @@ def process_topic_batch(
                 resource_policy=resource_policy,
                 resource_redactor=resource_redactor,
                 resource_transformer=resource_transformer,
+                branch_tip_resolver=branch_tip_resolver,
             )
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
@@ -389,6 +408,8 @@ def intake_record_from_lark_message(
     *,
     sender_names: dict[str, str] | None = None,
     message_url_template: str = "",
+    target_branch: str = "main",
+    branch_tip_sha: str = "",
 ) -> IntakeRecord:
     names = sender_names or {}
     reporter_id = message.sender_open_id or message.sender_id
@@ -410,6 +431,8 @@ def intake_record_from_lark_message(
         lark_topic_url=topic_url,
         lark_message_url=message_url,
         attachments=attachments_from_lark_message(message),
+        target_branch=target_branch,
+        branch_tip_sha=branch_tip_sha,
     )
 
 

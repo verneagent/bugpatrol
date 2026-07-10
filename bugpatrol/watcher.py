@@ -9,7 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Sequence
 
-from bugpatrol.backfill import TopicResult, process_topic_batch, scan_topic_batches
+from bugpatrol.backfill import (
+    BranchTipResolver,
+    ScanResult,
+    TopicResult,
+    process_topic_batch,
+    scan_topic_batches,
+)
 from bugpatrol.config import ProjectConfig
 from bugpatrol.event_log import JsonlEventLog
 from bugpatrol.github_fields import GitHubIssueFieldsClient
@@ -96,6 +102,7 @@ def run_polling_watcher(
     triage_dispatcher: TriageDispatcher | None = None,
     triage_status_reader: TriageStatusReader | None = None,
     parallel_topics: int = 1,
+    branch_tip_resolver: BranchTipResolver | None = None,
 ) -> WatchResult:
     if event_log is not None and event_log_path is not None:
         raise ValueError("event_log and event_log_path are mutually exclusive")
@@ -140,7 +147,7 @@ def run_polling_watcher(
             while True:
                 iterations += 1
                 try:
-                    scan = scan_topic_batches(
+                    scan = _scan_all_chats(
                         config=config,
                         lark=lark,
                         limit=limit,
@@ -188,6 +195,7 @@ def run_polling_watcher(
                         resource_policy=resource_policy,
                         resource_redactor=resource_redactor,
                         resource_transformer=resource_transformer,
+                        branch_tip_resolver=branch_tip_resolver,
                     )
                 final_iteration = once or (max_iterations is not None and iterations >= max_iterations)
                 results = _harvest_topic_results(in_flight, wait_all=final_iteration)
@@ -242,6 +250,43 @@ def run_polling_watcher(
     finally:
         if lease is not None:
             lease.release()
+
+
+def _scan_all_chats(
+    *,
+    config: ProjectConfig,
+    lark: LarkOpenApiMessengerClient,
+    limit: int,
+    processed_ledger: MessageLedger | None,
+    exclude_roots: frozenset[str],
+) -> ScanResult:
+    """Scan the main chat plus every branch chat in one pass.
+
+    Topic root keys are globally unique Lark message ids, so batches from
+    different chats never collide and the existing `exclude_roots` dedup keeps
+    each group isolated. Each batch's messages carry their own chat_id, which
+    downstream resolves to the declared branch.
+    """
+    scanned = 0
+    skipped_events: list = []
+    topics: list = []
+    for chat_id in config.lark.all_chat_ids():
+        result = scan_topic_batches(
+            config=config,
+            lark=lark,
+            limit=limit,
+            processed_ledger=processed_ledger,
+            exclude_roots=exclude_roots,
+            chat_id=chat_id,
+        )
+        scanned += result.scanned
+        skipped_events.extend(result.skipped_events)
+        topics.extend(result.topics)
+    return ScanResult(
+        scanned=scanned,
+        skipped_events=tuple(skipped_events),
+        topics=tuple(topics),
+    )
 
 
 def _harvest_topic_results(

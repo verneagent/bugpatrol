@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import unittest
 
-from bugpatrol.intake import Attachment, IntakeRecord, format_created_at, intake_record_from_dict, render_issue_body
+from bugpatrol.intake import (
+    Attachment,
+    IntakeRecord,
+    branch_tip_sha_from_metadata,
+    format_created_at,
+    intake_record_from_dict,
+    parse_intake_metadata,
+    render_issue_body,
+    target_branch_from_metadata,
+)
 
 
 class IntakeTest(unittest.TestCase):
@@ -91,6 +100,65 @@ class IntakeTest(unittest.TestCase):
     def test_intake_record_from_dict_rejects_missing_required_fields(self) -> None:
         with self.assertRaisesRegex(ValueError, "reporter_name"):
             intake_record_from_dict({})
+
+    def test_main_branch_meta_omits_branch_keys(self) -> None:
+        body = render_issue_body(
+            IntakeRecord(
+                reporter_name="QA",
+                reporter_open_id="ou_qa",
+                created_at="2026-06-30T10:00:00Z",
+                chat_id="oc_123",
+                root_id="om_root",
+                message_id="om_msg",
+                original_text="main-branch bug",
+            )
+        )
+        metadata = parse_intake_metadata(body)
+
+        assert metadata is not None
+        self.assertNotIn("target_branch", metadata)
+        self.assertNotIn("branch_tip_sha", metadata)
+        self.assertEqual(target_branch_from_metadata(metadata), "main")
+        self.assertEqual(branch_tip_sha_from_metadata(metadata), "")
+
+    def test_feature_branch_meta_stamps_branch_and_tip(self) -> None:
+        body = render_issue_body(
+            IntakeRecord(
+                reporter_name="QA",
+                reporter_open_id="ou_qa",
+                created_at="2026-06-30T10:00:00Z",
+                chat_id="oc_feature",
+                root_id="om_root",
+                message_id="om_msg",
+                original_text="feature-branch bug",
+                target_branch="feature/x",
+                branch_tip_sha="abc123def456",
+            )
+        )
+        metadata = parse_intake_metadata(body)
+
+        assert metadata is not None
+        self.assertEqual(target_branch_from_metadata(metadata), "feature/x")
+        self.assertEqual(branch_tip_sha_from_metadata(metadata), "abc123def456")
+
+    def test_feature_branch_without_tip_omits_tip_key(self) -> None:
+        body = render_issue_body(
+            IntakeRecord(
+                reporter_name="QA",
+                reporter_open_id="ou_qa",
+                created_at="2026-06-30T10:00:00Z",
+                chat_id="oc_feature",
+                root_id="om_root",
+                message_id="om_msg",
+                original_text="feature-branch bug",
+                target_branch="feature/x",
+            )
+        )
+        metadata = parse_intake_metadata(body)
+
+        assert metadata is not None
+        self.assertEqual(target_branch_from_metadata(metadata), "feature/x")
+        self.assertNotIn("branch_tip_sha", metadata)
 
 
 if __name__ == "__main__":

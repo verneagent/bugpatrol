@@ -43,7 +43,8 @@ from bugpatrol.resources import (
 )
 from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
 from bugpatrol.triage_result import apply_triage_result, build_triage_dry_run_report, parse_triage_result
-from bugpatrol.triage_runner import execute_triage_run, prepare_triage_run
+from bugpatrol.triage_runner import execute_triage_run, prepare_triage_run, resolve_issue_branch
+from bugpatrol.worktree import triage_worktree
 from bugpatrol.watcher import GitHubTriageStatusReader, run_polling_watcher
 
 
@@ -479,6 +480,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.triage_dispatch_command
             else None,
             parallel_topics=args.parallel_topics,
+            branch_tip_resolver=(
+                (lambda branch: github.remote_branch_tip_sha(repo=config.github_repo, branch=branch))
+                if config.lark.branch_chats
+                else None
+            ),
         )
         print(json.dumps(result.__dict__, ensure_ascii=False))
         return 0
@@ -649,43 +655,62 @@ def main(argv: list[str] | None = None) -> int:
         config = load_project_config(args.project_config)
         github = GitHubCliIssuesClient(gh=config.github_cli)
         issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
-        max_attempts = 3
-        for attempt in range(1, max_attempts + 1):
-            plan = prepare_triage_run(
-                config=config,
-                issue_number=args.issue,
-                repo_path=args.repo_path,
-                output_dir=args.output_dir,
-                github=github,
-            )
-            if not args.execute:
-                break
-            status = execute_triage_run(
-                config=config,
-                issue_number=args.issue,
-                plan=plan,
-                github=github,
-                issue_fields=issue_fields,
-                lark=_optional_lark_client(config),
-                accept_stale_context=attempt == max_attempts,
-                final_attempt=attempt == max_attempts,
-            )
-            if status == "no_output":
+
+        def _run_triage_attempts(*, repo_path, branch_note: str):
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                plan = prepare_triage_run(
+                    config=config,
+                    issue_number=args.issue,
+                    repo_path=repo_path,
+                    output_dir=args.output_dir,
+                    github=github,
+                    branch_note=branch_note,
+                )
+                if not args.execute:
+                    return plan
+                status = execute_triage_run(
+                    config=config,
+                    issue_number=args.issue,
+                    plan=plan,
+                    github=github,
+                    issue_fields=issue_fields,
+                    lark=_optional_lark_client(config),
+                    accept_stale_context=attempt == max_attempts,
+                    final_attempt=attempt == max_attempts,
+                )
+                if status == "no_output":
+                    print(
+                        f"triage agent produced no output (attempt {attempt}); retrying",
+                        file=sys.stderr,
+                    )
+                    continue
+                if status != "stale_context":
+                    return plan
                 print(
-                    f"triage agent produced no output (attempt {attempt}); retrying",
+                    f"new comments arrived during triage run (attempt {attempt}); retrying with fresh context",
                     file=sys.stderr,
                 )
-                continue
-            if status != "stale_context":
-                break
-            print(
-                f"new comments arrived during triage run (attempt {attempt}); retrying with fresh context",
-                file=sys.stderr,
-            )
+            return plan
+
+        resolution = resolve_issue_branch(
+            config=config,
+            issue_number=args.issue,
+            base_repo=args.repo_path,
+            github=github,
+        )
+        if resolution.status == "main":
+            plan = _run_triage_attempts(repo_path=args.repo_path, branch_note="")
+        else:
+            with triage_worktree(base_repo=args.repo_path, ref=resolution.ref) as worktree_path:
+                plan = _run_triage_attempts(repo_path=worktree_path, branch_note=resolution.note)
         print(
             json.dumps(
                 {
                     "execute": args.execute,
+                    "analyzed_branch": resolution.analyzed_branch,
+                    "declared_branch": resolution.declared_branch,
+                    "branch_status": resolution.status,
                     "context": str(plan.context_path),
                     "schema": str(plan.schema_path),
                     "output": str(plan.output_path),

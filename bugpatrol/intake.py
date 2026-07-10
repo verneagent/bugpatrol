@@ -35,6 +35,12 @@ class IntakeRecord:
     lark_topic_url: str = ""
     lark_message_url: str = ""
     attachments: tuple[Attachment, ...] = field(default_factory=tuple)
+    # Declared (not inferred) feature branch the report was seen on. Defaults
+    # to "main"; a branch-scoped topic group sets its branch here.
+    target_branch: str = "main"
+    # Best-effort remote tip SHA of target_branch at intake time, so a later
+    # merged+deleted branch can still be classified. Empty for main.
+    branch_tip_sha: str = ""
 
 
 def intake_record_from_dict(data: dict[str, Any]) -> IntakeRecord:
@@ -60,6 +66,8 @@ def intake_record_from_dict(data: dict[str, Any]) -> IntakeRecord:
         lark_topic_url=str(data.get("lark_topic_url") or ""),
         lark_message_url=str(data.get("lark_message_url") or ""),
         attachments=attachments,
+        target_branch=str(data.get("target_branch") or "main"),
+        branch_tip_sha=str(data.get("branch_tip_sha") or ""),
     )
 
 
@@ -76,6 +84,12 @@ def render_issue_body(record: IntakeRecord, *, language: str = "en-US") -> str:
         "reporter_open_id": record.reporter_open_id,
         "attachment_urls": [item.url for item in record.attachments],
     }
+    # Only stamp branch keys for feature-branch topics; main-branch issues keep
+    # the legacy meta shape unchanged.
+    if record.target_branch and record.target_branch != "main":
+        meta["target_branch"] = record.target_branch
+        if record.branch_tip_sha:
+            meta["branch_tip_sha"] = record.branch_tip_sha
 
     return "\n".join(
         [
@@ -113,6 +127,17 @@ def parse_intake_metadata(body: str) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         raise ValueError("intake metadata must be a JSON object")
     return data
+
+
+def target_branch_from_metadata(metadata: dict[str, Any]) -> str:
+    """Declared feature branch for an issue; absent/legacy meta -> "main"."""
+    value = metadata.get("target_branch")
+    return value if isinstance(value, str) and value else "main"
+
+
+def branch_tip_sha_from_metadata(metadata: dict[str, Any]) -> str:
+    value = metadata.get("branch_tip_sha")
+    return value if isinstance(value, str) else ""
 
 
 def is_bugpatrol_managed_issue(issue: GitHubIssue) -> bool:

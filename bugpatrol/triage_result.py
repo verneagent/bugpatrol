@@ -169,6 +169,7 @@ def apply_triage_result(
     issue_fields: GitHubIssueFieldsClient,
     lark: LarkMessengerClient | None = None,
     run_stats: TriageRunStats | None = None,
+    branch_note: str = "",
 ) -> TriageApplySummary:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
     require_bugpatrol_managed_issue(issue)
@@ -204,6 +205,7 @@ def apply_triage_result(
                 result=result,
                 github=github,
                 lark=lark,
+                branch_note=branch_note,
             )
         elif lark is not None:
             _send_lark_triage_summary(
@@ -214,12 +216,13 @@ def apply_triage_result(
                 lark=lark,
                 config=config,
                 run_stats=run_stats,
+                branch_note=branch_note,
             )
         github.add_issue_comment(
             repo=repo,
             issue_number=issue_number,
             body=append_triage_metadata(
-                _with_runner_attribution(render_triage_comment(result), run_stats=run_stats),
+                _with_runner_attribution(render_triage_comment(result, branch_note=branch_note), run_stats=run_stats),
                 {
                     "version": 1,
                     "issue": issue_number,
@@ -346,18 +349,19 @@ def triage_runner_name() -> str:
     return os.environ.get("BUGPATROL_RUNNER_NAME") or os.environ.get("RUNNER_NAME", "")
 
 
-def render_triage_comment(result: TriageResult) -> str:
+def render_triage_comment(result: TriageResult, *, branch_note: str = "") -> str:
     body = result.comment_markdown.rstrip()
-    if not result.blame_suggestion and not result.suspected_owner:
-        return body
-    if "Blame" in body or "归因" in body:
-        return body
-    parts = []
-    if result.suspected_owner:
-        parts.append(f"疑似引入人（Owner）：{result.suspected_owner}")
-    if result.blame_suggestion:
-        parts.append(f"归因线索：{result.blame_suggestion}")
-    return f"{body}\n\n" + "\n".join(parts)
+    if result.blame_suggestion or result.suspected_owner:
+        if "Blame" not in body and "归因" not in body:
+            parts = []
+            if result.suspected_owner:
+                parts.append(f"疑似引入人（Owner）：{result.suspected_owner}")
+            if result.blame_suggestion:
+                parts.append(f"归因线索：{result.blame_suggestion}")
+            body = f"{body}\n\n" + "\n".join(parts)
+    if branch_note:
+        body = f"> {branch_note}\n\n{body}"
+    return body
 
 
 def triage_field_values_for_write(
@@ -430,6 +434,7 @@ def _send_lark_follow_up(
     result: TriageResult,
     github: GitHubCliIssuesClient,
     lark: LarkMessengerClient,
+    branch_note: str = "",
 ) -> None:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
     metadata = parse_intake_metadata(issue.body or "") or {}
@@ -441,6 +446,7 @@ def _send_lark_follow_up(
             issue_url=issue.url,
             questions=result.follow_up_questions,
             reporter_open_id=_metadata_str(metadata, "reporter_open_id"),
+            branch_note=branch_note,
         ),
     )
 
@@ -454,6 +460,7 @@ def _send_lark_triage_summary(
     lark: LarkMessengerClient,
     config: ProjectConfig,
     run_stats: TriageRunStats | None = None,
+    branch_note: str = "",
 ) -> None:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
     _reply_to_intake_topic(
@@ -466,6 +473,7 @@ def _send_lark_triage_summary(
             assignee_open_id=(config.lark.user_open_ids or {}).get(result.assignee, ""),
             runner_name=triage_runner_name(),
             run_stats=run_stats,
+            branch_note=branch_note,
         ),
     )
 
@@ -549,8 +557,11 @@ def render_triage_summary_lark_message(
     assignee_open_id: str = "",
     runner_name: str = "",
     run_stats: TriageRunStats | None = None,
+    branch_note: str = "",
 ) -> str:
     lines = [f"分诊完成，GitHub issue [#{issue_number}]({issue_url})"]
+    if branch_note:
+        lines.append(branch_note)
     if result.duplicate_of:
         duplicate_url = f"{issue_url.rsplit('/', 1)[0]}/{result.duplicate_of}"
         lines.append(f"结论：重复，已关闭。重复于 [#{result.duplicate_of}]({duplicate_url})")
@@ -580,9 +591,12 @@ def render_needs_info_lark_message(
     issue_url: str,
     questions: tuple[str, ...],
     reporter_open_id: str = "",
+    branch_note: str = "",
 ) -> str:
     prefix = f'<at user_id="{reporter_open_id}"></at> ' if reporter_open_id else ""
     lines = [f"{prefix}需要补充信息，GitHub issue [#{issue_number}]({issue_url})"]
+    if branch_note:
+        lines.append(branch_note)
     lines.append("")
     lines.extend(f"{index}. {question}" for index, question in enumerate(questions, start=1))
     return "\n".join(lines)

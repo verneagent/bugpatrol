@@ -17,8 +17,18 @@ from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import triage_output_schema
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
-from bugpatrol.intake import require_bugpatrol_managed_issue
+from bugpatrol.intake import (
+    branch_tip_sha_from_metadata,
+    require_bugpatrol_managed_issue,
+    target_branch_from_metadata,
+)
 from bugpatrol.ownership import load_codeowners, load_codeowners_identities
+from bugpatrol.worktree import (
+    BranchResolution,
+    GitDriver,
+    SubprocessGitDriver,
+    resolve_triage_branch,
+)
 from bugpatrol.triage_context import (
     AssigneeIdentity,
     build_triage_context,
@@ -46,6 +56,9 @@ class TriageRunPlan:
     invocation: AgentInvocation
     context_comment_ids: tuple[str, ...] = ()
     known_assignees: tuple[str, ...] = ()
+    # Human-facing note about which branch was analyzed (empty for main), shown
+    # in the triage comment header and the Lark notify.
+    branch_note: str = ""
 
 
 def prepare_triage_run(
@@ -56,6 +69,7 @@ def prepare_triage_run(
     output_dir: Path,
     github: GitHubCliIssuesClient,
     prompt_path: Path = Path("prompts/triage.zh.md"),
+    branch_note: str = "",
 ) -> TriageRunPlan:
     issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
     require_bugpatrol_managed_issue(issue)
@@ -98,6 +112,7 @@ def prepare_triage_run(
         context_comment_ids=comment_ids(comments),
         invocation=invocation,
         known_assignees=known_assignees,
+        branch_note=branch_note,
     )
 
 
@@ -142,12 +157,37 @@ def build_assignee_roster(
     return tuple(roster)
 
 
-def _render_triage_start_message(*, issue_number: int, issue_url: str) -> str:
+def _render_triage_start_message(*, issue_number: int, issue_url: str, branch_note: str = "") -> str:
     text = f"开始分诊，GitHub issue [#{issue_number}]({issue_url})"
+    if branch_note:
+        text += f"\n{branch_note}"
     runner = triage_runner_name()
     if runner:
         text += f"\n分诊执行机：{runner}"
     return text
+
+
+def resolve_issue_branch(
+    *,
+    config: ProjectConfig,
+    issue_number: int,
+    base_repo: Path,
+    github: GitHubCliIssuesClient,
+    driver: GitDriver | None = None,
+) -> BranchResolution:
+    """Resolve which branch/ref a triage run should analyze for an issue.
+
+    Reads the declared branch from the issue's BUGPATROL_INTAKE_META; legacy or
+    main-branch issues resolve to main (no worktree needed).
+    """
+    issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
+    metadata = require_bugpatrol_managed_issue(issue)
+    driver = driver or SubprocessGitDriver(base_repo)
+    return resolve_triage_branch(
+        driver,
+        target_branch=target_branch_from_metadata(metadata),
+        branch_tip_sha=branch_tip_sha_from_metadata(metadata),
+    )
 
 
 def execute_triage_run(
@@ -175,7 +215,11 @@ def execute_triage_run(
             issue_number=issue_number,
             github=github,
             lark=lark,
-            text=_render_triage_start_message(issue_number=issue_number, issue_url=issue.url),
+            text=_render_triage_start_message(
+                issue_number=issue_number,
+                issue_url=issue.url,
+                branch_note=plan.branch_note,
+            ),
         )
     record_triage_run_start(
         config=config,
@@ -271,6 +315,7 @@ def execute_triage_run(
         issue_fields=issue_fields,
         lark=lark,
         run_stats=run_stats,
+        branch_note=plan.branch_note,
     )
     return "applied"
 

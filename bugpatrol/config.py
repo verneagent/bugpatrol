@@ -35,10 +35,25 @@ class LarkConfig:
     # "lark" (international) or "feishu" (China); drives API base URL and
     # the default message link domain.
     platform: str = "lark"
+    # Extra topic groups scoped to a feature branch: Lark chat_id -> branch.
+    # The main `chat_id` above always maps to "main". A topic posted in one of
+    # these groups declares (does not infer) that its build was the branch.
+    branch_chats: dict[str, str] | None = None
 
     @property
     def api_base_url(self) -> str:
         return _LARK_PLATFORM_API_BASE_URLS[self.platform]
+
+    def branch_for_chat(self, chat_id: str) -> str:
+        """Resolve the declared feature branch for a chat; main chat -> "main"."""
+        if self.branch_chats and chat_id in self.branch_chats:
+            return self.branch_chats[chat_id]
+        return "main"
+
+    def all_chat_ids(self) -> tuple[str, ...]:
+        """Every chat the watcher scans: the main chat plus branch chats."""
+        ids = [self.chat_id, *(self.branch_chats or {})]
+        return tuple(dict.fromkeys(ids))
 
 
 def _default_message_url_template(platform: str) -> str:
@@ -212,6 +227,7 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
     platform = str(lark.get("platform") or "lark")
     if platform not in _LARK_PLATFORM_API_BASE_URLS:
         raise ValueError('lark.platform must be "lark" or "feishu"')
+    branch_chats = _parse_branch_chats(lark, main_chat_id=_required_str(lark, "chat_id"))
 
     return ProjectConfig(
         github_repo=_required_str(data, "github_repo"),
@@ -227,6 +243,7 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             message_url_template=str(lark.get("message_url_template") or "")
             or _default_message_url_template(platform),
             platform=platform,
+            branch_chats=branch_chats or None,
         ),
         triage_agent=TriageAgentConfig(
             runner_labels=tuple(_required_list(triage_agent, "runner_labels")),
@@ -322,6 +339,26 @@ def _optional_str_list(data: dict[str, Any], key: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"{key!r} must be a string list")
     return value
+
+
+def _parse_branch_chats(lark: dict[str, Any], *, main_chat_id: str) -> dict[str, str]:
+    value = lark.get("branch_chats")
+    if value is None:
+        return {}
+    if not isinstance(value, list):
+        raise ValueError("lark.branch_chats must be an array of tables")
+    result: dict[str, str] = {}
+    for entry in value:
+        if not isinstance(entry, dict):
+            raise ValueError("each [[lark.branch_chats]] entry must be a table")
+        chat_id = _required_str(entry, "chat_id")
+        branch = _required_str(entry, "branch")
+        if chat_id == main_chat_id:
+            raise ValueError("lark.branch_chats cannot re-map the main lark.chat_id")
+        if chat_id in result:
+            raise ValueError(f"duplicate lark.branch_chats chat_id: {chat_id}")
+        result[chat_id] = branch
+    return result
 
 
 def _optional_owner_map(data: dict[str, Any], key: str) -> dict[str, tuple[str, ...]]:

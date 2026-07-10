@@ -127,6 +127,61 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "lark.platform"):
             parse_project_config(self._minimal_data(config, {"platform": "wechat"}))
 
+    def test_branch_chats_defaults_to_none_and_main(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        parsed = parse_project_config(self._minimal_data(config))
+
+        self.assertIsNone(parsed.lark.branch_chats)
+        self.assertEqual(parsed.lark.branch_for_chat("oc_anything"), "main")
+        self.assertEqual(parsed.lark.all_chat_ids(), (config.lark.chat_id,))
+
+    def test_branch_chats_map_chat_to_branch(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        parsed = parse_project_config(
+            self._minimal_data(
+                config,
+                {
+                    "branch_chats": [
+                        {"chat_id": "oc_feature", "branch": "feature/x"},
+                        {"chat_id": "oc_other", "branch": "release/2"},
+                    ]
+                },
+            )
+        )
+
+        self.assertEqual(parsed.lark.branch_for_chat("oc_feature"), "feature/x")
+        self.assertEqual(parsed.lark.branch_for_chat("oc_other"), "release/2")
+        self.assertEqual(parsed.lark.branch_for_chat(config.lark.chat_id), "main")
+        self.assertEqual(
+            parsed.lark.all_chat_ids(),
+            (config.lark.chat_id, "oc_feature", "oc_other"),
+        )
+
+    def test_branch_chats_rejects_remapping_main_chat(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        with self.assertRaisesRegex(ValueError, "main lark.chat_id"):
+            parse_project_config(
+                self._minimal_data(
+                    config,
+                    {"branch_chats": [{"chat_id": config.lark.chat_id, "branch": "x"}]},
+                )
+            )
+
+    def test_branch_chats_rejects_duplicate_chat(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            parse_project_config(
+                self._minimal_data(
+                    config,
+                    {
+                        "branch_chats": [
+                            {"chat_id": "oc_dup", "branch": "a"},
+                            {"chat_id": "oc_dup", "branch": "b"},
+                        ]
+                    },
+                )
+            )
+
     def test_validation_rejects_missing_field(self) -> None:
         config = load_project_config(Path("projects/example.toml"))
         broken = parse_project_config(

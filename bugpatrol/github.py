@@ -329,6 +329,25 @@ class GitHubCliIssuesClient:
             ]
         )
 
+    def remote_branch_tip_sha(self, *, repo: str, branch: str) -> str:
+        """Best-effort current tip SHA of a remote branch; "" if unavailable.
+
+        Recorded at intake so a branch later merged and deleted can still be
+        classified. Never raises: a missing branch just yields "".
+        """
+        try:
+            result = self._run(
+                [
+                    "api",
+                    f"repos/{repo}/git/ref/heads/{branch}",
+                    "--jq",
+                    ".object.sha",
+                ]
+            )
+        except GitHubCliError:
+            return ""
+        return result.stdout.strip()
+
     def add_assignee(self, *, repo: str, issue_number: int, assignee: str) -> None:
         self._run(
             [

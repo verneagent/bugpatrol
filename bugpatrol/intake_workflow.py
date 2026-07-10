@@ -58,7 +58,7 @@ class IntakeWorkflow:
         )
 
     def process(self, record: IntakeRecord) -> IntakeOutcome:
-        if record.chat_id != self._config.lark.chat_id:
+        if record.chat_id not in self._config.lark.all_chat_ids():
             raise ValueError(f"unexpected chat_id: {record.chat_id}")
 
         existing = self._github.find_issue_by_intake_root(
@@ -99,7 +99,7 @@ class IntakeWorkflow:
                 triage_signal=triage_signal,
             )
 
-        fields = initial_intake_fields(record)
+        fields = initial_intake_fields(record, include_branch=self._include_branch_field(record))
         title = build_issue_title(record)
         body = render_issue_body(record, language=self._config.intake.language)
         raced = self._github.find_issue_by_intake_root(
@@ -174,10 +174,15 @@ class IntakeWorkflow:
         self._issue_fields.add_issue_field_values(
             repo=self._config.github_repo,
             issue_number=issue_number,
-            values=initial_intake_fields(record),
+            values=initial_intake_fields(record, include_branch=self._include_branch_field(record)),
             config=self._config,
         )
         return True
+
+    def _include_branch_field(self, record: IntakeRecord) -> bool:
+        """Write the free-text Branch mirror only for declared feature branches
+        and only when the project maps a Branch field."""
+        return record.target_branch != "main" and "Branch" in self._config.issue_field_names
 
     def _mark_pending_after_final_status(self, *, issue_number: int, triage_signal: TriageSignal) -> None:
         # A new topic reply re-enqueues triage; Pending reflects that the issue
@@ -209,7 +214,7 @@ def build_issue_title(record: IntakeRecord) -> str:
     return f"[Lark] {text}"
 
 
-def initial_intake_fields(record: IntakeRecord) -> dict[str, str]:
+def initial_intake_fields(record: IntakeRecord, *, include_branch: bool = False) -> dict[str, str]:
     fields = {
         "Source": "Lark",
         "Intake version": "v2",
@@ -220,6 +225,11 @@ def initial_intake_fields(record: IntakeRecord) -> dict[str, str]:
         validate_field_value(name, value)
     if "Bug" not in NATIVE_ISSUE_TYPES:
         raise ValueError("Bug issue type is not supported")
+    # "Branch" is a free-text mirror (branches are dynamic, not an enum), so it
+    # is added after enum validation. Only when the topic declares a feature
+    # branch and the project maps the field.
+    if include_branch:
+        fields["Branch"] = record.target_branch
     return fields
 
 
