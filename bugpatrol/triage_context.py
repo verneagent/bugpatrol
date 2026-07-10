@@ -22,11 +22,18 @@ class MediaEvidence:
 
 
 @dataclass(frozen=True)
+class AssigneeIdentity:
+    login: str
+    aliases: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class TriageContext:
     issue: GitHubIssue
     comments: tuple[GitHubIssueComment, ...]
     prd_hits: tuple[PrdSearchHit, ...]
     media: tuple[MediaEvidence, ...]
+    roster: tuple[AssigneeIdentity, ...] = ()
 
 
 def build_triage_context(
@@ -36,6 +43,7 @@ def build_triage_context(
     prd_root: Path,
     prd_include_globs: tuple[str, ...] = ("**/*.md",),
     prd_limit: int = 5,
+    roster: tuple[AssigneeIdentity, ...] = (),
 ) -> TriageContext:
     docs = load_prd_documents(prd_root, include_globs=prd_include_globs)
     comments_text = "\n".join(comment.body for comment in comments)
@@ -49,7 +57,7 @@ def build_triage_context(
             for item in extract_media_evidence(comment.body, source=f"comment {comment.id}")
         ),
     )
-    return TriageContext(issue=issue, comments=comments, prd_hits=hits, media=media)
+    return TriageContext(issue=issue, comments=comments, prd_hits=hits, media=media, roster=roster)
 
 
 def render_triage_context_markdown(context: TriageContext) -> str:
@@ -82,6 +90,25 @@ def render_triage_context_markdown(context: TriageContext) -> str:
         )
     lines.extend(
         [
+            "## Assignee Roster",
+            "",
+            (
+                "Use this to map a free-form assignment instruction in the issue/"
+                "comments (an @mention, a typed Lark or GitHub name, or a short "
+                "form) to the correct GitHub login. Only assign when a name "
+                "clearly matches one entry."
+            ),
+            "",
+        ]
+    )
+    if not context.roster:
+        lines.append("- No roster configured.")
+    for identity in context.roster:
+        aliases = " / ".join(identity.aliases) if identity.aliases else "(no aliases)"
+        lines.append(f"- `{identity.login}` — {aliases}")
+    lines.extend(
+        [
+            "",
             "## Media Evidence",
             "",
         ]

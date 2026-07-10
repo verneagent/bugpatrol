@@ -19,7 +19,11 @@ from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake import require_bugpatrol_managed_issue
 from bugpatrol.ownership import load_codeowners
-from bugpatrol.triage_context import build_triage_context, render_triage_context_markdown
+from bugpatrol.triage_context import (
+    AssigneeIdentity,
+    build_triage_context,
+    render_triage_context_markdown,
+)
 from bugpatrol.triage_result import (
     TriageResult,
     TriageRunStats,
@@ -57,17 +61,18 @@ def prepare_triage_run(
     require_bugpatrol_managed_issue(issue)
     output_dir.mkdir(parents=True, exist_ok=True)
     comments = github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)
+    known_assignees = list_known_assignees(repo_path, config=config)
     context = build_triage_context(
         issue=issue,
         comments=comments,
         prd_root=repo_path / config.prd.cache_path,
         prd_include_globs=config.prd.include_globs,
+        roster=build_assignee_roster(known_assignees, config=config),
     )
     context_path = output_dir / "triage-context.md"
     schema_path = output_dir / "triage.schema.json"
     output_path = output_dir / "triage-output.json"
     context_path.write_text(render_triage_context_markdown(context))
-    known_assignees = list_known_assignees(repo_path, config=config)
     schema_path.write_text(
         json.dumps(
             triage_output_schema(known_assignees=known_assignees),
@@ -113,6 +118,24 @@ def list_known_assignees(repo_path: Path, *, config: ProjectConfig) -> tuple[str
             if handle and "/" not in handle:
                 logins.add(handle)
     return tuple(sorted(logins))
+
+
+def build_assignee_roster(
+    known_assignees: tuple[str, ...], *, config: ProjectConfig
+) -> tuple[AssigneeIdentity, ...]:
+    """Pair each valid assignee login with its human aliases.
+
+    Lets the triage agent map a free-form "assign to X" reference (an
+    @mention, a typed Lark/GitHub name, or a short form) to a login. The
+    login itself is always a valid alias; extra aliases come from
+    `[owners.identities]`.
+    """
+    identities = config.owners.identities or {}
+    roster: list[AssigneeIdentity] = []
+    for login in known_assignees:
+        aliases = tuple(dict.fromkeys((login, *identities.get(login, ()))))
+        roster.append(AssigneeIdentity(login=login, aliases=aliases))
+    return tuple(roster)
 
 
 def _render_triage_start_message(*, issue_number: int, issue_url: str) -> str:

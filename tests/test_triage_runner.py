@@ -14,6 +14,7 @@ from bugpatrol.intake import IntakeRecord, render_issue_body
 from bugpatrol.triage_runner import (
     TriageRunPlan,
     append_triage_run_metadata,
+    build_assignee_roster,
     comment_ids,
     execute_triage_run,
     list_known_assignees,
@@ -115,6 +116,20 @@ class TriageRunnerTest(unittest.TestCase):
         )
 
         self.assertEqual(comment_ids(comments), ("1",))
+
+    def test_build_assignee_roster_merges_login_and_identity_aliases(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = replace(
+            config,
+            owners=replace(config.owners, identities={"naohn42": ("Naohn", "阿闹")}),
+        )
+
+        roster = build_assignee_roster(("naohn42", "garlanddiego"), config=config)
+
+        by_login = {item.login: item.aliases for item in roster}
+        # Login is always its own alias; extra aliases come from config.
+        self.assertEqual(by_login["naohn42"], ("naohn42", "Naohn", "阿闹"))
+        self.assertEqual(by_login["garlanddiego"], ("garlanddiego",))
 
     def test_execute_triage_run_marks_failed_when_agent_exits_nonzero(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

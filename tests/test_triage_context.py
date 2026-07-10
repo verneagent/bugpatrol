@@ -5,7 +5,12 @@ import unittest
 from pathlib import Path
 
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment
-from bugpatrol.triage_context import build_triage_context, extract_media_evidence, render_triage_context_markdown
+from bugpatrol.triage_context import (
+    AssigneeIdentity,
+    build_triage_context,
+    extract_media_evidence,
+    render_triage_context_markdown,
+)
 
 
 class TriageContextTest(unittest.TestCase):
@@ -27,6 +32,26 @@ class TriageContextTest(unittest.TestCase):
         self.assertIn("# BugPatrol Triage Context", markdown)
         self.assertIn("Todo empty state missing", markdown)
         self.assertIn("todo-list.md", markdown)
+
+    def test_context_renders_assignee_roster(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            issue = GitHubIssue(
+                number=1,
+                url="https://github.test/o/r/issues/1",
+                title="Assign to Naohn",
+                body="这个给@Naohn 你来看下",
+            )
+            roster = (
+                AssigneeIdentity(login="naohn42", aliases=("naohn42", "Naohn", "阿闹")),
+            )
+
+            context = build_triage_context(issue=issue, prd_root=root, roster=roster)
+            markdown = render_triage_context_markdown(context)
+
+        self.assertEqual(context.roster, roster)
+        self.assertIn("## Assignee Roster", markdown)
+        self.assertIn("`naohn42` — naohn42 / Naohn / 阿闹", markdown)
 
     def test_context_includes_comments_and_media_evidence_descriptions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

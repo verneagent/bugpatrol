@@ -111,6 +111,10 @@ class OwnersConfig:
     default: tuple[str, ...] = ()
     paths: dict[str, tuple[str, ...]] | None = None
     capabilities: dict[str, tuple[str, ...]] | None = None
+    # GitHub login -> human aliases (Lark display name, nicknames, short
+    # forms). Injected into the triage context so the agent can map a
+    # free-form "assign to X" reference to the right login.
+    identities: dict[str, tuple[str, ...]] | None = None
 
 
 @dataclass(frozen=True)
@@ -273,6 +277,7 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             default=tuple(_optional_str_list(owners, "default")),
             paths=_optional_owner_map(owners, "paths"),
             capabilities=_optional_owner_map(owners, "capabilities"),
+            identities=_optional_owner_map(owners, "identities"),
         ),
         followup_classifier=FollowupClassifierConfig(
             acknowledgement_texts=tuple(_optional_str_list(followup_classifier, "acknowledgement_texts")),
