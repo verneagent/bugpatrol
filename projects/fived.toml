@@ -10,6 +10,16 @@ bot_open_id = "ou_cef931fa2df05ca6f8ae80cb2f3e6094"
 # 团队用 Lark 国际版客户端；驱动 API 域名与话题链接域名（applink.larksuite.com）
 platform = "lark"
 
+# Branch-scoped topic groups: bugs reported here are analyzed against the
+# declared feature branch instead of main.
+[[lark.branch_chats]]
+chat_id = "oc_a848d65b8d8f25bbbfdfd6dc8e697e51"
+branch = "2026/chat-live"
+
+[[lark.branch_chats]]
+chat_id = "oc_29b55b1560c31cafa9210fd4811cf3e0"
+branch = "feature-community"
+
 # GitHub login -> Lark open_id，用于分诊/追问消息里真正 @ 到人
 [lark.user_open_ids]
 garlanddiego = "ou_5935e6148d74f4d907c821d151e1bd09"
