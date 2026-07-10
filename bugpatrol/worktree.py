@@ -80,7 +80,10 @@ def resolve_triage_branch(
             analyzed_branch=target_branch,
             declared_branch=target_branch,
             ref=f"origin/{target_branch}",
-            note=f"分析分支：`{target_branch}`",
+            # The branch isn't inferred by triage; it's declared by the
+            # reporting topic group (config branch_chats). Say "目标分支" so the
+            # note reads as scope, not as an analysis conclusion.
+            note=f"目标分支：`{target_branch}`",
             status="branch",
         )
 
