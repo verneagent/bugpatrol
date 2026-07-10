@@ -18,7 +18,7 @@ from bugpatrol.fields import triage_output_schema
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake import require_bugpatrol_managed_issue
-from bugpatrol.ownership import load_codeowners
+from bugpatrol.ownership import load_codeowners, load_codeowners_identities
 from bugpatrol.triage_context import (
     AssigneeIdentity,
     build_triage_context,
@@ -67,7 +67,11 @@ def prepare_triage_run(
         comments=comments,
         prd_root=repo_path / config.prd.cache_path,
         prd_include_globs=config.prd.include_globs,
-        roster=build_assignee_roster(known_assignees, config=config),
+        roster=build_assignee_roster(
+            known_assignees,
+            config=config,
+            codeowners_identities=load_codeowners_identities(repo_path),
+        ),
     )
     context_path = output_dir / "triage-context.md"
     schema_path = output_dir / "triage.schema.json"
@@ -121,19 +125,32 @@ def list_known_assignees(repo_path: Path, *, config: ProjectConfig) -> tuple[str
 
 
 def build_assignee_roster(
-    known_assignees: tuple[str, ...], *, config: ProjectConfig
+    known_assignees: tuple[str, ...],
+    *,
+    config: ProjectConfig,
+    codeowners_identities: dict[str, tuple[str, ...]] | None = None,
 ) -> tuple[AssigneeIdentity, ...]:
     """Pair each valid assignee login with its human aliases.
 
     Lets the triage agent map a free-form "assign to X" reference (an
-    @mention, a typed Lark/GitHub name, or a short form) to a login. The
-    login itself is always a valid alias; extra aliases come from
-    `[owners.identities]`.
+    @mention, a typed Lark/GitHub name, or a short form) to a login. Aliases
+    come from three sources, deduped in priority order: the login itself, the
+    name documented in the CODEOWNERS header, then extras from
+    `[owners.identities]` (nicknames the project file does not carry).
     """
-    identities = config.owners.identities or {}
+    codeowners_identities = codeowners_identities or {}
+    config_identities = config.owners.identities or {}
     roster: list[AssigneeIdentity] = []
     for login in known_assignees:
-        aliases = tuple(dict.fromkeys((login, *identities.get(login, ()))))
+        aliases = tuple(
+            dict.fromkeys(
+                (
+                    login,
+                    *codeowners_identities.get(login, ()),
+                    *config_identities.get(login, ()),
+                )
+            )
+        )
         roster.append(AssigneeIdentity(login=login, aliases=aliases))
     return tuple(roster)
 

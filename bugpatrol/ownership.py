@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +14,39 @@ from bugpatrol.config import OwnersConfig
 class CodeownersRule:
     pattern: str
     owners: tuple[str, ...]
+
+
+# Matches a "Name (@login)" pair inside a CODEOWNERS comment header, e.g.
+# "#   Naohn      (@naohn42)     — match".
+_CODEOWNERS_IDENTITY_RE = re.compile(r"(?P<name>\S+)\s*\(@(?P<login>[\w-]+)\)")
+
+
+def parse_codeowners_identities(text: str) -> dict[str, tuple[str, ...]]:
+    """Derive login -> display name from CODEOWNERS comment headers.
+
+    The team roster is documented once, in the CODEOWNERS header, as
+    "Name (@login) — area" lines. Reuse that as the primary alias source so
+    the roster does not duplicate names the project already maintains.
+    """
+    identities: dict[str, tuple[str, ...]] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("#"):
+            continue
+        for match in _CODEOWNERS_IDENTITY_RE.finditer(line):
+            login = match.group("login")
+            name = match.group("name")
+            if login not in identities and name != login:
+                identities[login] = (name,)
+    return identities
+
+
+def load_codeowners_identities(repo_path: Path) -> dict[str, tuple[str, ...]]:
+    for relative in (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"):
+        path = repo_path / relative
+        if path.exists():
+            return parse_codeowners_identities(path.read_text())
+    return {}
 
 
 def parse_codeowners(text: str) -> tuple[CodeownersRule, ...]:

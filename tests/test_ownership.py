@@ -8,6 +8,7 @@ from bugpatrol.config import OwnersConfig
 from bugpatrol.ownership import (
     load_codeowners,
     parse_codeowners,
+    parse_codeowners_identities,
     resolve_configured_owners,
     resolve_first_owner,
     resolve_owners,
@@ -29,6 +30,25 @@ class OwnershipTest(unittest.TestCase):
         self.assertEqual(len(rules), 2)
         self.assertEqual(rules[0].pattern, "*")
         self.assertEqual(rules[1].owners, ("@todo-owner", "@backup"))
+
+    def test_parse_codeowners_identities_from_header_comments(self) -> None:
+        identities = parse_codeowners_identities(
+            "\n".join(
+                [
+                    "# Area ownership:",
+                    "#   Naohn      (@naohn42)     — match",
+                    "#   Andy       (@AndyCokeZero) — notifications",
+                    "* @garlanddiego",
+                    "/app/match-detail.tsx @naohn42 @TristinMax",
+                ]
+            )
+        )
+
+        # Names come only from comment headers, not from active rules.
+        self.assertEqual(identities["naohn42"], ("Naohn",))
+        self.assertEqual(identities["AndyCokeZero"], ("Andy",))
+        self.assertNotIn("garlanddiego", identities)
+        self.assertNotIn("TristinMax", identities)
 
     def test_later_matching_rule_wins(self) -> None:
         rules = parse_codeowners(

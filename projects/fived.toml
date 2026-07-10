@@ -75,15 +75,8 @@ Evidence = "Evidence"
 "Owner reason" = "Owner reason"
 Owner = "Owner"
 
-# GitHub login -> human aliases (Lark 名 / 简写 / 别称). Lets triage map a
-# free-form "assign 给 X" reference to the right login. The login itself is
-# always matched; names seeded from the CODEOWNERS header.
+# Extra owner aliases NOT already in the CODEOWNERS header. The primary
+# name per login is auto-derived from CODEOWNERS ("Name (@login) — area");
+# only list nicknames the project file does not carry here.
 [owners.identities]
-garlanddiego = ["Diego"]
-wind2star = ["Wind2star"]
-jerry-emperor = ["Jerry"]
-AndyCokeZero = ["Andy"]
-naohn42 = ["Naohn"]
-Sobit-Riki = ["RikiRiki"]
-TristinMax = ["Tristin", "杨总"]
-SoxiaLiSA = ["Nanami"]
+TristinMax = ["杨总"]
