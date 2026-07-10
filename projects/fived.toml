@@ -38,6 +38,15 @@ runner_labels = ["self-hosted", "bugpatrol-fived-triage"]
 model = ""
 effort = ""
 
+# Cross-repo reference: fived 前端调用 weaver 后端，分诊时只读引用 weaver。
+# 分支默认取主库解析出的目标分支同名分支，weaver 上不存在则静默退回 main。
+# 运行侧由 triage workflow 自愈 clone-or-fetch 到 ~/clover/weaver 并经
+# --reference-repo 传入（config 声明与 workflow 必须同时在线，否则 fail-loud）。
+[[triage.reference_repos]]
+repo = "TheCloverLab/weaver"
+path = "~/clover/weaver"
+purpose = "Go backend for the fived frontend (proto routes, comment/chat permissions, quest errors)"
+
 [prd]
 root_wiki_node = "LOCAL_PRD_DOCS"
 cache_path = "openspec"
