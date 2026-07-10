@@ -117,23 +117,15 @@ class TriageRunnerTest(unittest.TestCase):
 
         self.assertEqual(comment_ids(comments), ("1",))
 
-    def test_build_assignee_roster_merges_codeowners_and_config_aliases(self) -> None:
-        config = load_project_config(Path("projects/todo-sandbox.toml"))
-        config = replace(
-            config,
-            owners=replace(config.owners, identities={"TristinMax": ("杨总",)}),
-        )
-
+    def test_build_assignee_roster_uses_login_and_codeowners_name(self) -> None:
         roster = build_assignee_roster(
-            ("naohn42", "TristinMax", "garlanddiego"),
-            config=config,
-            codeowners_identities={"naohn42": ("Naohn",), "TristinMax": ("Tristin",)},
+            ("naohn42", "garlanddiego"),
+            codeowners_identities={"naohn42": ("Naohn",)},
         )
 
         by_login = {item.login: item.aliases for item in roster}
-        # Login + CODEOWNERS name; config only supplies extras, no duplication.
+        # Login is always its own alias; the CODEOWNERS header adds the name.
         self.assertEqual(by_login["naohn42"], ("naohn42", "Naohn"))
-        self.assertEqual(by_login["TristinMax"], ("TristinMax", "Tristin", "杨总"))
         self.assertEqual(by_login["garlanddiego"], ("garlanddiego",))
 
     def test_execute_triage_run_marks_failed_when_agent_exits_nonzero(self) -> None:

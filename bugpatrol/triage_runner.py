@@ -69,7 +69,6 @@ def prepare_triage_run(
         prd_include_globs=config.prd.include_globs,
         roster=build_assignee_roster(
             known_assignees,
-            config=config,
             codeowners_identities=load_codeowners_identities(repo_path),
         ),
     )
@@ -127,30 +126,18 @@ def list_known_assignees(repo_path: Path, *, config: ProjectConfig) -> tuple[str
 def build_assignee_roster(
     known_assignees: tuple[str, ...],
     *,
-    config: ProjectConfig,
     codeowners_identities: dict[str, tuple[str, ...]] | None = None,
 ) -> tuple[AssigneeIdentity, ...]:
     """Pair each valid assignee login with its human aliases.
 
     Lets the triage agent map a free-form "assign to X" reference (an
     @mention, a typed Lark/GitHub name, or a short form) to a login. Aliases
-    come from three sources, deduped in priority order: the login itself, the
-    name documented in the CODEOWNERS header, then extras from
-    `[owners.identities]` (nicknames the project file does not carry).
+    are the login itself plus the name documented in the CODEOWNERS header.
     """
     codeowners_identities = codeowners_identities or {}
-    config_identities = config.owners.identities or {}
     roster: list[AssigneeIdentity] = []
     for login in known_assignees:
-        aliases = tuple(
-            dict.fromkeys(
-                (
-                    login,
-                    *codeowners_identities.get(login, ()),
-                    *config_identities.get(login, ()),
-                )
-            )
-        )
+        aliases = tuple(dict.fromkeys((login, *codeowners_identities.get(login, ()))))
         roster.append(AssigneeIdentity(login=login, aliases=aliases))
     return tuple(roster)
 

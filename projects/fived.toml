@@ -74,9 +74,3 @@ Evidence = "Evidence"
 "Triage confidence" = "Triage confidence"
 "Owner reason" = "Owner reason"
 Owner = "Owner"
-
-# Extra owner aliases NOT already in the CODEOWNERS header. The primary
-# name per login is auto-derived from CODEOWNERS ("Name (@login) — area");
-# only list nicknames the project file does not carry here.
-[owners.identities]
-TristinMax = ["杨总"]
