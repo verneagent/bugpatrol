@@ -9,6 +9,11 @@ app_secret_env = "BUGPATROL_TODO_LARK_APP_SECRET"
 bot_open_id = "ou_cef931fa2df05ca6f8ae80cb2f3e6094"
 platform = "lark"
 
+# Branch-scoped topic group: bugs reported here are analyzed against feature-demo.
+[[lark.branch_chats]]
+chat_id = "oc_01a7b00d7c8645fa8c327a02d30b68cc"
+branch = "feature-demo"
+
 [triage_agent]
 # deepseek: claude CLI + DeepSeek Anthropic 端点（需 DEEPSEEK_API_KEY）
 provider = "deepseek"
@@ -55,3 +60,4 @@ Evidence = "Evidence"
 "Triage confidence" = "Triage confidence"
 "Owner reason" = "Owner reason"
 Owner = "Owner"
+Branch = "Branch"

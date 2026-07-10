@@ -89,7 +89,9 @@ def run_lark_backfill(
 ) -> BackfillResult:
     if resource_dir is not None and resource_store is not None:
         raise ValueError("resource_dir and resource_store are mutually exclusive")
-    messages = lark.list_chat_messages(chat_id=config.lark.chat_id, limit=limit)
+    messages: list[LarkMessage] = []
+    for chat_id in config.lark.all_chat_ids():
+        messages.extend(lark.list_chat_messages(chat_id=chat_id, limit=limit))
     outcomes: list[IntakeOutcome] = []
     events: list[BackfillEvent] = []
     skipped = 0

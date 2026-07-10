@@ -17,8 +17,13 @@ from bugpatrol.triage_queue import TriageRequest, TriageRequestQueue
 from bugpatrol.watcher import MAX_CONSECUTIVE_SCAN_FAILURES, dispatch_due_triage, run_polling_watcher
 
 
+MAIN_CHAT_ID = "oc_d371f022f168b567a141ced142691894"
+
+
 class FakeHistoryLark(FakeLarkMessengerClient):
     def list_chat_messages(self, *, chat_id: str, limit: int = 20) -> list[LarkMessage]:
+        if chat_id != MAIN_CHAT_ID:
+            return []
         return [
             LarkMessage(
                 message_id="om_1",
@@ -35,6 +40,8 @@ class FakeHistoryLark(FakeLarkMessengerClient):
 
 class FakeTwoTopicLark(FakeLarkMessengerClient):
     def list_chat_messages(self, *, chat_id: str, limit: int = 20) -> list[LarkMessage]:
+        if chat_id != MAIN_CHAT_ID:
+            return []
         return [
             LarkMessage(
                 message_id=message_id,

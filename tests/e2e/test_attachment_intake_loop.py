@@ -20,7 +20,7 @@ class FakeLarkHistory(FakeLarkMessengerClient):
         self.downloads: list[tuple[str, str, str]] = []
 
     def list_chat_messages(self, *, chat_id: str, limit: int = 20) -> list[LarkMessage]:
-        return self._messages[:limit]
+        return [m for m in self._messages if m.chat_id == chat_id][:limit]
 
     def download_message_resource(
         self,
