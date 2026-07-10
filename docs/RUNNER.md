@@ -10,12 +10,31 @@ pre-authenticated agent tooling.
 Required on the runner:
 
 - Python 3.11+
-- `gh` authenticated with issue, comment, and Issue Fields write access
-- local project config path, exported through `BUGPATROL_PROJECT_CONFIG`
-- the app repo checkout
-- local PRD/docs checkout under the configured `[prd].cache_path`
+- `git`
 - configured agent provider, such as `codex login`
 - media vision credentials if `[media].description_command` needs them
+
+Everything else comes from the workflow, not the runner disk:
+
+- **GitHub auth**: minted in-workflow with `actions/create-github-app-token`
+  (App id + private key in Actions secrets). No private key or `gh` login on the
+  box. The token authorizes issue/comment/field writes and the on-demand
+  private-branch fetch during branch resolution.
+- **Agent + Lark secrets**: `DEEPSEEK_API_KEY` and the Lark app secret are
+  injected into the step env from Actions secrets; the code reads both from
+  `os.environ`. Keep only machine-specific non-secrets (proxy vars, runner name)
+  in the runner `.env`.
+- **App repo checkout**: a runner-owned, per-runner cache clone bootstrapped by
+  `examples/github-actions/bugpatrol-cache-bootstrap.sh` — not a human dev
+  checkout. The cache is namespaced by `$RUNNER_NAME`
+  (`$HOME/.bugpatrol-cache/$RUNNER_NAME/<owner>/<repo>`) so two runners on one
+  machine never share a clone; a self-hosted runner is single-concurrency, so
+  every git op stays serial and race-free. The clone keeps full history (branch
+  resolution needs it), origin stays a tokenless URL, and auth is a repo-local
+  credential helper that echoes `GH_TOKEN` at call time — never `git config
+  --global`, and no token persisted in `.git/config`.
+- **PRD/docs**: the full-history clone already contains everything under the
+  configured `[prd].cache_path`.
 
 Recommended workflow template:
 

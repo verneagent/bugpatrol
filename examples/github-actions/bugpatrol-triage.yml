@@ -23,23 +23,71 @@ jobs:
   triage:
     runs-on: ${{ vars.BUGPATROL_TRIAGE_RUNNER_LABEL || 'self-hosted' }}
     steps:
-      - name: Checkout app repo
-        uses: actions/checkout@v5
+      # Mint a short-lived installation token in-workflow. No private key on the
+      # runner disk, no gh-bot-token.sh fallback. App id + private key live only
+      # in Actions secrets. Grants access to the app repo (and any reference
+      # repos on the same installation) for the duration of the job.
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.BUGPATROL_APP_ID }}
+          private-key: ${{ secrets.BUGPATROL_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          # Extend `repositories` if triage reads reference repos, e.g.
+          # repositories: |
+          #   ${{ github.event.repository.name }}
+          #   backend
 
-      - name: Checkout BugPatrol
+      # BugPatrol is public, so no token is needed to fetch the tool itself.
+      - name: Checkout BugPatrol tool
         uses: actions/checkout@v5
         with:
           repository: verneagent/bugpatrol
           path: .bugpatrol/tool
 
+      # Runner-owned, per-runner cache clone of the app repo (full history,
+      # tokenless origin, repo-local credential helper). Self-heals on a fresh
+      # runner; decoupled from any human dev checkout.
+      - name: Bootstrap app repo cache
+        id: app-cache
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          repo_path="$(bash "$GITHUB_WORKSPACE/.bugpatrol/tool/examples/github-actions/bugpatrol-cache-bootstrap.sh" "${{ github.repository }}")"
+          echo "repo_path=$repo_path" >> "$GITHUB_OUTPUT"
+
+      # Optional: bootstrap each reference repo declared in
+      # [[triage.reference_repos]] and collect --reference-repo args. Mirror the
+      # app-cache step per reference repo, then pass the paths below. Example:
+      #
+      # - name: Bootstrap reference repo (backend)
+      #   id: ref-backend
+      #   shell: bash
+      #   env:
+      #     GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      #   run: |
+      #     p="$(bash "$GITHUB_WORKSPACE/.bugpatrol/tool/examples/github-actions/bugpatrol-cache-bootstrap.sh" "${{ github.repository_owner }}/backend")"
+      #     echo "path=$p" >> "$GITHUB_OUTPUT"
+
+      # All credentials come from the workflow, not the runner box:
+      #   - GH_TOKEN: the minted app token (issue/comment/field writes + the
+      #     on-demand private branch fetch inside branch resolution).
+      #   - DEEPSEEK_API_KEY / LARK_APP_SECRET: read from os.environ by the code;
+      #     injected here as Actions secrets so nothing lives in the runner .env.
       - name: Run triage
         env:
-          GH_TOKEN: ${{ secrets.BUGPATROL_GH_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BUGPATROL_PROJECT_CONFIG: ${{ vars.BUGPATROL_PROJECT_CONFIG }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
         run: |
           PYTHONPATH="$GITHUB_WORKSPACE/.bugpatrol/tool" \
           python3 -m bugpatrol run-triage "$BUGPATROL_PROJECT_CONFIG" \
             --issue "${{ inputs.issue_number }}" \
-            --repo-path "$GITHUB_WORKSPACE" \
-            --output-dir ".bugpatrol/runs/issue-${{ inputs.issue_number }}" \
+            --repo-path "${{ steps.app-cache.outputs.repo_path }}" \
+            --output-dir "$GITHUB_WORKSPACE/.bugpatrol/runs/issue-${{ inputs.issue_number }}" \
             --execute
+            # For reference repos, append one flag per declared repo, e.g.
+            # --reference-repo "${{ github.repository_owner }}/backend=${{ steps.ref-backend.outputs.path }}"
