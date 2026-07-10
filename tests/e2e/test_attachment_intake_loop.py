@@ -135,15 +135,19 @@ class AttachmentIntakeLoopE2ETest(unittest.TestCase):
             resource_describer=FakeDescriber(),
         )
 
-        self.assertEqual(result.processed, 2)
-        self.assertEqual(github.created[0].fields["Evidence"], "文字描述")
-        self.assertEqual(len(github.created[0].comments), 1)
+        # The text report and the video coalesce into one atomic create; the
+        # video is folded into the body (no separate comment) and Evidence
+        # reflects the whole batch.
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(github.created[0].fields["Evidence"], "视频")
+        self.assertEqual(github.created[0].comments, [])
         self.assertEqual(lark.downloads, [("om_video", "file_v2_repro", "file")])
+        self.assertIn("导出卡住", github.created[0].issue.body)
         self.assertIn(
             "video: [打开附件](https://github.com/example-org/example-assets/raw/main/.github/issue-assets/om_video/repro.mp4)",
-            github.created[0].comments[0],
+            github.created[0].issue.body,
         )
-        self.assertIn("Video shows tapping Export", github.created[0].comments[0])
+        self.assertIn("Video shows tapping Export", github.created[0].issue.body)
         with self.subTest("triage context reads media from comments"):
             context = build_triage_context(
                 issue=github.created[0].issue,
@@ -219,27 +223,30 @@ class AttachmentIntakeLoopE2ETest(unittest.TestCase):
             resource_describer=ImageDescriber(),
         )
 
-        self.assertEqual(first.processed, 2)
-        self.assertEqual([outcome.action for outcome in first.outcomes], ["created", "updated"])
+        # Run 1 coalesces the root report and its same-scan follow-up into one
+        # atomic create (both in the body); run 2 (a later scan) appends the
+        # image as a single follow-up comment and re-opens triage.
+        self.assertEqual(first.processed, 1)
+        self.assertEqual([outcome.action for outcome in first.outcomes], ["created"])
         self.assertEqual(second.processed, 1)
         self.assertEqual(second.outcomes[0].action, "updated")
         self.assertEqual(second.outcomes[0].triage_signal.reason, "material_followup")
         self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Pending"})
         self.assertEqual(len(github.created), 1)
         self.assertIn("Lark app (cli_external_reporter)", github.created[0].issue.body)
-        self.assertEqual(len(github.created[0].comments), 2)
-        self.assertIn("补充：iOS 和 Android 都能复现。", github.created[0].comments[0])
+        self.assertIn("补充：iOS 和 Android 都能复现。", github.created[0].issue.body)
+        self.assertEqual(len(github.created[0].comments), 1)
         self.assertIn(
             "image: [打开附件](https://github.com/example-org/example-assets/raw/main/.github/issue-assets/om_image_followup/bug.png)",
-            github.created[0].comments[1],
+            github.created[0].comments[0],
         )
         self.assertIn(
             "![图片 1](https://github.com/example-org/example-assets/raw/main/.github/issue-assets/om_image_followup/bug.png)",
-            github.created[0].comments[1],
+            github.created[0].comments[0],
         )
-        self.assertIn("Screenshot shows account switch call routing", github.created[0].comments[1])
+        self.assertIn("Screenshot shows account switch call routing", github.created[0].comments[0])
         self.assertEqual(lark.downloads, [("om_image_followup", "img_v2_followup", "image")])
-        self.assertEqual([reply.message_id for reply in lark.replies], ["om_root", "om_text_followup", "om_image_followup"])
+        self.assertEqual([reply.message_id for reply in lark.replies], ["om_root", "om_image_followup"])
 
 
     def test_video_follow_up_over_duration_limit_records_skipped_evidence(self) -> None:
@@ -285,10 +292,12 @@ class AttachmentIntakeLoopE2ETest(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(result.processed, 2)
-        self.assertEqual(len(github.created[0].comments), 1)
-        self.assertIn("resource skipped: video duration is 11.0s", github.created[0].comments[0])
-        self.assertNotIn("https://github.com/example-org/example-assets", github.created[0].comments[0])
+        # Text report and over-limit video coalesce into one create; the
+        # skipped-evidence note is folded into the body, not a comment.
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(github.created[0].comments, [])
+        self.assertIn("resource skipped: video duration is 11.0s", github.created[0].issue.body)
+        self.assertNotIn("https://github.com/example-org/example-assets", github.created[0].issue.body)
 
 
 class FakeDurationProbe:

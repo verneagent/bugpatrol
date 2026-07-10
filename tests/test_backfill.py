@@ -248,21 +248,30 @@ class BackfillTest(unittest.TestCase):
 
         result = run_lark_backfill(config=config, lark=lark, workflow=workflow, limit=10)
 
+        # Both messages of the topic coalesce into one atomic create.
         self.assertEqual(result.scanned, 3)
         self.assertEqual(result.skipped, 1)
-        self.assertEqual(result.processed, 2)
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(len(result.outcomes), 1)
         self.assertEqual(result.outcomes[0].action, "created")
-        self.assertEqual(result.outcomes[1].action, "updated")
         self.assertEqual(
             [(event.message_id, event.action, event.reason) for event in result.events],
             [
                 ("om_bot", "skipped", "bot_message"),
                 ("om_old", "processed", "created"),
-                ("om_new", "processed", "updated"),
+                ("om_new", "processed", "created"),
             ],
         )
+        self.assertEqual(len(github.created), 1)
+        self.assertEqual(github.created[0].comments, [])
+        # Every message survives in the single issue body.
         self.assertIn("首次上报", github.created[0].issue.body)
-        self.assertIn("补充信息", github.created[0].comments[0])
+        self.assertIn("补充信息", github.created[0].issue.body)
+        # The triage signal carries every message id as material.
+        self.assertEqual(
+            set(result.outcomes[0].triage_signal.material_message_ids),
+            {"om_old", "om_new"},
+        )
 
     def test_run_lark_backfill_creates_issue_for_image_message(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
@@ -512,9 +521,13 @@ class BackfillTest(unittest.TestCase):
 
         result = run_lark_backfill(config=config, lark=lark, workflow=workflow, limit=10)
 
-        self.assertEqual(result.processed, 2)
+        # The reply is not orphaned: its root is in the batch, so both coalesce
+        # into one create instead of being skipped.
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(len(result.outcomes), 1)
         self.assertEqual(result.outcomes[0].action, "created")
-        self.assertEqual(result.outcomes[1].action, "updated")
+        self.assertIn("首次上报", github.created[0].issue.body)
+        self.assertIn("补充信息", github.created[0].issue.body)
 
     def test_dry_run_does_not_write(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
@@ -641,24 +654,17 @@ class TopicBatchTest(unittest.TestCase):
         self.assertEqual([batch.root_key for batch in scan.topics], ["om_b1"])
         self.assertEqual([e.reason for e in scan.skipped_events], ["processed_ledger"])
 
-    def test_process_topic_batch_error_keeps_partial_progress(self) -> None:
+    def test_process_topic_batch_write_failure_is_atomic(self) -> None:
+        # A coalesced batch is one write; a failure marks nothing processed so
+        # the whole topic retries next scan (no half-applied comment spam).
         config = load_project_config(Path("projects/todo-sandbox.toml"))
-        github = FakeGitHubIssuesClient()
-        lark = FakeLarkHistory([])
-        real_workflow = IntakeWorkflow(config=config, github=github, lark=lark)
 
         class ExplodingWorkflow:
-            def __init__(self) -> None:
-                self.calls = 0
-
             def has_issue_for_root(self, *, chat_id: str, root_id: str) -> bool:
-                return real_workflow.has_issue_for_root(chat_id=chat_id, root_id=root_id)
+                return False
 
-            def process(self, record):  # type: ignore[no-untyped-def]
-                self.calls += 1
-                if self.calls > 1:
-                    raise RuntimeError("boom")
-                return real_workflow.process(record)
+            def process_batch(self, records):  # type: ignore[no-untyped-def]
+                raise RuntimeError("boom")
 
         batch = TopicBatch(
             root_key="om_a1",
@@ -671,14 +677,53 @@ class TopicBatchTest(unittest.TestCase):
         result = process_topic_batch(
             batch,
             config=config,
-            lark=lark,
+            lark=FakeLarkHistory([]),
             workflow=ExplodingWorkflow(),  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(result.processed_message_ids, ())
+        self.assertEqual(result.outcomes, ())
+        self.assertIn("boom", result.error)
+        self.assertEqual([e.action for e in result.events], ["error"])
+
+    def test_process_topic_batch_build_failure_keeps_prefix(self) -> None:
+        # A per-message build failure (e.g. attachment materialization) writes
+        # the successfully-built prefix and leaves the rest to retry.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        branch_chat = next(iter(config.lark.branch_chats))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkHistory([])
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        calls = {"n": 0}
+
+        def resolver(_branch: str) -> str:
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise RuntimeError("boom")
+            return "sha1"
+
+        batch = TopicBatch(
+            root_key="om_a1",
+            messages=(
+                message(message_id="om_a1", root_id="om_a1", chat_id=branch_chat, text="A report"),
+                message(message_id="om_a2", root_id="om_a1", chat_id=branch_chat, text="A followup"),
+            ),
+        )
+
+        result = process_topic_batch(
+            batch,
+            config=config,
+            lark=lark,
+            workflow=workflow,
+            branch_tip_resolver=resolver,
         )
 
         self.assertEqual(result.processed_message_ids, ("om_a1",))
         self.assertEqual(len(result.outcomes), 1)
+        self.assertEqual(result.outcomes[0].action, "created")
         self.assertIn("boom", result.error)
-        self.assertEqual([e.action for e in result.events], ["processed", "error"])
+        self.assertEqual([e.action for e in result.events], ["error", "processed"])
 
 
 if __name__ == "__main__":

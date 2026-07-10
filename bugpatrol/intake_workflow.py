@@ -5,12 +5,19 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Iterable, Protocol, Sequence
 
 from bugpatrol.clients import GitHubIssue, GitHubIssuesClient, LarkMessengerClient
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import NATIVE_ISSUE_TYPES, validate_field_value
-from bugpatrol.intake import Attachment, IntakeRecord, format_created_at, render_attachments_markdown, render_issue_body
+from bugpatrol.intake import (
+    Attachment,
+    IntakeRecord,
+    format_created_at,
+    render_attachments_markdown,
+    render_batched_issue_body,
+    render_issue_body,
+)
 from bugpatrol.lark import is_message_withdrawn_error
 from bugpatrol.triage_queue import TriageSignal, classify_triage_signal
 
@@ -55,6 +62,112 @@ class IntakeWorkflow:
                 root_id=root_id,
             )
             is not None
+        )
+
+    def process_batch(self, records: Sequence[IntakeRecord]) -> IntakeOutcome:
+        """Coalesce one topic's messages into a single write.
+
+        A watcher restart replaying a backlog — or a burst of replies between
+        two scans — groups many messages of one topic into a single batch.
+        Writing them one-by-one spams the issue with N comments and the Lark
+        thread with N receipts. This folds the whole batch into one create (or
+        one combined follow-up comment) and one Lark receipt. The single-record
+        case delegates to `process` so live one-at-a-time intake is unchanged.
+        """
+        if not records:
+            raise ValueError("process_batch requires at least one record")
+        first = records[0]
+        for record in records:
+            if record.chat_id != first.chat_id or record.root_id != first.root_id:
+                raise ValueError("process_batch records must all belong to one topic")
+        if len(records) == 1:
+            return self.process(first)
+        if first.chat_id not in self._config.lark.all_chat_ids():
+            raise ValueError(f"unexpected chat_id: {first.chat_id}")
+
+        existing = self._github.find_issue_by_intake_root(
+            repo=self._config.github_repo,
+            chat_id=first.chat_id,
+            root_id=first.root_id,
+        )
+        if existing is not None:
+            healed = self._heal_missing_intake_fields(record=first, issue_number=existing.number)
+            self._github.add_issue_comment(
+                repo=self._config.github_repo,
+                issue_number=existing.number,
+                body=render_batched_followup_comment(records, language=self._config.intake.language),
+            )
+            triage_signal = _merge_triage_signals(
+                classify_triage_signal("updated", record, self._config.followup_classifier)
+                for record in records
+            )
+            if healed and not triage_signal.should_enqueue:
+                triage_signal = TriageSignal(
+                    should_enqueue=True,
+                    reason="healed_missing_fields",
+                    material_message_ids=tuple(record.message_id for record in records),
+                    asset_urls=_all_asset_urls(records),
+                )
+            self._mark_pending_after_final_status(
+                issue_number=existing.number,
+                triage_signal=triage_signal,
+            )
+            reply = self._reply_best_effort(
+                record=records[-1],
+                text=f"已追加 {len(records)} 条到 GitHub issue [#{existing.number}]({existing.url})",
+            )
+            return IntakeOutcome(
+                action="updated",
+                issue=existing,
+                lark_reply=reply,
+                triage_signal=triage_signal,
+            )
+
+        raced = self._github.find_issue_by_intake_root(
+            repo=self._config.github_repo,
+            chat_id=first.chat_id,
+            root_id=first.root_id,
+        )
+        if raced is not None:
+            reply = self._reply_best_effort(
+                record=first,
+                text=f"已创建 GitHub issue [#{raced.number}]({raced.url})",
+            )
+            return IntakeOutcome(
+                action="deduplicated",
+                issue=raced,
+                lark_reply=reply,
+                triage_signal=TriageSignal(should_enqueue=False, reason="create_race"),
+            )
+        fields = initial_intake_fields(first, include_branch=self._include_branch_field(first))
+        # Evidence must reflect the whole batch, not just the first message.
+        fields["Evidence"] = infer_evidence(
+            _all_attachments(records),
+            "\n".join(record.original_text for record in records),
+        )
+        validate_field_value("Evidence", fields["Evidence"])
+        # Fold every message into the body so intake is one atomic create.
+        issue = self._github.create_issue(
+            repo=self._config.github_repo,
+            title=build_issue_title(first),
+            body=render_batched_issue_body(records, language=self._config.intake.language),
+            issue_type="Bug",
+            fields=fields,
+        )
+        reply = self._reply_best_effort(
+            record=first,
+            text=f"已创建 GitHub issue [#{issue.number}]({issue.url})",
+        )
+        return IntakeOutcome(
+            action="created",
+            issue=issue,
+            lark_reply=reply,
+            triage_signal=TriageSignal(
+                should_enqueue=True,
+                reason="intake_created",
+                material_message_ids=tuple(record.message_id for record in records),
+                asset_urls=_all_asset_urls(records),
+            ),
         )
 
     def process(self, record: IntakeRecord) -> IntakeOutcome:
@@ -285,6 +398,85 @@ def render_followup_comment(record: IntakeRecord, *, language: str = "en-US") ->
             "---",
             f"<!-- {INTAKE_REPLY_META_MARKER}:{json.dumps(meta, ensure_ascii=False, separators=(',', ':'))} -->",
         ]
+    )
+
+
+def render_batched_followup_comment(records: Sequence[IntakeRecord], *, language: str = "en-US") -> str:
+    """One comment carrying several messages of the same topic.
+
+    Each message keeps its own reporter/timestamp/attachments section, and a
+    single meta footer lists every message id so the batch stays one comment.
+    """
+    if not records:
+        raise ValueError("render_batched_followup_comment requires at least one record")
+    copy = _followup_copy(language)
+    first = records[0]
+    lines: list[str] = [f"## {copy['topic_update']}（{len(records)}）", ""]
+    for index, record in enumerate(records, start=1):
+        attachments = render_attachments_markdown(record.attachments, copy=copy)
+        lines.extend(
+            [
+                f"### {index}. {record.reporter_name} · {format_created_at(record.created_at)}",
+                "",
+                f"- {copy['message_id']}: {_link_or_id(label=copy['open_message'], url=record.lark_message_url, identifier=record.message_id)}",
+                "",
+                record.original_text or copy["empty"],
+                "",
+                f"**{copy['attachments']}**",
+                "",
+                attachments,
+                "",
+            ]
+        )
+    meta = {
+        "source": "lark",
+        "schema_version": 1,
+        "chat_id": first.chat_id,
+        "root_id": first.root_id,
+        "message_ids": [record.message_id for record in records],
+        "reporter_open_id": first.reporter_open_id,
+    }
+    lines.extend(
+        [
+            "---",
+            f"<!-- {INTAKE_REPLY_META_MARKER}:{json.dumps(meta, ensure_ascii=False, separators=(',', ':'))} -->",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _all_asset_urls(records: Sequence[IntakeRecord]) -> tuple[str, ...]:
+    seen: dict[str, None] = {}
+    for record in records:
+        for item in record.attachments:
+            if item.url:
+                seen.setdefault(item.url, None)
+    return tuple(seen)
+
+
+def _all_attachments(records: Sequence[IntakeRecord]) -> tuple[Attachment, ...]:
+    return tuple(item for record in records for item in record.attachments)
+
+
+def _merge_triage_signals(signals: Iterable[TriageSignal]) -> TriageSignal:
+    signals = list(signals)
+    should_enqueue = any(signal.should_enqueue for signal in signals)
+    reason = next(
+        (signal.reason for signal in signals if signal.should_enqueue),
+        signals[0].reason if signals else "empty_followup",
+    )
+    material: dict[str, None] = {}
+    assets: dict[str, None] = {}
+    for signal in signals:
+        for message_id in signal.material_message_ids:
+            material.setdefault(message_id, None)
+        for url in signal.asset_urls:
+            assets.setdefault(url, None)
+    return TriageSignal(
+        should_enqueue=should_enqueue,
+        reason=reason,
+        material_message_ids=tuple(material),
+        asset_urls=tuple(assets),
     )
 
 

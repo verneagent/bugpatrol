@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Sequence
 
 from bugpatrol.clients import GitHubIssue
 
@@ -112,6 +112,71 @@ def render_issue_body(record: IntakeRecord, *, language: str = "en-US") -> str:
             f"<!-- {INTAKE_META_MARKER}:{json.dumps(meta, ensure_ascii=False, separators=(',', ':'))} -->",
         ]
     )
+
+
+def render_batched_issue_body(records: Sequence[IntakeRecord], *, language: str = "en-US") -> str:
+    """Issue body carrying several messages of one topic in a single create.
+
+    Folding the backlog into the body (rather than a create plus follow-up
+    comments) keeps intake a single atomic GitHub write: a partial failure
+    leaves nothing behind and retries cleanly. Each message keeps its own
+    reporter/timestamp/attachments so attribution survives.
+    """
+    if not records:
+        raise ValueError("render_batched_issue_body requires at least one record")
+    copy = _copy(language)
+    first = records[0]
+    meta = {
+        "source": "lark",
+        "schema_version": 1,
+        "chat_id": first.chat_id,
+        "root_id": first.root_id,
+        "message_id": first.message_id,
+        "reporter_open_id": first.reporter_open_id,
+        "attachment_urls": [item.url for record in records for item in record.attachments],
+    }
+    if first.target_branch and first.target_branch != "main":
+        meta["target_branch"] = first.target_branch
+        if first.branch_tip_sha:
+            meta["branch_tip_sha"] = first.branch_tip_sha
+
+    lines = [
+        f"## {copy['lark_intake']}",
+        "",
+        f"- {copy['reporter']}: {first.reporter_name} ({first.reporter_open_id})",
+        f"- {copy['created_at']}: {format_created_at(first.created_at)}",
+        f"- {copy['lark_topic']}: {_link_or_id(label=copy['open_topic'], url=first.lark_topic_url, identifier=first.root_id)}",
+        f"- {copy['message_id']}: {_link_or_id(label=copy['open_message'], url=first.lark_message_url, identifier=first.message_id)}",
+        "",
+    ]
+    for index, record in enumerate(records, start=1):
+        attachments = render_attachments_markdown(record.attachments, copy=copy)
+        if index == 1:
+            heading = f"## {copy['original_message']}"
+        else:
+            heading = (
+                f"## {copy['additional_message']} {index} — "
+                f"{record.reporter_name} · {format_created_at(record.created_at)}"
+            )
+        lines.extend(
+            [
+                heading,
+                "",
+                record.original_text or copy["empty"],
+                "",
+                f"### {copy['attachments']}",
+                "",
+                attachments,
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "---",
+            f"<!-- {INTAKE_META_MARKER}:{json.dumps(meta, ensure_ascii=False, separators=(',', ':'))} -->",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def parse_intake_metadata(body: str) -> dict[str, Any] | None:
@@ -229,6 +294,7 @@ def _copy(language: str) -> dict[str, str]:
             "lark_topic": "Lark 话题",
             "message_id": "消息 ID",
             "original_message": "原始消息",
+            "additional_message": "追加消息",
             "attachments": "附件",
             "generated_description": "生成描述",
             "open_topic": "打开话题",
@@ -246,6 +312,7 @@ def _copy(language: str) -> dict[str, str]:
         "lark_topic": "Lark topic",
         "message_id": "Message id",
         "original_message": "Original Message",
+        "additional_message": "Additional message",
         "attachments": "Attachments",
         "generated_description": "generated description",
         "open_topic": "open topic",
