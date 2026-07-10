@@ -9,6 +9,7 @@ from bugpatrol.agents import (
     DEEPSEEK_ANTHROPIC_BASE_URL,
     DEEPSEEK_DEFAULT_MODEL,
     build_triage_agent_invocation,
+    detect_sandbox_denial,
     parse_claude_token_usage,
 )
 from bugpatrol.config import load_project_config, parse_project_config
@@ -195,6 +196,52 @@ class ParseClaudeTokenUsageTest(unittest.TestCase):
     def test_returns_zeros_when_unparseable(self) -> None:
         self.assertEqual(parse_claude_token_usage(""), (0, 0, 0))
         self.assertEqual(parse_claude_token_usage("not json"), (0, 0, 0))
+
+
+class DetectSandboxDenialTest(unittest.TestCase):
+    def _tool_result_event(self, *, text: str, is_error: bool) -> str:
+        return json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "is_error": is_error, "content": text}
+                    ],
+                },
+            }
+        )
+
+    def test_flags_bash_command_approval_denial(self) -> None:
+        stdout = "\n".join(
+            [
+                self._tool_result_event(text="This command requires approval", is_error=True),
+                json.dumps({"type": "result", "usage": {}}),
+            ]
+        )
+        self.assertEqual(detect_sandbox_denial(stdout), "This command requires approval")
+
+    def test_flags_out_of_workspace_read_denial(self) -> None:
+        stdout = self._tool_result_event(
+            text="Error: this tool may only search files in the allowed working directories",
+            is_error=True,
+        )
+        self.assertIn("allowed working directories", detect_sandbox_denial(stdout) or "")
+
+    def test_ignores_non_error_and_unrelated_errors(self) -> None:
+        stdout = "\n".join(
+            [
+                # Ordinary error output must not trip the guard.
+                self._tool_result_event(text="No such file or directory", is_error=True),
+                # The phrase quoted in a *successful* result (e.g. issue text) is ignored.
+                self._tool_result_event(text="the PR requires approval", is_error=False),
+                json.dumps({"type": "result", "usage": {}}),
+            ]
+        )
+        self.assertIsNone(detect_sandbox_denial(stdout))
+
+    def test_returns_none_for_empty(self) -> None:
+        self.assertIsNone(detect_sandbox_denial(""))
 
 
 if __name__ == "__main__":

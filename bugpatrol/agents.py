@@ -62,6 +62,60 @@ def parse_claude_token_usage(stdout: str) -> tuple[int, int, int]:
     return (input_tokens, cached_input, _int("output_tokens"))
 
 
+# Stable substrings Claude Code emits in a tool_result when it refuses a Bash
+# command or a file read that falls outside the sandbox. A denied run silently
+# yields a degraded triage (no CODEOWNERS/repo/git/dup-search) while still
+# exiting 0, so the runner treats any of these as a hard failure — this catches
+# regressions the invocation-flag unit test can't (CLI renames a flag, a wrong
+# --add-dir path, a missing cwd), independent of whether the model self-reports.
+_SANDBOX_DENIAL_MARKERS = (
+    "requires approval",
+    "allowed working directories",
+)
+
+
+def _tool_result_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        return "\n".join(parts)
+    return ""
+
+
+def detect_sandbox_denial(stdout: str) -> str | None:
+    """Return the first sandbox/permission-denial message in a stream-json turn
+    log, or None. Only ``tool_result`` blocks flagged ``is_error`` are inspected,
+    so ordinary error output (and issue text that merely quotes these phrases)
+    never trips the guard.
+    """
+    for raw in stdout.splitlines():
+        line = raw.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = event.get("message") if isinstance(event, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            if not block.get("is_error"):
+                continue
+            text = _tool_result_text(block.get("content"))
+            if any(marker in text for marker in _SANDBOX_DENIAL_MARKERS):
+                return text.strip()
+    return None
+
+
 def build_triage_agent_invocation(
     config: ProjectConfig,
     *,

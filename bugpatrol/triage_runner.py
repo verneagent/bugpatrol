@@ -11,7 +11,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import uuid4
 
-from bugpatrol.agents import AgentInvocation, build_triage_agent_invocation, parse_claude_token_usage
+from bugpatrol.agents import (
+    AgentInvocation,
+    build_triage_agent_invocation,
+    detect_sandbox_denial,
+    parse_claude_token_usage,
+)
 from bugpatrol.clients import GitHubIssueComment, LarkMessengerClient
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import triage_output_schema
@@ -279,6 +284,21 @@ def execute_triage_run(
             lark=lark,
         )
         raise RuntimeError(f"triage agent failed with exit {completed.returncode}")
+    denial = detect_sandbox_denial(completed.stdout or "")
+    if denial:
+        # A sandbox/permission denial means the agent silently skipped
+        # CODEOWNERS/repo/git/dup-search; retrying won't help (the invocation
+        # is misconfigured), so fail loudly rather than posting a hollow triage.
+        mark_triage_failed(
+            config=config,
+            issue_number=issue_number,
+            exit_code=0,
+            github=github,
+            issue_fields=issue_fields,
+            lark=lark,
+            reason=f"Triage agent was blocked by a permission/sandbox denial: {denial}",
+        )
+        raise RuntimeError(f"triage agent blocked by sandbox/permission denial: {denial}")
     if not plan.output_path.exists():
         # Models occasionally end the turn silently without writing the
         # output file; retry instead of failing the run outright.
