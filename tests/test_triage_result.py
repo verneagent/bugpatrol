@@ -13,6 +13,7 @@ from bugpatrol.triage_result import (
     append_triage_metadata,
     apply_triage_result,
     build_triage_dry_run_report,
+    codeowners_coverage_caveat,
     parse_triage_metadata,
     parse_triage_result,
     render_triage_summary_lark_message,
@@ -439,6 +440,37 @@ class TriageResultTest(unittest.TestCase):
         self.assertIn("状态：Done", message)
         self.assertIn("优先级：High", message)
         self.assertIn("负责人：garlanddiego", message)
+
+    def test_codeowners_coverage_caveat_flags_inferred_owner_on_code_bug(self) -> None:
+        data = dict(VALID)
+        data["owner_reason"] = "Git history"
+        result = parse_triage_result(data)
+
+        caveat = codeowners_coverage_caveat(result)
+        self.assertIn("CODEOWNERS", caveat)
+        self.assertIn("garlanddiego", caveat)
+        self.assertIn("Git history", caveat)
+        self.assertIn(caveat, render_triage_comment(result))
+        self.assertIn(
+            caveat,
+            render_triage_summary_lark_message(
+                issue_number=9,
+                issue_url="https://github.test/o/r/issues/9",
+                result=result,
+            ),
+        )
+
+    def test_codeowners_coverage_caveat_silent_when_codeowners_matched(self) -> None:
+        result = parse_triage_result(dict(VALID))  # owner_reason=CODEOWNERS
+        self.assertEqual(codeowners_coverage_caveat(result), "")
+        self.assertNotIn("未被 CODEOWNERS 覆盖", render_triage_comment(result))
+
+    def test_codeowners_coverage_caveat_silent_when_not_code_bug(self) -> None:
+        data = dict(VALID)
+        data["owner_reason"] = "Capability fallback"
+        data["triage_verdict"] = "预期行为"
+        result = parse_triage_result(data)
+        self.assertEqual(codeowners_coverage_caveat(result), "")
 
     def test_parse_triage_result_requires_duplicate_of_for_duplicate_verdict(self) -> None:
         data = dict(VALID)

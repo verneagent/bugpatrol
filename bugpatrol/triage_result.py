@@ -349,6 +349,34 @@ def triage_runner_name() -> str:
     return os.environ.get("BUGPATROL_RUNNER_NAME") or os.environ.get("RUNNER_NAME", "")
 
 
+# owner_reason values that mean the assignee was inferred rather than matched
+# to a concrete CODEOWNERS path rule (or explicitly named by a human). When a
+# code bug's owner is only inferred, the touched module has no CODEOWNERS
+# coverage — surface that so the gap gets fixed instead of silently
+# mis-assigning future bugs in the same area (#3946: a git-history guess sent a
+# voice-call bug to the wrong owner because call/ had no CODEOWNERS rule).
+INFERRED_OWNER_REASONS = frozenset({"Git history", "Capability fallback"})
+
+
+def codeowners_coverage_caveat(result: TriageResult) -> str:
+    """Warning line when a code bug's owner was inferred, not CODEOWNERS-matched.
+
+    Returns "" when the owner is authoritative (CODEOWNERS path match, or a
+    human's Lark @mention / Manual instruction) or when there is no owner.
+    """
+    if result.fields.get("Triage verdict", "") != "代码 Bug":
+        return ""
+    if not result.assignee:
+        return ""
+    if result.fields.get("Owner reason", "") not in INFERRED_OWNER_REASONS:
+        return ""
+    return (
+        f"⚠️ 该模块未被 CODEOWNERS 覆盖，负责人 @{result.assignee} 由线索推断"
+        f"（{result.fields.get('Owner reason', '')}），请在 CODEOWNERS 补对应路径规则，"
+        "否则同模块的后续 bug 会继续被错误归属。"
+    )
+
+
 def render_triage_comment(result: TriageResult, *, branch_note: str = "") -> str:
     body = result.comment_markdown.rstrip()
     if result.blame_suggestion or result.suspected_owner:
@@ -359,8 +387,14 @@ def render_triage_comment(result: TriageResult, *, branch_note: str = "") -> str
             if result.blame_suggestion:
                 parts.append(f"归因线索：{result.blame_suggestion}")
             body = f"{body}\n\n" + "\n".join(parts)
+    prefix_lines = []
     if branch_note:
-        body = f"> {branch_note}\n\n{body}"
+        prefix_lines.append(f"> {branch_note}")
+    caveat = codeowners_coverage_caveat(result)
+    if caveat:
+        prefix_lines.append(f"> {caveat}")
+    if prefix_lines:
+        body = "\n".join(prefix_lines) + f"\n\n{body}"
     return body
 
 
@@ -577,6 +611,9 @@ def render_triage_summary_lark_message(
         ):
             if value:
                 lines.append(f"{label}：{value}")
+        caveat = codeowners_coverage_caveat(result)
+        if caveat:
+            lines.append(caveat)
     if runner_name:
         lines.append(f"分诊执行机：{runner_name}")
     stats_line = format_run_stats(run_stats)
