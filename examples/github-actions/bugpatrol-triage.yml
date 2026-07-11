@@ -22,6 +22,12 @@ concurrency:
 jobs:
   triage:
     runs-on: ${{ vars.BUGPATROL_TRIAGE_RUNNER_LABEL || 'self-hosted' }}
+    # actions/create-github-app-token runs on Node, whose native fetch ignores
+    # http(s)_proxy unless this is set. On a proxied self-hosted runner the mint
+    # step otherwise fails with "a proxy environment variable is set, but Node.js
+    # native proxy support is not enabled". Harmless on non-proxied runners.
+    env:
+      NODE_USE_ENV_PROXY: "1"
     steps:
       # Mint a short-lived installation token in-workflow. No private key on the
       # runner disk, no gh-bot-token.sh fallback. App id + private key live only
@@ -77,14 +83,26 @@ jobs:
       #   - DEEPSEEK_API_KEY / LARK_APP_SECRET: read from os.environ by the code;
       #     injected here as Actions secrets so nothing lives in the runner .env.
       - name: Run triage
+        shell: bash
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BUGPATROL_PROJECT_CONFIG: ${{ vars.BUGPATROL_PROJECT_CONFIG }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
         run: |
+          # bugpatrol needs Python >= 3.11 (stdlib tomllib). A runner's default
+          # `python3` is often 3.9, so select a 3.11+ interpreter explicitly
+          # instead of assuming `python3` qualifies.
+          PY=""
+          for c in python3.13 python3.12 python3.11 python3; do
+            if command -v "$c" >/dev/null 2>&1 \
+              && "$c" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+              PY="$c"; break
+            fi
+          done
+          [ -n "$PY" ] || { echo "no Python >= 3.11 on this runner" >&2; exit 1; }
           PYTHONPATH="$GITHUB_WORKSPACE/.bugpatrol/tool" \
-          python3 -m bugpatrol run-triage "$BUGPATROL_PROJECT_CONFIG" \
+          "$PY" -m bugpatrol run-triage "$BUGPATROL_PROJECT_CONFIG" \
             --issue "${{ inputs.issue_number }}" \
             --repo-path "${{ steps.app-cache.outputs.repo_path }}" \
             --output-dir "$GITHUB_WORKSPACE/.bugpatrol/runs/issue-${{ inputs.issue_number }}" \

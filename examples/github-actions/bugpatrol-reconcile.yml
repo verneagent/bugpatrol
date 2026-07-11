@@ -38,6 +38,10 @@ jobs:
       github.event_name == 'schedule' ||
       inputs.target == 'both' || inputs.target == 'triage'
     runs-on: ${{ vars.BUGPATROL_TRIAGE_RUNNER_LABEL || 'self-hosted' }}
+    # create-github-app-token's Node fetch ignores http(s)_proxy unless this is
+    # set; required on proxied self-hosted runners. Harmless otherwise.
+    env:
+      NODE_USE_ENV_PROXY: "1"
     steps:
       # Same in-workflow token + per-runner cache clone as bugpatrol-triage.yml.
       - name: Mint GitHub App token
