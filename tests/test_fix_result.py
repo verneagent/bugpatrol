@@ -14,8 +14,12 @@ from bugpatrol.fix_result import (
     render_fix_blocked_lark_message,
     render_fix_comment,
     render_fix_lark_message,
+    render_review_feedback_markdown,
+    render_revise_lark_message,
+    render_revise_pr_comment,
     render_verify_failed_comment,
     render_verify_failed_lark_message,
+    notify_fix_revise,
 )
 
 
@@ -167,6 +171,77 @@ class NotifyOrderingTest(unittest.TestCase):
             lark=Lark(),  # type: ignore[arg-type]
         )
         self.assertEqual(order, ["lark", "github"])
+
+
+class ReviseRenderTest(unittest.TestCase):
+    def _threads(self):
+        from bugpatrol.clients import ReviewComment, ReviewThread
+
+        return (
+            ReviewThread(
+                id="RT_1",
+                comments=(ReviewComment(author="rev", body="这里改小一点", path="src/todo.ts", line=12),),
+            ),
+        )
+
+    def test_feedback_markdown_includes_location_author_and_body(self) -> None:
+        text = render_review_feedback_markdown(self._threads())
+        self.assertIn("src/todo.ts:12", text)
+        self.assertIn("@rev", text)
+        self.assertIn("这里改小一点", text)
+
+    def test_revise_pr_comment_reports_count(self) -> None:
+        text = render_revise_pr_comment(result=_result(), addressed=3)
+        self.assertIn("3", text)
+        self.assertIn("已按评审反馈", text)
+        self.assertIn("resolve", text)
+
+    def test_revise_lark_message_at_mentions_reviewer(self) -> None:
+        text = render_revise_lark_message(
+            issue_number=7,
+            issue_url="u",
+            pr_url="https://github.test/o/r/pull/9",
+            result=_result(),
+            addressed=2,
+            reviewer_open_id="ou_dev",
+        )
+        self.assertIn('<at user_id="ou_dev">', text)
+        self.assertIn("2", text)
+
+
+class NotifyReviseOrderingTest(unittest.TestCase):
+    def test_lark_first_then_pr_comment(self) -> None:
+        order: list[str] = []
+
+        class Github:
+            def get_issue(self, *, repo, issue_number):
+                from bugpatrol.clients import GitHubIssue
+
+                return GitHubIssue(
+                    number=issue_number,
+                    url="u",
+                    title="t",
+                    body='<!-- BUGPATROL_INTAKE_META:{"chat_id":"oc_1","message_id":"om_1"} -->',
+                )
+
+            def add_pull_request_comment(self, *, repo, pr, body):
+                order.append("pr_comment")
+
+        class Lark:
+            def reply_to_message(self, *, chat_id, message_id, text):
+                order.append("lark")
+
+        notify_fix_revise(
+            repo="o/r",
+            issue_number=7,
+            issue_url="u",
+            pr_url="https://github.test/o/r/pull/9",
+            result=_result(),
+            addressed=1,
+            github=Github(),  # type: ignore[arg-type]
+            lark=Lark(),  # type: ignore[arg-type]
+        )
+        self.assertEqual(order, ["lark", "pr_comment"])
 
 
 if __name__ == "__main__":

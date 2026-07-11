@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from bugpatrol.clients import LarkMessengerClient
+from bugpatrol.clients import LarkMessengerClient, ReviewThread
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fix_gate import VerifyOutcome
 from bugpatrol.github import GitHubCliIssuesClient
@@ -226,6 +226,113 @@ def notify_fix_pr(
             fingerprint=fingerprint,
             issue_number=issue_number,
         ),
+    )
+
+
+def render_review_feedback_markdown(threads: tuple[ReviewThread, ...]) -> str:
+    """Render unresolved review threads as instructions for the revise agent."""
+    lines = [
+        "## PR 评审反馈（需要逐条处理）",
+        "",
+        "以下是这个 PR 上尚未解决的评审意见。请**只针对这些反馈**做最小改动，"
+        "不要重开根因分析、不要扩大范围。",
+        "",
+    ]
+    for index, thread in enumerate(threads, start=1):
+        lines.append(f"### 反馈 {index}")
+        for comment in thread.comments:
+            location = ""
+            if comment.path:
+                location = f"`{comment.path}"
+                if comment.line is not None:
+                    location += f":{comment.line}"
+                location += "` "
+            author = f"@{comment.author} " if comment.author else ""
+            lines.append(f"- {location}{author}{comment.body.strip()}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def render_revise_pr_comment(*, result: FixResult, addressed: int) -> str:
+    return "\n".join(
+        [
+            "## BugPatrol 已按评审反馈更新",
+            "",
+            f"已处理 {addressed} 条评审意见并推送更新到本 PR。",
+            "",
+            f"改动：{result.summary.strip()}",
+            f"测试：{'已添加/调整' if result.tests_added else '未新增'}",
+            "",
+            "对应的 review threads 已 resolve；请再次 review（BugPatrol 不会自动合并）。",
+        ]
+    )
+
+
+def render_revise_lark_message(
+    *,
+    issue_number: int,
+    issue_url: str,
+    pr_url: str,
+    result: FixResult,
+    addressed: int,
+    reviewer_open_id: str = "",
+    run_stats: TriageRunStats | None = None,
+) -> str:
+    reviewer = f'<at user_id="{reviewer_open_id}"></at> ' if reviewer_open_id else ""
+    lines = [
+        f"{reviewer}已按评审反馈更新修复 PR，GitHub issue [#{issue_number}]({issue_url})",
+        f"PR：{pr_url}",
+        f"处理反馈：{addressed} 条",
+        f"改动：{result.summary.strip()}",
+        "请再次 review（不会自动合并）。",
+    ]
+    runner = triage_runner_name()
+    if runner:
+        lines.append(f"修复执行机：{runner}")
+    stats_line = format_run_stats(run_stats)
+    if stats_line:
+        lines.append(stats_line)
+    return "\n".join(lines)
+
+
+def notify_fix_revise(
+    *,
+    repo: str,
+    issue_number: int,
+    issue_url: str,
+    pr_url: str,
+    result: FixResult,
+    addressed: int,
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient | None,
+    reviewer_open_id: str = "",
+    run_stats: TriageRunStats | None = None,
+) -> None:
+    """Notify that revise updated the PR (Lark-first, then PR comment).
+
+    Same Lark-first ordering as notify_fix_pr: send the best-effort Lark ping
+    before the durable PR comment so a Lark failure never silently drops it.
+    """
+    if lark is not None:
+        send_intake_topic_message(
+            repo=repo,
+            issue_number=issue_number,
+            github=github,
+            lark=lark,
+            text=render_revise_lark_message(
+                issue_number=issue_number,
+                issue_url=issue_url,
+                pr_url=pr_url,
+                result=result,
+                addressed=addressed,
+                reviewer_open_id=reviewer_open_id,
+                run_stats=run_stats,
+            ),
+        )
+    github.add_pull_request_comment(
+        repo=repo,
+        pr=pr_url,
+        body=render_revise_pr_comment(result=result, addressed=addressed),
     )
 
 

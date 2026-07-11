@@ -24,6 +24,33 @@ class GitHubIssueComment:
 
 
 @dataclass(frozen=True)
+class OpenPullRequest:
+    """Minimal identity of an open PR, enough to revise it from any runner."""
+
+    number: int
+    url: str
+
+
+@dataclass(frozen=True)
+class ReviewComment:
+    author: str
+    body: str
+    path: str = ""
+    line: int | None = None
+
+
+@dataclass(frozen=True)
+class ReviewThread:
+    """An unresolved PR review thread (one or more inline/review comments).
+
+    `id` is the GraphQL node id used to resolve the thread once addressed.
+    """
+
+    id: str
+    comments: tuple[ReviewComment, ...] = ()
+
+
+@dataclass(frozen=True)
 class GitHubPullRequest:
     number: int
     url: str

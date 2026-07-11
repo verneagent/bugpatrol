@@ -9,7 +9,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from bugpatrol.clients import GitHubIssue, GitHubIssueComment, GitHubPullRequest
+from bugpatrol.clients import (
+    GitHubIssue,
+    GitHubIssueComment,
+    GitHubPullRequest,
+    OpenPullRequest,
+    ReviewComment,
+    ReviewThread,
+)
 from bugpatrol.github_fields import GITHUB_API_VERSION, GitHubIssueFieldsClient
 
 if TYPE_CHECKING:
@@ -414,6 +421,121 @@ class GitHubCliIssuesClient:
         if isinstance(data, list) and data and isinstance(data[0], dict):
             return str(data[0].get("url") or "")
         return ""
+
+    def get_open_pull_request_by_head(self, *, repo: str, head: str) -> OpenPullRequest | None:
+        """Open PR (number + url) whose head branch is `head`, or None.
+
+        Like `find_open_pull_request_by_head` but returns the number too, which
+        revise needs to read/resolve the PR's review threads. Kept separate so
+        the existing idempotency short-circuit's return type is unchanged.
+        """
+        result = self._run(
+            [
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--head",
+                head,
+                "--state",
+                "open",
+                "--json",
+                "number,url",
+            ]
+        )
+        data = json.loads(result.stdout)
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            number = data[0].get("number")
+            url = data[0].get("url")
+            if isinstance(number, int) and isinstance(url, str):
+                return OpenPullRequest(number=number, url=url)
+        return None
+
+    def list_unresolved_review_threads(self, *, repo: str, pr_number: int) -> tuple[ReviewThread, ...]:
+        """Unresolved review threads on a PR (the revise work queue).
+
+        State lives entirely in GitHub: any runner can read the same queue and,
+        after addressing a thread, resolve it so it is not reprocessed.
+        """
+        owner, name = repo.split("/", 1)
+        result = self._run(
+            [
+                "api",
+                "graphql",
+                "-f",
+                "query=query($owner: String!, $name: String!, $pr: Int!) {"
+                " repository(owner: $owner, name: $name) {"
+                " pullRequest(number: $pr) {"
+                " reviewThreads(first: 100) { nodes {"
+                " id isResolved"
+                " comments(first: 50) { nodes {"
+                " body path line author { login } } } } } } } }",
+                "-f",
+                f"owner={owner}",
+                "-f",
+                f"name={name}",
+                "-F",
+                f"pr={pr_number}",
+            ]
+        )
+        data = json.loads(result.stdout)
+        pull = (
+            (data.get("data", {}).get("repository") or {}).get("pullRequest") or {}
+        )
+        nodes = (pull.get("reviewThreads") or {}).get("nodes") or []
+        threads: list[ReviewThread] = []
+        for node in nodes:
+            if not isinstance(node, dict) or node.get("isResolved"):
+                continue
+            thread_id = node.get("id")
+            if not isinstance(thread_id, str):
+                continue
+            comments: list[ReviewComment] = []
+            for raw in (node.get("comments") or {}).get("nodes") or []:
+                if not isinstance(raw, dict):
+                    continue
+                author = ((raw.get("author") or {}).get("login")) or ""
+                line = raw.get("line")
+                comments.append(
+                    ReviewComment(
+                        author=str(author),
+                        body=str(raw.get("body") or ""),
+                        path=str(raw.get("path") or ""),
+                        line=line if isinstance(line, int) else None,
+                    )
+                )
+            threads.append(ReviewThread(id=thread_id, comments=tuple(comments)))
+        return tuple(threads)
+
+    def resolve_review_thread(self, *, thread_id: str) -> None:
+        """Mark a review thread resolved once revise has addressed it."""
+        self._run(
+            [
+                "api",
+                "graphql",
+                "-f",
+                "query=mutation($thread: ID!) {"
+                " resolveReviewThread(input: {threadId: $thread}) {"
+                " thread { id isResolved } } }",
+                "-f",
+                f"thread={thread_id}",
+            ]
+        )
+
+    def add_pull_request_comment(self, *, repo: str, pr: str, body: str) -> None:
+        """Append a comment to a PR conversation (revise progress reply)."""
+        self._run(
+            [
+                "pr",
+                "comment",
+                pr,
+                "--repo",
+                repo,
+                "--body-file",
+                "-",
+            ],
+            stdin=body,
+        )
 
     def create_pull_request(
         self,

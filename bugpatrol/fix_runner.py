@@ -27,7 +27,13 @@ from bugpatrol.agents import (
     detect_sandbox_denial,
     parse_claude_token_usage,
 )
-from bugpatrol.clients import GitHubIssue, GitHubIssueComment, LarkMessengerClient
+from bugpatrol.clients import (
+    GitHubIssue,
+    GitHubIssueComment,
+    LarkMessengerClient,
+    OpenPullRequest,
+    ReviewThread,
+)
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import fix_output_schema
 from bugpatrol.fix_gate import (
@@ -40,9 +46,11 @@ from bugpatrol.fix_result import (
     build_pr_body,
     fix_result_fingerprint,
     notify_fix_pr,
+    notify_fix_revise,
     parse_fix_result,
     render_blocked_comment,
     render_fix_blocked_lark_message,
+    render_review_feedback_markdown,
     render_verify_failed_comment,
     render_verify_failed_lark_message,
 )
@@ -57,6 +65,7 @@ from bugpatrol.triage_result import (
 )
 from bugpatrol.triage_runner import resolve_issue_branch
 from bugpatrol.worktree import (
+    fix_revise_worktree,
     fix_worktree,
     worktree_changed_files,
     worktree_commit_all,
@@ -271,6 +280,206 @@ def run_fix(
         )
 
 
+def prepare_fix_revise(
+    *,
+    config: ProjectConfig,
+    issue_number: int,
+    worktree_path: Path,
+    output_dir: Path,
+    github: GitHubCliIssuesClient,
+    issue_fields: GitHubIssueFieldsClient,
+    head_branch: str,
+    threads: Sequence[ReviewThread],
+    prompt_path: Path = Path("prompts/fix.zh.md"),
+) -> FixRunPlan:
+    """Build a revise plan: the fix context plus the PR's unresolved feedback.
+
+    Reuses prepare_fix_run (same triage root cause + schema + invocation) and
+    appends the review threads so the agent addresses the feedback in place.
+    """
+    plan = prepare_fix_run(
+        config=config,
+        issue_number=issue_number,
+        worktree_path=worktree_path,
+        output_dir=output_dir,
+        github=github,
+        issue_fields=issue_fields,
+        # No PR is opened on revise; base_branch/branch_note are unused here.
+        base_branch="",
+        head_branch=head_branch,
+        branch_note="",
+        prompt_path=prompt_path,
+    )
+    feedback = render_review_feedback_markdown(tuple(threads))
+    with plan.context_path.open("a") as handle:
+        handle.write("\n\n" + feedback + "\n")
+    return plan
+
+
+def run_fix_revise(
+    *,
+    config: ProjectConfig,
+    issue_number: int,
+    base_repo: Path,
+    output_dir: Path,
+    github: GitHubCliIssuesClient,
+    issue_fields: GitHubIssueFieldsClient,
+    lark: LarkMessengerClient | None = None,
+    prompt_path: Path = Path("prompts/fix.zh.md"),
+) -> str:
+    """Address open-PR review feedback on an existing fix, then push + resolve.
+
+    Stateless like run_fix: it rebuilds everything from origin (the fix branch)
+    and GitHub (the PR's unresolved review threads), so it may run on a
+    different runner than the run that opened the PR. Statuses: no_open_pr,
+    no_feedback, blocked, no_changes, no_output, verify_failed, revised.
+    """
+    if config.fix is None:
+        raise ValueError("project config has no [fix] table; auto-fix is not enabled")
+    fix = config.fix
+    issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
+    require_bugpatrol_managed_issue(issue)
+
+    head_branch = fix.branch_for_issue(issue_number)
+    pr = github.get_open_pull_request_by_head(repo=config.github_repo, head=head_branch)
+    if pr is None:
+        # Nothing to revise: no open fix PR for this issue.
+        return "no_open_pr"
+    threads = github.list_unresolved_review_threads(repo=config.github_repo, pr_number=pr.number)
+    if not threads:
+        # Stateless no-op: no unresolved feedback since the last revise.
+        return "no_feedback"
+
+    with fix_revise_worktree(base_repo=base_repo, branch=head_branch) as worktree:
+        plan = prepare_fix_revise(
+            config=config,
+            issue_number=issue_number,
+            worktree_path=worktree,
+            output_dir=output_dir,
+            github=github,
+            issue_fields=issue_fields,
+            head_branch=head_branch,
+            threads=threads,
+            prompt_path=prompt_path,
+        )
+        return execute_fix_revise(
+            config=config,
+            issue=issue,
+            plan=plan,
+            pr=pr,
+            threads=threads,
+            github=github,
+            lark=lark,
+        )
+
+
+def execute_fix_revise(
+    *,
+    config: ProjectConfig,
+    issue: GitHubIssue,
+    plan: FixRunPlan,
+    pr: OpenPullRequest,
+    threads: Sequence[ReviewThread],
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient | None = None,
+) -> str:
+    fix = config.fix
+    assert fix is not None  # run_fix_revise guards this.
+    if lark is not None:
+        send_intake_topic_message(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            github=github,
+            lark=lark,
+            text=_render_revise_start_message(
+                issue_number=issue.number, issue_url=issue.url, feedback_count=len(threads)
+            ),
+        )
+    run_stats = _run_fix_agent(plan)
+
+    changed_files = worktree_changed_files(plan.agent_cwd)
+    diff_line_count = worktree_diff_line_count(plan.agent_cwd)
+    gate = evaluate_post_edit(changed_files=changed_files, diff_line_count=diff_line_count, fix=fix)
+    if not gate.allowed:
+        _post_blocked(config=config, issue=issue, reason=gate.reason, github=github, lark=lark)
+        return "no_changes" if not changed_files else "blocked"
+
+    if not plan.output_path.exists():
+        _post_blocked(
+            config=config,
+            issue=issue,
+            reason="revise agent edited code but wrote no output JSON summary",
+            github=github,
+            lark=lark,
+        )
+        return "no_output"
+    result = parse_fix_result(json.loads(plan.output_path.read_text()))
+
+    verify_outcomes = run_verify_commands(fix=fix, cwd=plan.agent_cwd)
+    if not verify_all_passed(verify_outcomes):
+        _post_verify_failed(
+            config=config, issue=issue, verify_outcomes=verify_outcomes, github=github, lark=lark
+        )
+        return "verify_failed"
+
+    worktree_commit_all(plan.agent_cwd, message=f"fix: address review feedback (#{issue.number})")
+    # Fast-forward append to the existing remote fix branch, updating the PR.
+    worktree_push_branch(plan.agent_cwd, branch=plan.head_branch)
+    # Notify BEFORE resolving threads (Lark-first, marker-last): resolving is the
+    # dedup marker, so a failed notification must leave threads unresolved for an
+    # at-least-once retry rather than silently marking the feedback handled.
+    notify_fix_revise(
+        repo=config.github_repo,
+        issue_number=issue.number,
+        issue_url=issue.url,
+        pr_url=pr.url,
+        result=result,
+        addressed=len(threads),
+        github=github,
+        lark=lark,
+        reviewer_open_id=plan.reviewer_open_id,
+        run_stats=run_stats,
+    )
+    for thread in threads:
+        github.resolve_review_thread(thread_id=thread.id)
+    return "revised"
+
+
+def _run_fix_agent(plan: FixRunPlan) -> TriageRunStats:
+    """Run the fix/revise agent subprocess and return its run stats.
+
+    Shared by execute_fix_run and execute_fix_revise: same command, cwd, stdin
+    handling, turn-log persistence, and hard stops on nonzero exit / sandbox
+    denial.
+    """
+    agent_env = {**os.environ, **plan.invocation.env} if plan.invocation.env else None
+    started = time.monotonic()
+    completed = subprocess.run(
+        plan.invocation.command,
+        check=False,
+        env=agent_env,
+        cwd=str(plan.agent_cwd),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+    )
+    duration_seconds = time.monotonic() - started
+    _write_turn_log(plan.output_path.parent, completed.stdout, completed.stderr)
+    input_tokens, cached_input_tokens, output_tokens = parse_claude_token_usage(completed.stdout or "")
+    if completed.returncode != 0:
+        raise RuntimeError(f"fix agent failed with exit {completed.returncode}")
+    denial = detect_sandbox_denial(completed.stdout or "")
+    if denial:
+        raise RuntimeError(f"fix agent blocked by sandbox/permission denial: {denial}")
+    return TriageRunStats(
+        duration_seconds=duration_seconds,
+        input_tokens=input_tokens,
+        cached_input_tokens=cached_input_tokens,
+        output_tokens=output_tokens,
+        model=plan.invocation.model,
+    )
+
+
 def execute_fix_run(
     *,
     config: ProjectConfig,
@@ -289,34 +498,7 @@ def execute_fix_run(
             lark=lark,
             text=_render_fix_start_message(issue_number=issue.number, issue_url=issue.url, branch_note=plan.branch_note),
         )
-    agent_env = {**os.environ, **plan.invocation.env} if plan.invocation.env else None
-    started = time.monotonic()
-    # stdin must be closed: in CI runners stdin is a pipe that never reaches
-    # EOF, and `claude -p` blocks reading it forever after finishing its work.
-    completed = subprocess.run(
-        plan.invocation.command,
-        check=False,
-        env=agent_env,
-        cwd=str(plan.agent_cwd),
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-    )
-    duration_seconds = time.monotonic() - started
-    _write_turn_log(plan.output_path.parent, completed.stdout, completed.stderr)
-    input_tokens, cached_input_tokens, output_tokens = parse_claude_token_usage(completed.stdout or "")
-    run_stats = TriageRunStats(
-        duration_seconds=duration_seconds,
-        input_tokens=input_tokens,
-        cached_input_tokens=cached_input_tokens,
-        output_tokens=output_tokens,
-        model=plan.invocation.model,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(f"fix agent failed with exit {completed.returncode}")
-    denial = detect_sandbox_denial(completed.stdout or "")
-    if denial:
-        raise RuntimeError(f"fix agent blocked by sandbox/permission denial: {denial}")
+    run_stats = _run_fix_agent(plan)
 
     # The gate trusts the real working-tree diff, never the agent's self-report.
     changed_files = worktree_changed_files(plan.agent_cwd)
@@ -393,6 +575,17 @@ def _render_fix_start_message(*, issue_number: int, issue_url: str, branch_note:
     text = f"开始自动修复，GitHub issue [#{issue_number}]({issue_url})"
     if branch_note:
         text += f"\n{branch_note}"
+    runner = triage_runner_name()
+    if runner:
+        text += f"\n修复执行机：{runner}"
+    return text
+
+
+def _render_revise_start_message(*, issue_number: int, issue_url: str, feedback_count: int) -> str:
+    text = (
+        f"开始按评审反馈更新修复（{feedback_count} 条），"
+        f"GitHub issue [#{issue_number}]({issue_url})"
+    )
     runner = triage_runner_name()
     if runner:
         text += f"\n修复执行机：{runner}"

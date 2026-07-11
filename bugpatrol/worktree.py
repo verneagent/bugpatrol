@@ -315,6 +315,82 @@ def fix_worktree(*, base_repo: Path, ref: str, branch: str) -> Iterator[Path]:
         )
 
 
+@contextmanager
+def fix_revise_worktree(*, base_repo: Path, branch: str) -> Iterator[Path]:
+    """Yield a worktree of `base_repo` on the *existing remote* fix `branch`.
+
+    Unlike `fix_worktree` (which cuts a NEW branch off a base ref), revise picks
+    up a fix branch a *previous* run already pushed — possibly on a different
+    machine. All state lives on origin, so this fetches `origin/<branch>` fresh
+    and checks the worktree out at that remote tip; nothing is carried over from
+    any runner's local disk. A later commit + push fast-forwards the same remote
+    branch, updating the open PR. Stale local worktree/branch are cleaned first.
+    """
+    subprocess.run(
+        ["git", "-C", str(base_repo), "worktree", "prune"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(base_repo), "branch", "-D", branch],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    # Explicit refspec so refs/remotes/origin/<branch> is actually updated (a
+    # bare `git fetch origin <branch>` only writes FETCH_HEAD).
+    fetched = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(base_repo),
+            "fetch",
+            "origin",
+            f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if fetched.returncode != 0:
+        raise RuntimeError(
+            f"cannot fetch remote fix branch origin/{branch} for revise: {fetched.stderr.strip()}"
+        )
+    worktree_path = base_repo / ".bugpatrol-worktrees" / f"revise-{uuid4().hex}"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(base_repo),
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            str(worktree_path),
+            f"origin/{branch}",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        yield worktree_path
+    finally:
+        subprocess.run(
+            ["git", "-C", str(base_repo), "worktree", "remove", "--force", str(worktree_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(base_repo), "branch", "-D", branch],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+
 def _git_in(worktree: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(worktree), *args],

@@ -112,6 +112,53 @@ auto-fix is not shippable).
 6. Issue comment + Lark notification (@owner to review) with the PR link.
 7. Write `BUGPATROL_FIX_META` (fingerprint) for idempotency.
 
+## Revise — address PR review feedback (stateless, cross-machine)
+
+A fix PR is opened, never merged; reviewers leave comments. The **revise** mode
+lets the same agent address that feedback on the open PR without a human
+re-driving it. Like triage and fix, revise is **stateless**: the runner carries
+nothing between runs — all durable state lives on GitHub (the fix branch's
+commits + the PR's unresolved review threads). This means a revise can run on a
+**different physical runner** than the one that opened the PR.
+
+The unresolved review threads *are* the work queue — no extra marker file:
+
+1. `get_open_pull_request_by_head(head=bugpatrol/fix-issue-N)` → no open PR ⇒
+   `no_open_pr` (nothing to revise).
+2. `list_unresolved_review_threads` (GraphQL, `isResolved==false`) → empty ⇒
+   `no_feedback`.
+3. `fix_revise_worktree` rebuilds the branch from `origin/<fix-branch>` (never
+   local state), so any runner can pick it up.
+4. The agent edits code with the same gate + verify as fix, then **fast-forward
+   pushes to the same branch**.
+5. Notify **before** resolving (Lark-first, marker-last): a failed notification
+   leaves threads unresolved for at-least-once retry, never silently dropped.
+6. `resolveReviewThread` (GraphQL) each addressed thread — the queue drains.
+
+Statuses: `no_open_pr`, `no_feedback`, `blocked`, `no_changes`, `no_output`,
+`verify_failed`, `revised`.
+
+Cross-machine correctness rests on three externalized-state pieces: the fix
+branch (fetched fresh as `origin/<branch>`), the PR's unresolved threads (the
+queue), and the shared GitHub concurrency group `bugpatrol-fix-${repo}-${issue}`
+(`cancel-in-progress: false`) that serializes a fix and a revise for the **same
+issue** across the whole runner pool — even on different machines.
+
+CLI:
+
+```text
+python -m bugpatrol run-fix-revise <config> --issue N --repo-path <checkout> \
+  --output-dir <dir> [--execute]
+```
+
+Workflow template — triggers on `pull_request_review [submitted]` (auto) and
+`workflow_dispatch` (manual), resolves the issue number from the
+`bugpatrol/fix-issue-N` head branch, shares the fix concurrency group:
+
+```text
+examples/github-actions/bugpatrol-fix-revise.yml
+```
+
 ## Safety gate — stricter than triage
 
 Any one of these blocks the run (no edit / no PR):

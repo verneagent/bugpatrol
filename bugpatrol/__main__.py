@@ -49,7 +49,7 @@ from bugpatrol.triage_context import (
     render_triage_context_markdown,
 )
 from bugpatrol.triage_result import apply_triage_result, build_triage_dry_run_report, parse_triage_result
-from bugpatrol.fix_runner import read_triage_verdict, run_fix
+from bugpatrol.fix_runner import read_triage_verdict, run_fix, run_fix_revise
 from bugpatrol.triage_runner import execute_triage_run, prepare_triage_run, resolve_issue_branch
 from bugpatrol.worktree import (
     SubprocessGitDriver,
@@ -336,6 +336,17 @@ def main(argv: list[str] | None = None) -> int:
     run_fix_parser.add_argument("--repo-path", type=Path, required=True)
     run_fix_parser.add_argument("--output-dir", type=Path, default=Path(".bugpatrol/fix-run"))
     run_fix_parser.add_argument("--execute", action="store_true", help="actually run the agent and open a PR")
+
+    run_fix_revise_parser = sub.add_parser(
+        "run-fix-revise", help="address open-PR review feedback on an existing fix"
+    )
+    run_fix_revise_parser.add_argument("project_config", type=Path)
+    run_fix_revise_parser.add_argument("--issue", type=int, required=True)
+    run_fix_revise_parser.add_argument("--repo-path", type=Path, required=True)
+    run_fix_revise_parser.add_argument("--output-dir", type=Path, default=Path(".bugpatrol/fix-revise"))
+    run_fix_revise_parser.add_argument(
+        "--execute", action="store_true", help="actually run the agent and push the update"
+    )
 
     reconcile_triage_parser = sub.add_parser(
         "reconcile-triage", help="triage intook issues that never got a triage result"
@@ -873,6 +884,47 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         status = run_fix(
+            config=config,
+            issue_number=args.issue,
+            base_repo=args.repo_path,
+            output_dir=args.output_dir,
+            github=github,
+            issue_fields=issue_fields,
+            lark=_optional_lark_client(config),
+        )
+        print(json.dumps({"execute": True, "issue": args.issue, "status": status}, ensure_ascii=False))
+        return 0
+
+    if args.command == "run-fix-revise":
+        config = load_project_config(args.project_config)
+        if config.fix is None:
+            print("project config has no [fix] table; auto-fix is not enabled", file=sys.stderr)
+            return 2
+        github = GitHubCliIssuesClient(gh=config.github_cli)
+        issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
+        if not args.execute:
+            # Dry run: report whether an open fix PR exists and how much
+            # unresolved review feedback is queued, without touching code.
+            head = config.fix.branch_for_issue(args.issue)
+            pr = github.get_open_pull_request_by_head(repo=config.github_repo, head=head)
+            unresolved = (
+                len(github.list_unresolved_review_threads(repo=config.github_repo, pr_number=pr.number))
+                if pr is not None
+                else 0
+            )
+            print(
+                json.dumps(
+                    {
+                        "execute": False,
+                        "issue": args.issue,
+                        "open_pr": pr.url if pr is not None else "",
+                        "unresolved_threads": unresolved,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 0
+        status = run_fix_revise(
             config=config,
             issue_number=args.issue,
             base_repo=args.repo_path,

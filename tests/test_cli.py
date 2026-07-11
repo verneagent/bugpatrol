@@ -99,6 +99,32 @@ class CliTest(unittest.TestCase):
         run_fix.assert_called_once()
         self.assertEqual(json.loads(stdout.getvalue())["status"], "opened_pr")
 
+    def test_run_fix_revise_execute_dispatches_to_run_fix_revise(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        stdout = io.StringIO()
+
+        with patch("bugpatrol.__main__.load_project_config", return_value=config):
+            with patch("bugpatrol.__main__.GitHubCliIssuesClient", return_value=FakeGithub()):
+                with patch("bugpatrol.__main__.GitHubIssueFieldsClient", return_value=object()):
+                    with patch("bugpatrol.__main__._optional_lark_client", return_value=None):
+                        with patch("bugpatrol.__main__.run_fix_revise", return_value="revised") as revise:
+                            with contextlib.redirect_stdout(stdout):
+                                exit_code = main(
+                                    [
+                                        "run-fix-revise",
+                                        "projects/todo-sandbox.toml",
+                                        "--issue",
+                                        "7",
+                                        "--repo-path",
+                                        "/tmp/repo",
+                                        "--execute",
+                                    ]
+                                )
+
+        self.assertEqual(exit_code, 0)
+        revise.assert_called_once()
+        self.assertEqual(json.loads(stdout.getvalue())["status"], "revised")
+
 
 if __name__ == "__main__":
     unittest.main()

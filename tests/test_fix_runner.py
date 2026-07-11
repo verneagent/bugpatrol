@@ -9,16 +9,24 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bugpatrol.agents import AgentInvocation
-from bugpatrol.clients import GitHubIssue, GitHubIssueComment
+from bugpatrol.clients import (
+    GitHubIssue,
+    GitHubIssueComment,
+    OpenPullRequest,
+    ReviewComment,
+    ReviewThread,
+)
 from bugpatrol.config import load_project_config
 from bugpatrol.fix_runner import (
     FixRunPlan,
+    execute_fix_revise,
     execute_fix_run,
     latest_triage_analysis,
     prepare_fix_run,
     read_triage_verdict,
     render_fix_context_markdown,
     run_fix,
+    run_fix_revise,
 )
 from bugpatrol.intake import IntakeRecord, render_issue_body
 from bugpatrol.triage_result import append_triage_metadata
@@ -39,13 +47,25 @@ def managed_issue_body() -> str:
 
 
 class FakeGithub:
-    def __init__(self, *, comments=None, open_pr: str = "", assignees=()) -> None:
+    def __init__(
+        self,
+        *,
+        comments=None,
+        open_pr: str = "",
+        assignees=(),
+        open_pull_request: OpenPullRequest | None = None,
+        review_threads=(),
+    ) -> None:
         self.comments = list(comments or [])
         self.added_comments: list[str] = []
         self.open_pr = open_pr
         self.created_prs: list[dict] = []
         self.reviewers: list[str] = []
         self.assignees = tuple(assignees)
+        self.open_pull_request = open_pull_request
+        self.review_threads = tuple(review_threads)
+        self.resolved_threads: list[str] = []
+        self.pr_comments: list[dict] = []
 
     def get_issue(self, *, repo: str, issue_number: int) -> GitHubIssue:
         return GitHubIssue(
@@ -71,6 +91,18 @@ class FakeGithub:
 
     def add_pull_request_reviewer(self, *, repo, pr, reviewer) -> None:
         self.reviewers.append(reviewer)
+
+    def get_open_pull_request_by_head(self, *, repo, head) -> OpenPullRequest | None:
+        return self.open_pull_request
+
+    def list_unresolved_review_threads(self, *, repo, pr_number):
+        return self.review_threads
+
+    def resolve_review_thread(self, *, thread_id) -> None:
+        self.resolved_threads.append(thread_id)
+
+    def add_pull_request_comment(self, *, repo, pr, body) -> None:
+        self.pr_comments.append({"pr": pr, "body": body})
 
 
 class FakeIssueFields:
@@ -291,6 +323,119 @@ class ExecuteFixRunTest(unittest.TestCase):
             self.assertEqual(github.created_prs[0]["head"], "bugpatrol/fix-issue-7")
             self.assertIn("dev1", github.reviewers)
             push.assert_called_once()
+
+
+class RunFixReviseGuardsTest(unittest.TestCase):
+    def test_no_open_pr(self) -> None:
+        config = _sandbox_config()
+        github = FakeGithub(open_pull_request=None)
+        with tempfile.TemporaryDirectory() as tmp:
+            status = run_fix_revise(
+                config=config,
+                issue_number=7,
+                base_repo=Path(tmp),
+                output_dir=Path(tmp) / "out",
+                github=github,  # type: ignore[arg-type]
+                issue_fields=FakeIssueFields("代码 Bug"),  # type: ignore[arg-type]
+            )
+        self.assertEqual(status, "no_open_pr")
+
+    def test_no_feedback_when_no_unresolved_threads(self) -> None:
+        config = _sandbox_config()
+        github = FakeGithub(
+            open_pull_request=OpenPullRequest(number=9, url="https://github.test/o/r/pull/9"),
+            review_threads=(),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            status = run_fix_revise(
+                config=config,
+                issue_number=7,
+                base_repo=Path(tmp),
+                output_dir=Path(tmp) / "out",
+                github=github,  # type: ignore[arg-type]
+                issue_fields=FakeIssueFields("代码 Bug"),  # type: ignore[arg-type]
+            )
+        self.assertEqual(status, "no_feedback")
+        self.assertFalse(github.resolved_threads)
+
+
+class ExecuteFixReviseTest(unittest.TestCase):
+    def _plan(self, *, worktree: Path, output_dir: Path, verify: dict[str, str], command):
+        config = _sandbox_config()
+        config = replace(config, fix=replace(config.fix, verify=verify))
+        plan = FixRunPlan(
+            context_path=output_dir / "fix-context.md",
+            schema_path=output_dir / "fix.schema.json",
+            output_path=output_dir / "fix-output.json",
+            invocation=AgentInvocation(provider="deepseek", command=command, env={}, model="m"),
+            agent_cwd=worktree,
+            verdict="代码 Bug",
+            base_branch="main",
+            head_branch="bugpatrol/fix-issue-7",
+            reviewer="dev1",
+            reviewer_open_id="",
+            branch_note="",
+        )
+        return config, plan
+
+    def _threads(self):
+        return (
+            ReviewThread(
+                id="RT_1",
+                comments=(ReviewComment(author="rev", body="这里改小一点", path="src/todo.ts", line=1),),
+            ),
+        )
+
+    def test_revised_pushes_comments_and_resolves_threads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_git_repo(root)
+            worktree = _add_worktree(root)
+            output_dir = root / "out"
+            output_dir.mkdir()
+            command = ExecuteFixRunTest._edit_and_write_output(worktree, output_dir / "fix-output.json")
+            config, plan = self._plan(worktree=worktree, output_dir=output_dir, verify={"ok": "true"}, command=command)
+            threads = self._threads()
+            pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
+            github = FakeGithub()
+            with patch("bugpatrol.fix_runner.worktree_push_branch") as push:
+                status = execute_fix_revise(
+                    config=config,
+                    issue=github.get_issue(repo=config.github_repo, issue_number=7),
+                    plan=plan,
+                    pr=pr,
+                    threads=threads,
+                    github=github,  # type: ignore[arg-type]
+                )
+            self.assertEqual(status, "revised")
+            push.assert_called_once()
+            # No new PR is created on revise; the existing branch is updated.
+            self.assertFalse(github.created_prs)
+            self.assertEqual(github.resolved_threads, ["RT_1"])
+            self.assertTrue(any("已按评审反馈" in c["body"] for c in github.pr_comments))
+
+    def test_verify_failed_does_not_resolve_threads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_git_repo(root)
+            worktree = _add_worktree(root)
+            output_dir = root / "out"
+            output_dir.mkdir()
+            command = ExecuteFixRunTest._edit_and_write_output(worktree, output_dir / "fix-output.json")
+            config, plan = self._plan(worktree=worktree, output_dir=output_dir, verify={"bad": "false"}, command=command)
+            github = FakeGithub()
+            status = execute_fix_revise(
+                config=config,
+                issue=github.get_issue(repo=config.github_repo, issue_number=7),
+                plan=plan,
+                pr=OpenPullRequest(number=9, url="https://github.test/o/r/pull/9"),
+                threads=self._threads(),
+                github=github,  # type: ignore[arg-type]
+            )
+            self.assertEqual(status, "verify_failed")
+            # Marker-last: a failed verify must leave threads unresolved for retry.
+            self.assertFalse(github.resolved_threads)
+            self.assertFalse(github.pr_comments)
 
 
 if __name__ == "__main__":

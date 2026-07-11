@@ -189,6 +189,79 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
         self.assertIn("merged", args)
         self.assertIn("5", args)
 
+    def test_get_open_pull_request_by_head_reads_number_and_url(self) -> None:
+        client = GitHubCliIssuesClient()
+        stdout = json.dumps([{"number": 9, "url": "https://github.com/o/r/pull/9"}])
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 0, stdout, "")
+            pr = client.get_open_pull_request_by_head(repo="o/r", head="bugpatrol/fix-issue-7")
+
+        self.assertIsNotNone(pr)
+        self.assertEqual(pr.number, 9)
+        self.assertEqual(pr.url, "https://github.com/o/r/pull/9")
+
+    def test_get_open_pull_request_by_head_none_when_absent(self) -> None:
+        client = GitHubCliIssuesClient()
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 0, "[]", "")
+            self.assertIsNone(client.get_open_pull_request_by_head(repo="o/r", head="h"))
+
+    def test_list_unresolved_review_threads_filters_resolved(self) -> None:
+        client = GitHubCliIssuesClient()
+        stdout = json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [
+                                    {
+                                        "id": "RT_open",
+                                        "isResolved": False,
+                                        "comments": {
+                                            "nodes": [
+                                                {
+                                                    "body": "改小一点",
+                                                    "path": "src/todo.ts",
+                                                    "line": 12,
+                                                    "author": {"login": "rev"},
+                                                }
+                                            ]
+                                        },
+                                    },
+                                    {
+                                        "id": "RT_done",
+                                        "isResolved": True,
+                                        "comments": {"nodes": []},
+                                    },
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 0, stdout, "")
+            threads = client.list_unresolved_review_threads(repo="o/r", pr_number=9)
+
+        self.assertEqual(len(threads), 1)
+        self.assertEqual(threads[0].id, "RT_open")
+        self.assertEqual(threads[0].comments[0].author, "rev")
+        self.assertEqual(threads[0].comments[0].path, "src/todo.ts")
+        self.assertEqual(threads[0].comments[0].line, 12)
+
+    def test_resolve_review_thread_calls_mutation(self) -> None:
+        client = GitHubCliIssuesClient()
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 0, "{}", "")
+            client.resolve_review_thread(thread_id="RT_open")
+        args = run.call_args.args[0]
+        self.assertIn("graphql", args)
+        self.assertTrue(any("resolveReviewThread" in a for a in args))
+
     def test_raises_on_gh_failure(self) -> None:
         client = GitHubCliIssuesClient()
 

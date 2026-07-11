@@ -1,0 +1,105 @@
+name: BugPatrol fix revise
+
+# Address review feedback on an open auto-fix PR. Stateless like the fix runner:
+# it rebuilds from origin (the fix branch) + GitHub (the PR's unresolved review
+# threads), edits code, pushes a fast-forward update to the SAME branch, then
+# resolves the threads it addressed. Because everything lives on GitHub, this may
+# run on a different runner than the one that opened the PR.
+
+on:
+  # Auto-trigger when a reviewer submits feedback on a bugpatrol fix PR.
+  pull_request_review:
+    types: [submitted]
+  # Manual re-run for a specific issue.
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Issue number whose open fix PR should address review feedback
+        required: true
+
+# Share the fix concurrency group so a fix and a revise for the SAME issue never
+# run at once, even on different runners. Do NOT cancel-in-progress: a cancelled
+# half-run could push without resolving threads.
+concurrency:
+  group: bugpatrol-fix-${{ github.repository }}-${{ github.event.inputs.issue_number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  revise:
+    # Only act on review events for an actual bugpatrol fix branch; always act on
+    # manual dispatch.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.event.pull_request.head.ref, 'bugpatrol/fix-issue-')
+    runs-on: ${{ vars.BUGPATROL_FIX_RUNNER_LABEL || 'self-hosted' }}
+    env:
+      NODE_USE_ENV_PROXY: "1"
+    steps:
+      # Resolve the issue number: manual input, or parsed from the fix branch
+      # name bugpatrol/fix-issue-<N> on a review event.
+      - name: Resolve issue number
+        id: issue
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.issue_number }}" ]; then
+            n="${{ github.event.inputs.issue_number }}"
+          else
+            ref="${{ github.event.pull_request.head.ref }}"
+            n="${ref#bugpatrol/fix-issue-}"
+          fi
+          case "$n" in
+            ''|*[!0-9]*) echo "cannot resolve a numeric issue number (got '$n')" >&2; exit 1 ;;
+          esac
+          echo "number=$n" >> "$GITHUB_OUTPUT"
+
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.BUGPATROL_APP_ID }}
+          private-key: ${{ secrets.BUGPATROL_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Checkout BugPatrol tool
+        uses: actions/checkout@v5
+        with:
+          repository: verneagent/bugpatrol
+          path: .bugpatrol/tool
+
+      - name: Bootstrap app repo cache
+        id: app-cache
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          repo_path="$(bash "$GITHUB_WORKSPACE/.bugpatrol/tool/examples/github-actions/bugpatrol-cache-bootstrap.sh" "${{ github.repository }}")"
+          echo "repo_path=$repo_path" >> "$GITHUB_OUTPUT"
+
+      - name: Configure git identity
+        shell: bash
+        run: |
+          git -C "${{ steps.app-cache.outputs.repo_path }}" config user.name "bugpatrol[bot]"
+          git -C "${{ steps.app-cache.outputs.repo_path }}" config user.email "bugpatrol[bot]@users.noreply.github.com"
+
+      - name: Run fix revise
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BUGPATROL_PROJECT_CONFIG: ${{ vars.BUGPATROL_PROJECT_CONFIG }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+        run: |
+          PY=""
+          for c in python3.13 python3.12 python3.11 python3; do
+            if command -v "$c" >/dev/null 2>&1 \
+              && "$c" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+              PY="$c"; break
+            fi
+          done
+          [ -n "$PY" ] || { echo "no Python >= 3.11 on this runner" >&2; exit 1; }
+          PYTHONPATH="$GITHUB_WORKSPACE/.bugpatrol/tool" \
+          "$PY" -m bugpatrol run-fix-revise "$BUGPATROL_PROJECT_CONFIG" \
+            --issue "${{ steps.issue.outputs.number }}" \
+            --repo-path "${{ steps.app-cache.outputs.repo_path }}" \
+            --output-dir "$GITHUB_WORKSPACE/.bugpatrol/fix-revise/issue-${{ steps.issue.outputs.number }}" \
+            --execute
