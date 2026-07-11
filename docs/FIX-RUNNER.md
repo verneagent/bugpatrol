@@ -135,14 +135,39 @@ The unresolved review threads *are* the work queue — no extra marker file:
    leaves threads unresolved for at-least-once retry, never silently dropped.
 6. `resolveReviewThread` (GraphQL) each addressed thread — the queue drains.
 
-Statuses: `no_open_pr`, `no_feedback`, `blocked`, `no_changes`, `no_output`,
-`verify_failed`, `revised`.
+Statuses: `no_open_pr`, `no_feedback`, `conflict_escalated`,
+`conflict_unresolved`, `conflict_resolved`, `blocked`, `no_changes`,
+`no_output`, `verify_failed`, `revised`.
+
+### Target-branch conflicts
+
+The same revise run also resolves a PR that conflicts with its target branch
+(the target advanced after the PR opened). It **merges the target in** rather
+than rebasing + force-pushing — a merge is a forward commit that fast-forward
+pushes like any other revise, so no history rewrite and no force-push:
+
+1. `get_open_pull_request_by_head` reads `mergeable`; `CONFLICTING` triggers the
+   conflict path (a run with *neither* feedback nor a conflict is `no_feedback`).
+2. `worktree_merge_base` fetches the PR's target branch and `git merge`s it into
+   the fix branch worktree. A **clean** merge auto-commits (nothing for the agent
+   to do) → `conflict_resolved`. A **conflicting** merge leaves markers.
+3. If more than `[fix.gate].max_conflict_files` (default **5**) files conflict,
+   the merge is aborted and the conflict is **escalated to a human** (Lark
+   @reviewer + PR comment) → `conflict_escalated`. Auto-resolving a sprawling
+   conflict is unsafe.
+4. Otherwise the agent resolves the markers (alongside any review feedback in the
+   same turn). A deterministic guard rejects a push if any conflict marker
+   remains → `conflict_unresolved`.
+5. The diff-size / protected-path gate is **skipped** on the conflict path (a
+   legitimate target-branch merge changes many files outside the fix); the
+   project's own **verify** commands are the gate there.
 
 Cross-machine correctness rests on three externalized-state pieces: the fix
 branch (fetched fresh as `origin/<branch>`), the PR's unresolved threads (the
-queue), and the shared GitHub concurrency group `bugpatrol-fix-${repo}-${issue}`
-(`cancel-in-progress: false`) that serializes a fix and a revise for the **same
-issue** across the whole runner pool — even on different machines.
+queue) and mergeability, and the shared GitHub concurrency group
+`bugpatrol-fix-${repo}-${issue}` (`cancel-in-progress: false`) that serializes a
+fix and a revise for the **same issue** across the whole runner pool — even on
+different machines.
 
 CLI:
 
@@ -150,6 +175,11 @@ CLI:
 python -m bugpatrol run-fix-revise <config> --issue N --repo-path <checkout> \
   --output-dir <dir> [--execute]
 ```
+
+A conflict caused by the target branch advancing does not emit a PR event, so a
+conflict with **no** review feedback is picked up on the next revise run
+(re-run via `workflow_dispatch` for the issue; a scheduled sweep can be added
+later). A review event resolves feedback and any conflict in the same run.
 
 Workflow template — triggers on `pull_request_review [submitted]` (auto) and
 `workflow_dispatch` (manual), resolves the issue number from the

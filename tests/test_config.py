@@ -122,6 +122,22 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"\[fix.agent\] must be a table"):
             parse_project_config(data)
 
+    def test_fix_gate_max_conflict_files_defaults_and_overrides(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["fix"] = {"verify": {"test": "make test"}}
+        self.assertEqual(parse_project_config(data).fix.max_conflict_files, 5)
+
+        data["fix"] = {"verify": {"test": "make test"}, "gate": {"max_conflict_files": 2}}
+        self.assertEqual(parse_project_config(data).fix.max_conflict_files, 2)
+
+    def test_fix_gate_rejects_non_positive_max_conflict_files(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["fix"] = {"verify": {"test": "make test"}, "gate": {"max_conflict_files": 0}}
+        with self.assertRaisesRegex(ValueError, r"max_conflict_files must be positive"):
+            parse_project_config(data)
+
     def test_lark_platform_defaults_to_international(self) -> None:
         config = load_project_config(Path("projects/example.toml"))
         parsed = parse_project_config(self._minimal_data(config))

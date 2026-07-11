@@ -438,5 +438,180 @@ class ExecuteFixReviseTest(unittest.TestCase):
             self.assertFalse(github.pr_comments)
 
 
+class ExecuteFixReviseConflictTest(unittest.TestCase):
+    @staticmethod
+    def _write_marker_file_and_output(worktree: Path, output_path: Path) -> list[str]:
+        """Agent that leaves conflict markers in place (a failed resolution)."""
+        payload = json.dumps(
+            {
+                "summary": "s",
+                "root_cause": "r",
+                "tests_added": False,
+                "pr_title": "t",
+                "pr_body": "b",
+            }
+        )
+        marker = "<<<<<<< HEAD\\nfix\\n=======\\nmoved\\n>>>>>>> origin/main\\n"
+        script = (
+            f"import pathlib;"
+            f"pathlib.Path({str(worktree / 'src' / 'todo.ts')!r}).write_text({marker!r});"
+            f"pathlib.Path({str(output_path)!r}).write_text({payload!r})"
+        )
+        return ["python3", "-c", script]
+
+    def test_conflict_and_feedback_resolved_skips_gate_and_resolves_threads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_git_repo(root)
+            worktree = _add_worktree(root)
+            output_dir = root / "out"
+            output_dir.mkdir()
+            command = ExecuteFixRunTest._edit_and_write_output(worktree, output_dir / "fix-output.json")
+            config, plan = ExecuteFixReviseTest()._plan(
+                worktree=worktree, output_dir=output_dir, verify={"ok": "true"}, command=command
+            )
+            # A tiny max_diff would block a normal revise, but the conflict path
+            # skips the diff gate — assert it does not trip here.
+            config = replace(config, fix=replace(config.fix, max_diff_lines=1))
+            threads = ExecuteFixReviseTest()._threads()
+            pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9", base_ref="main", mergeable="CONFLICTING")
+            github = FakeGithub()
+            with patch("bugpatrol.fix_runner.worktree_push_branch") as push:
+                status = execute_fix_revise(
+                    config=config,
+                    issue=github.get_issue(repo=config.github_repo, issue_number=7),
+                    plan=plan,
+                    pr=pr,
+                    threads=threads,
+                    github=github,  # type: ignore[arg-type]
+                    has_conflict=True,
+                    conflict_files=("src/todo.ts",),
+                )
+            self.assertEqual(status, "revised")
+            push.assert_called_once()
+            self.assertEqual(github.resolved_threads, ["RT_1"])
+
+    def test_conflict_only_resolved_returns_conflict_resolved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_git_repo(root)
+            worktree = _add_worktree(root)
+            output_dir = root / "out"
+            output_dir.mkdir()
+            command = ExecuteFixRunTest._edit_and_write_output(worktree, output_dir / "fix-output.json")
+            config, plan = ExecuteFixReviseTest()._plan(
+                worktree=worktree, output_dir=output_dir, verify={"ok": "true"}, command=command
+            )
+            pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9", base_ref="main", mergeable="CONFLICTING")
+            github = FakeGithub()
+            with patch("bugpatrol.fix_runner.worktree_push_branch") as push:
+                status = execute_fix_revise(
+                    config=config,
+                    issue=github.get_issue(repo=config.github_repo, issue_number=7),
+                    plan=plan,
+                    pr=pr,
+                    threads=(),
+                    github=github,  # type: ignore[arg-type]
+                    has_conflict=True,
+                    conflict_files=("src/todo.ts",),
+                )
+            self.assertEqual(status, "conflict_resolved")
+            push.assert_called_once()
+            self.assertFalse(github.resolved_threads)
+            self.assertTrue(any("解决冲突" in c["body"] for c in github.pr_comments))
+
+    def test_leftover_conflict_markers_block_and_do_not_push(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_git_repo(root)
+            worktree = _add_worktree(root)
+            output_dir = root / "out"
+            output_dir.mkdir()
+            command = self._write_marker_file_and_output(worktree, output_dir / "fix-output.json")
+            config, plan = ExecuteFixReviseTest()._plan(
+                worktree=worktree, output_dir=output_dir, verify={"ok": "true"}, command=command
+            )
+            pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9", base_ref="main", mergeable="CONFLICTING")
+            github = FakeGithub()
+            with patch("bugpatrol.fix_runner.worktree_push_branch") as push:
+                status = execute_fix_revise(
+                    config=config,
+                    issue=github.get_issue(repo=config.github_repo, issue_number=7),
+                    plan=plan,
+                    pr=pr,
+                    threads=(),
+                    github=github,  # type: ignore[arg-type]
+                    has_conflict=True,
+                    conflict_files=("src/todo.ts",),
+                )
+            self.assertEqual(status, "conflict_unresolved")
+            push.assert_not_called()
+            self.assertTrue(any("冲突标记" in c for c in github.added_comments))
+
+
+def _make_conflicting_fix_remote(root: Path) -> Path:
+    """origin with a pushed fix branch that conflicts with an advanced main.
+
+    Returns a `base_repo` clone (origin remote set) ready for fix_revise_worktree
+    + worktree_merge_base to fetch and merge, producing a 2-file conflict.
+    """
+    origin = root / "origin"
+    origin.mkdir()
+    subprocess.run(["git", "-C", str(origin), "init", "-q", "-b", "main"], check=True)
+    for k, v in (("user.email", "t@t.test"), ("user.name", "t")):
+        subprocess.run(["git", "-C", str(origin), "config", k, v], check=True)
+    (origin / "a.txt").write_text("base\n")
+    (origin / "b.txt").write_text("base\n")
+    subprocess.run(["git", "-C", str(origin), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(origin), "commit", "-q", "-m", "init"], check=True)
+    # fix branch edits both files
+    subprocess.run(["git", "-C", str(origin), "checkout", "-q", "-b", "bugpatrol/fix-issue-7"], check=True)
+    (origin / "a.txt").write_text("fix\n")
+    (origin / "b.txt").write_text("fix\n")
+    subprocess.run(["git", "-C", str(origin), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(origin), "commit", "-q", "-m", "fix"], check=True)
+    # main advances on the SAME lines -> conflict on both files
+    subprocess.run(["git", "-C", str(origin), "checkout", "-q", "main"], check=True)
+    (origin / "a.txt").write_text("moved\n")
+    (origin / "b.txt").write_text("moved\n")
+    subprocess.run(["git", "-C", str(origin), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(origin), "commit", "-q", "-m", "advance"], check=True)
+
+    base_repo = root / "base"
+    subprocess.run(["git", "clone", "-q", str(origin), str(base_repo)], check=True, capture_output=True)
+    for k, v in (("user.email", "t@t.test"), ("user.name", "t")):
+        subprocess.run(["git", "-C", str(base_repo), "config", k, v], check=True)
+    return base_repo
+
+
+class RunFixReviseConflictEscalationTest(unittest.TestCase):
+    def test_too_many_conflict_files_escalates_to_human(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_repo = _make_conflicting_fix_remote(root)
+            config = _sandbox_config()
+            config = replace(config, fix=replace(config.fix, max_conflict_files=1))
+            github = FakeGithub(
+                open_pull_request=OpenPullRequest(
+                    number=9,
+                    url="https://github.test/o/r/pull/9",
+                    base_ref="main",
+                    mergeable="CONFLICTING",
+                ),
+                review_threads=(),
+            )
+            status = run_fix_revise(
+                config=config,
+                issue_number=7,
+                base_repo=base_repo,
+                output_dir=root / "out",
+                github=github,  # type: ignore[arg-type]
+                issue_fields=FakeIssueFields("代码 Bug"),  # type: ignore[arg-type]
+            )
+            self.assertEqual(status, "conflict_escalated")
+            self.assertTrue(any("人工" in c["body"] for c in github.pr_comments))
+            self.assertFalse(github.resolved_threads)
+
+
 if __name__ == "__main__":
     unittest.main()

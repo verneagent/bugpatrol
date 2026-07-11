@@ -423,11 +423,13 @@ class GitHubCliIssuesClient:
         return ""
 
     def get_open_pull_request_by_head(self, *, repo: str, head: str) -> OpenPullRequest | None:
-        """Open PR (number + url) whose head branch is `head`, or None.
+        """Open PR whose head branch is `head`, or None.
 
-        Like `find_open_pull_request_by_head` but returns the number too, which
-        revise needs to read/resolve the PR's review threads. Kept separate so
-        the existing idempotency short-circuit's return type is unchanged.
+        Like `find_open_pull_request_by_head` but returns the number, target
+        branch, and mergeability too, which revise needs to read/resolve the
+        PR's review threads and to detect/resolve a conflict with the target
+        branch. Kept separate so the existing idempotency short-circuit's return
+        type is unchanged.
         """
         result = self._run(
             [
@@ -440,7 +442,7 @@ class GitHubCliIssuesClient:
                 "--state",
                 "open",
                 "--json",
-                "number,url",
+                "number,url,baseRefName,mergeable",
             ]
         )
         data = json.loads(result.stdout)
@@ -448,7 +450,12 @@ class GitHubCliIssuesClient:
             number = data[0].get("number")
             url = data[0].get("url")
             if isinstance(number, int) and isinstance(url, str):
-                return OpenPullRequest(number=number, url=url)
+                return OpenPullRequest(
+                    number=number,
+                    url=url,
+                    base_ref=str(data[0].get("baseRefName") or ""),
+                    mergeable=str(data[0].get("mergeable") or ""),
+                )
         return None
 
     def list_unresolved_review_threads(self, *, repo: str, pr_number: int) -> tuple[ReviewThread, ...]:

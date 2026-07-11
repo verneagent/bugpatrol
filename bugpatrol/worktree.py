@@ -434,3 +434,73 @@ def worktree_commit_all(worktree: Path, *, message: str) -> str:
 def worktree_push_branch(worktree: Path, *, branch: str) -> None:
     """Push the fix branch to origin, setting upstream."""
     _git_in(worktree, "push", "--set-upstream", "origin", branch)
+
+
+@dataclass(frozen=True)
+class MergeOutcome:
+    # "clean" when git merged the target with no textual conflict (a merge
+    # commit is already made, or nothing to merge); "conflict" when the merge
+    # stopped on conflicts (working tree carries markers, not yet committed).
+    status: str
+    conflicted_files: tuple[str, ...] = ()
+
+
+def worktree_merge_base(worktree: Path, *, base_branch: str) -> MergeOutcome:
+    """Merge the PR's target `base_branch` into the fix branch worktree.
+
+    Used by revise when the open PR conflicts with its target branch: instead of
+    rebasing + force-pushing (history rewrite), we merge the freshly-fetched
+    target in. A clean merge auto-commits and can be fast-forward pushed like any
+    other revise commit; a conflicting merge leaves markers in the working tree
+    for the agent to resolve, and `worktree_merge_abort` backs it out for the
+    escalation path.
+    """
+    fetched = _git_in(
+        worktree,
+        "fetch",
+        "origin",
+        f"+refs/heads/{base_branch}:refs/remotes/origin/{base_branch}",
+        check=False,
+    )
+    if fetched.returncode != 0:
+        raise RuntimeError(
+            f"cannot fetch target branch origin/{base_branch} to resolve conflict: "
+            f"{fetched.stderr.strip()}"
+        )
+    merged = _git_in(worktree, "merge", "--no-edit", f"origin/{base_branch}", check=False)
+    if merged.returncode == 0:
+        return MergeOutcome(status="clean")
+    unmerged = _git_in(worktree, "diff", "--name-only", "--diff-filter=U", check=False)
+    files = tuple(line.strip() for line in unmerged.stdout.splitlines() if line.strip())
+    return MergeOutcome(status="conflict", conflicted_files=files)
+
+
+def worktree_merge_abort(worktree: Path) -> None:
+    """Abort an in-progress conflicting merge (escalation path)."""
+    _git_in(worktree, "merge", "--abort", check=False)
+
+
+def worktree_unresolved_conflict_markers(
+    worktree: Path, files: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Files among `files` that still contain git conflict markers.
+
+    A deterministic guard: after the agent resolves a conflict merge, no file it
+    touched may still carry `<<<<<<<`/`=======`/`>>>>>>>` — otherwise a blind
+    `git add -A` would commit the markers into the branch.
+    """
+    remaining: list[str] = []
+    for path in files:
+        target = worktree / path
+        if not target.exists():
+            continue
+        try:
+            text = target.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        # git's start/end markers carry a trailing space + ref name, so they are
+        # far more specific than a bare "=======" line (which can be legitimate
+        # content, e.g. a markdown rule), avoiding false positives.
+        if "<<<<<<< " in text or ">>>>>>> " in text:
+            remaining.append(path)
+    return tuple(remaining)

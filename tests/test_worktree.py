@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 
-from bugpatrol.worktree import resolve_reference_branch, resolve_triage_branch
+from bugpatrol.worktree import (
+    resolve_reference_branch,
+    resolve_triage_branch,
+    worktree_merge_abort,
+    worktree_merge_base,
+    worktree_unresolved_conflict_markers,
+)
 
 
 class FakeGitDriver:
@@ -135,6 +144,99 @@ class ResolveReferenceBranchTest(unittest.TestCase):
         self.assertEqual(resolution.status, "main")
         self.assertEqual(resolution.note, "")
         self.assertEqual(driver.fetched, [])
+
+
+def _git(path: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)
+
+
+def _make_fix_clone(root: Path):
+    """origin repo + a clone whose fix branch diverges from origin/main.
+
+    Returns (origin, clone). The clone has `origin` remote set and a checked-out
+    fix branch; callers move origin/main to create clean or conflicting merges.
+    """
+    origin = root / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    _git(origin, "config", "user.email", "t@t.test")
+    _git(origin, "config", "user.name", "t")
+    (origin / "file.txt").write_text("base\n")
+    (origin / "other.txt").write_text("other\n")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-q", "-m", "init")
+
+    clone = root / "clone"
+    subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True, capture_output=True)
+    _git(clone, "config", "user.email", "t@t.test")
+    _git(clone, "config", "user.name", "t")
+    _git(clone, "checkout", "-q", "-b", "fix")
+    (clone / "file.txt").write_text("fix\n")
+    _git(clone, "add", "-A")
+    _git(clone, "commit", "-q", "-m", "fix change")
+    return origin, clone
+
+
+class WorktreeMergeBaseTest(unittest.TestCase):
+    def test_conflicting_merge_reports_conflicted_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin, clone = _make_fix_clone(root)
+            # origin/main moves on the SAME line the fix touched -> conflict.
+            (origin / "file.txt").write_text("moved\n")
+            _git(origin, "add", "-A")
+            _git(origin, "commit", "-q", "-m", "origin move")
+
+            outcome = worktree_merge_base(clone, base_branch="main")
+            self.assertEqual(outcome.status, "conflict")
+            self.assertEqual(outcome.conflicted_files, ("file.txt",))
+            # Markers are present until resolved.
+            self.assertEqual(
+                worktree_unresolved_conflict_markers(clone, ("file.txt",)), ("file.txt",)
+            )
+
+    def test_clean_merge_when_target_moves_elsewhere(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin, clone = _make_fix_clone(root)
+            # origin/main moves a DIFFERENT file -> merges cleanly, auto-commits.
+            (origin / "other.txt").write_text("other moved\n")
+            _git(origin, "add", "-A")
+            _git(origin, "commit", "-q", "-m", "origin move other")
+
+            outcome = worktree_merge_base(clone, base_branch="main")
+            self.assertEqual(outcome.status, "clean")
+            self.assertEqual(outcome.conflicted_files, ())
+
+    def test_abort_restores_pre_merge_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin, clone = _make_fix_clone(root)
+            (origin / "file.txt").write_text("moved\n")
+            _git(origin, "add", "-A")
+            _git(origin, "commit", "-q", "-m", "origin move")
+
+            worktree_merge_base(clone, base_branch="main")
+            worktree_merge_abort(clone)
+            self.assertEqual((clone / "file.txt").read_text(), "fix\n")
+            self.assertEqual(
+                worktree_unresolved_conflict_markers(clone, ("file.txt",)), ()
+            )
+
+    def test_resolved_markers_are_detected_as_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin, clone = _make_fix_clone(root)
+            (origin / "file.txt").write_text("moved\n")
+            _git(origin, "add", "-A")
+            _git(origin, "commit", "-q", "-m", "origin move")
+
+            worktree_merge_base(clone, base_branch="main")
+            # Agent resolves the conflict (removes all markers).
+            (clone / "file.txt").write_text("resolved\n")
+            self.assertEqual(
+                worktree_unresolved_conflict_markers(clone, ("file.txt",)), ()
+            )
 
 
 if __name__ == "__main__":

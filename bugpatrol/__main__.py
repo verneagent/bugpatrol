@@ -903,8 +903,9 @@ def main(argv: list[str] | None = None) -> int:
         github = GitHubCliIssuesClient(gh=config.github_cli)
         issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
         if not args.execute:
-            # Dry run: report whether an open fix PR exists and how much
-            # unresolved review feedback is queued, without touching code.
+            # Dry run: report whether an open fix PR exists, how much unresolved
+            # review feedback is queued, and whether it conflicts with its target
+            # branch — without touching code.
             head = config.fix.branch_for_issue(args.issue)
             pr = github.get_open_pull_request_by_head(repo=config.github_repo, head=head)
             unresolved = (
@@ -918,6 +919,8 @@ def main(argv: list[str] | None = None) -> int:
                         "execute": False,
                         "issue": args.issue,
                         "open_pr": pr.url if pr is not None else "",
+                        "base_branch": pr.base_ref if pr is not None else "",
+                        "conflicts_target": bool(pr is not None and pr.mergeable.upper() == "CONFLICTING"),
                         "unresolved_threads": unresolved,
                     },
                     ensure_ascii=False,

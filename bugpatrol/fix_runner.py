@@ -43,12 +43,15 @@ from bugpatrol.fix_gate import (
     verify_all_passed,
 )
 from bugpatrol.fix_result import (
+    FixResult,
     build_pr_body,
     fix_result_fingerprint,
+    notify_conflict_escalation,
     notify_fix_pr,
     notify_fix_revise,
     parse_fix_result,
     render_blocked_comment,
+    render_conflict_instructions_markdown,
     render_fix_blocked_lark_message,
     render_review_feedback_markdown,
     render_verify_failed_comment,
@@ -70,7 +73,10 @@ from bugpatrol.worktree import (
     worktree_changed_files,
     worktree_commit_all,
     worktree_diff_line_count,
+    worktree_merge_abort,
+    worktree_merge_base,
     worktree_push_branch,
+    worktree_unresolved_conflict_markers,
 )
 
 
@@ -290,12 +296,16 @@ def prepare_fix_revise(
     issue_fields: GitHubIssueFieldsClient,
     head_branch: str,
     threads: Sequence[ReviewThread],
+    base_branch: str = "",
+    conflict_files: Sequence[str] = (),
     prompt_path: Path = Path("prompts/fix.zh.md"),
 ) -> FixRunPlan:
     """Build a revise plan: the fix context plus the PR's unresolved feedback.
 
     Reuses prepare_fix_run (same triage root cause + schema + invocation) and
-    appends the review threads so the agent addresses the feedback in place.
+    appends any merge-conflict instructions (resolve first) and the review
+    threads so the agent addresses everything in place. `base_branch` here is
+    the PR's target branch, used only to word the conflict instructions.
     """
     plan = prepare_fix_run(
         config=config,
@@ -310,9 +320,18 @@ def prepare_fix_revise(
         branch_note="",
         prompt_path=prompt_path,
     )
-    feedback = render_review_feedback_markdown(tuple(threads))
-    with plan.context_path.open("a") as handle:
-        handle.write("\n\n" + feedback + "\n")
+    sections: list[str] = []
+    if conflict_files:
+        sections.append(
+            render_conflict_instructions_markdown(
+                base_branch=base_branch, files=tuple(conflict_files)
+            )
+        )
+    if threads:
+        sections.append(render_review_feedback_markdown(tuple(threads)))
+    if sections:
+        with plan.context_path.open("a") as handle:
+            handle.write("\n\n" + "\n\n".join(sections) + "\n")
     return plan
 
 
@@ -327,12 +346,16 @@ def run_fix_revise(
     lark: LarkMessengerClient | None = None,
     prompt_path: Path = Path("prompts/fix.zh.md"),
 ) -> str:
-    """Address open-PR review feedback on an existing fix, then push + resolve.
+    """Address open-PR review feedback / target-branch conflicts on a fix.
 
     Stateless like run_fix: it rebuilds everything from origin (the fix branch)
-    and GitHub (the PR's unresolved review threads), so it may run on a
-    different runner than the run that opened the PR. Statuses: no_open_pr,
-    no_feedback, blocked, no_changes, no_output, verify_failed, revised.
+    and GitHub (the PR's unresolved review threads + mergeability), so it may run
+    on a different runner than the run that opened the PR. When the PR conflicts
+    with its target branch it merges the target in (never force-push) and lets
+    the agent resolve the markers, escalating to a human if too many files
+    conflict. Statuses: no_open_pr, no_feedback, conflict_escalated,
+    conflict_unresolved, conflict_resolved, blocked, no_changes, no_output,
+    verify_failed, revised.
     """
     if config.fix is None:
         raise ValueError("project config has no [fix] table; auto-fix is not enabled")
@@ -346,11 +369,49 @@ def run_fix_revise(
         # Nothing to revise: no open fix PR for this issue.
         return "no_open_pr"
     threads = github.list_unresolved_review_threads(repo=config.github_repo, pr_number=pr.number)
-    if not threads:
-        # Stateless no-op: no unresolved feedback since the last revise.
+    has_conflict = pr.mergeable.upper() == "CONFLICTING"
+    if not threads and not has_conflict:
+        # Stateless no-op: no unresolved feedback and the PR merges cleanly.
         return "no_feedback"
 
     with fix_revise_worktree(base_repo=base_repo, branch=head_branch) as worktree:
+        conflict_files: tuple[str, ...] = ()
+        reviewer = issue.assignees[0] if issue.assignees else ""
+        reviewer_open_id = (config.lark.user_open_ids or {}).get(reviewer, "") if reviewer else ""
+        if has_conflict:
+            if not pr.base_ref:
+                # We can't merge the target in without knowing it; hand off.
+                notify_conflict_escalation(
+                    repo=config.github_repo,
+                    issue_number=issue.number,
+                    issue_url=issue.url,
+                    pr_url=pr.url,
+                    base_branch="(unknown)",
+                    files=(),
+                    github=github,
+                    lark=lark,
+                    reviewer_open_id=reviewer_open_id,
+                )
+                return "conflict_escalated"
+            merge = worktree_merge_base(worktree, base_branch=pr.base_ref)
+            if merge.status == "conflict":
+                if len(merge.conflicted_files) > fix.max_conflict_files:
+                    worktree_merge_abort(worktree)
+                    notify_conflict_escalation(
+                        repo=config.github_repo,
+                        issue_number=issue.number,
+                        issue_url=issue.url,
+                        pr_url=pr.url,
+                        base_branch=pr.base_ref,
+                        files=merge.conflicted_files,
+                        github=github,
+                        lark=lark,
+                        reviewer_open_id=reviewer_open_id,
+                    )
+                    return "conflict_escalated"
+                conflict_files = merge.conflicted_files
+            # A clean merge already made a merge commit; nothing for the agent to
+            # resolve, so conflict_files stays empty.
         plan = prepare_fix_revise(
             config=config,
             issue_number=issue_number,
@@ -360,6 +421,8 @@ def run_fix_revise(
             issue_fields=issue_fields,
             head_branch=head_branch,
             threads=threads,
+            base_branch=pr.base_ref,
+            conflict_files=conflict_files,
             prompt_path=prompt_path,
         )
         return execute_fix_revise(
@@ -370,6 +433,8 @@ def run_fix_revise(
             threads=threads,
             github=github,
             lark=lark,
+            has_conflict=has_conflict,
+            conflict_files=conflict_files,
         )
 
 
@@ -382,9 +447,21 @@ def execute_fix_revise(
     threads: Sequence[ReviewThread],
     github: GitHubCliIssuesClient,
     lark: LarkMessengerClient | None = None,
+    has_conflict: bool = False,
+    conflict_files: Sequence[str] = (),
 ) -> str:
+    """Run the revise agent (feedback and/or conflict resolution), then push.
+
+    When `has_conflict` the worktree already carries the target branch merged in
+    (done by run_fix_revise). The agent — if there is any work: unresolved
+    conflict markers and/or review threads — resolves it in place. The diff-size/
+    protected-path gate is skipped on the conflict path because a legitimate
+    target-branch merge changes many files outside the fix; verify commands are
+    the real gate there. On a plain feedback revise the gate still applies.
+    """
     fix = config.fix
     assert fix is not None  # run_fix_revise guards this.
+    needs_agent = bool(threads) or bool(conflict_files)
     if lark is not None:
         send_intake_topic_message(
             repo=config.github_repo,
@@ -392,28 +469,59 @@ def execute_fix_revise(
             github=github,
             lark=lark,
             text=_render_revise_start_message(
-                issue_number=issue.number, issue_url=issue.url, feedback_count=len(threads)
+                issue_number=issue.number,
+                issue_url=issue.url,
+                feedback_count=len(threads),
+                base_branch=pr.base_ref if has_conflict else "",
             ),
         )
-    run_stats = _run_fix_agent(plan)
+    run_stats = _run_fix_agent(plan) if needs_agent else None
+
+    # Deterministic guard: the agent must have removed every conflict marker it
+    # was handed, or a blind `git add -A` would commit the markers.
+    if conflict_files:
+        leftover = worktree_unresolved_conflict_markers(plan.agent_cwd, tuple(conflict_files))
+        if leftover:
+            _post_blocked(
+                config=config,
+                issue=issue,
+                reason=("冲突未完全解决，以下文件仍有冲突标记：" + ", ".join(leftover)),
+                github=github,
+                lark=lark,
+            )
+            return "conflict_unresolved"
 
     changed_files = worktree_changed_files(plan.agent_cwd)
-    diff_line_count = worktree_diff_line_count(plan.agent_cwd)
-    gate = evaluate_post_edit(changed_files=changed_files, diff_line_count=diff_line_count, fix=fix)
-    if not gate.allowed:
-        _post_blocked(config=config, issue=issue, reason=gate.reason, github=github, lark=lark)
-        return "no_changes" if not changed_files else "blocked"
-
-    if not plan.output_path.exists():
-        _post_blocked(
-            config=config,
-            issue=issue,
-            reason="revise agent edited code but wrote no output JSON summary",
-            github=github,
-            lark=lark,
+    if not has_conflict:
+        diff_line_count = worktree_diff_line_count(plan.agent_cwd)
+        gate = evaluate_post_edit(
+            changed_files=changed_files, diff_line_count=diff_line_count, fix=fix
         )
-        return "no_output"
-    result = parse_fix_result(json.loads(plan.output_path.read_text()))
+        if not gate.allowed:
+            _post_blocked(config=config, issue=issue, reason=gate.reason, github=github, lark=lark)
+            return "no_changes" if not changed_files else "blocked"
+
+    if needs_agent:
+        if not plan.output_path.exists():
+            _post_blocked(
+                config=config,
+                issue=issue,
+                reason="revise agent edited code but wrote no output JSON summary",
+                github=github,
+                lark=lark,
+            )
+            return "no_output"
+        result = parse_fix_result(json.loads(plan.output_path.read_text()))
+    else:
+        # Clean auto-merge with no feedback: no agent ran, so synthesize a
+        # summary for the notification (the merge commit is the only change).
+        result = FixResult(
+            summary=f"合并目标分支 `{pr.base_ref}` 以解决与目标分支的冲突",
+            root_cause=f"目标分支 `{pr.base_ref}` 前移，PR 与其冲突",
+            tests_added=False,
+            pr_title="",
+            pr_body="",
+        )
 
     verify_outcomes = run_verify_commands(fix=fix, cwd=plan.agent_cwd)
     if not verify_all_passed(verify_outcomes):
@@ -422,7 +530,8 @@ def execute_fix_revise(
         )
         return "verify_failed"
 
-    worktree_commit_all(plan.agent_cwd, message=f"fix: address review feedback (#{issue.number})")
+    if changed_files:
+        worktree_commit_all(plan.agent_cwd, message=_revise_commit_message(issue.number, has_conflict, threads, pr.base_ref))
     # Fast-forward append to the existing remote fix branch, updating the PR.
     worktree_push_branch(plan.agent_cwd, branch=plan.head_branch)
     # Notify BEFORE resolving threads (Lark-first, marker-last): resolving is the
@@ -439,10 +548,24 @@ def execute_fix_revise(
         lark=lark,
         reviewer_open_id=plan.reviewer_open_id,
         run_stats=run_stats,
+        conflicted=has_conflict,
+        base_branch=pr.base_ref,
     )
     for thread in threads:
         github.resolve_review_thread(thread_id=thread.id)
-    return "revised"
+    if threads:
+        return "revised"
+    return "conflict_resolved"
+
+
+def _revise_commit_message(
+    issue_number: int, has_conflict: bool, threads: Sequence[ReviewThread], base_branch: str
+) -> str:
+    if has_conflict and threads:
+        return f"fix: merge {base_branch} and address review feedback (#{issue_number})"
+    if has_conflict:
+        return f"fix: merge {base_branch} to resolve conflicts (#{issue_number})"
+    return f"fix: address review feedback (#{issue_number})"
 
 
 def _run_fix_agent(plan: FixRunPlan) -> TriageRunStats:
@@ -581,11 +704,16 @@ def _render_fix_start_message(*, issue_number: int, issue_url: str, branch_note:
     return text
 
 
-def _render_revise_start_message(*, issue_number: int, issue_url: str, feedback_count: int) -> str:
-    text = (
-        f"开始按评审反馈更新修复（{feedback_count} 条），"
-        f"GitHub issue [#{issue_number}]({issue_url})"
-    )
+def _render_revise_start_message(
+    *, issue_number: int, issue_url: str, feedback_count: int, base_branch: str = ""
+) -> str:
+    if base_branch and feedback_count:
+        head = f"开始解决与 `{base_branch}` 的冲突并按评审反馈更新修复（{feedback_count} 条）"
+    elif base_branch:
+        head = f"开始合并目标分支 `{base_branch}` 解决冲突"
+    else:
+        head = f"开始按评审反馈更新修复（{feedback_count} 条）"
+    text = f"{head}，GitHub issue [#{issue_number}]({issue_url})"
     runner = triage_runner_name()
     if runner:
         text += f"\n修复执行机：{runner}"

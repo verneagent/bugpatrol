@@ -191,7 +191,16 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
 
     def test_get_open_pull_request_by_head_reads_number_and_url(self) -> None:
         client = GitHubCliIssuesClient()
-        stdout = json.dumps([{"number": 9, "url": "https://github.com/o/r/pull/9"}])
+        stdout = json.dumps(
+            [
+                {
+                    "number": 9,
+                    "url": "https://github.com/o/r/pull/9",
+                    "baseRefName": "feature-demo",
+                    "mergeable": "CONFLICTING",
+                }
+            ]
+        )
 
         with patch("subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess(["gh"], 0, stdout, "")
@@ -200,6 +209,8 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
         self.assertIsNotNone(pr)
         self.assertEqual(pr.number, 9)
         self.assertEqual(pr.url, "https://github.com/o/r/pull/9")
+        self.assertEqual(pr.base_ref, "feature-demo")
+        self.assertEqual(pr.mergeable, "CONFLICTING")
 
     def test_get_open_pull_request_by_head_none_when_absent(self) -> None:
         client = GitHubCliIssuesClient()

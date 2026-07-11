@@ -25,10 +25,18 @@ class GitHubIssueComment:
 
 @dataclass(frozen=True)
 class OpenPullRequest:
-    """Minimal identity of an open PR, enough to revise it from any runner."""
+    """Minimal identity of an open PR, enough to revise it from any runner.
+
+    ``base_ref`` is the target branch (needed to merge it in when resolving a
+    conflict); ``mergeable`` is GitHub's mergeability signal ("MERGEABLE" /
+    "CONFLICTING" / "UNKNOWN"), where "CONFLICTING" means the PR conflicts with
+    its target branch and revise should merge the target in before proceeding.
+    """
 
     number: int
     url: str
+    base_ref: str = ""
+    mergeable: str = ""
 
 
 @dataclass(frozen=True)

@@ -55,6 +55,10 @@ test = "npm test"
 
 [fix.gate]
 max_diff_lines = 800
+# When an open fix PR conflicts with its target branch, revise merges the target
+# in and auto-resolves — but only up to this many conflicted files; beyond it the
+# conflict is escalated to a human instead of auto-resolved.
+max_conflict_files = 5
 
 [issue_field_names]
 Priority = "Priority"

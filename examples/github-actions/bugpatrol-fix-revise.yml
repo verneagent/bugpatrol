@@ -1,20 +1,28 @@
 name: BugPatrol fix revise
 
-# Address review feedback on an open auto-fix PR. Stateless like the fix runner:
-# it rebuilds from origin (the fix branch) + GitHub (the PR's unresolved review
-# threads), edits code, pushes a fast-forward update to the SAME branch, then
-# resolves the threads it addressed. Because everything lives on GitHub, this may
-# run on a different runner than the one that opened the PR.
+# Address review feedback AND target-branch conflicts on an open auto-fix PR.
+# Stateless like the fix runner: it rebuilds from origin (the fix branch) +
+# GitHub (the PR's unresolved review threads + mergeability). When the PR
+# conflicts with its target branch it merges the target in (never force-push)
+# and lets the agent resolve the markers, escalating to a human if too many
+# files conflict. It then edits code, pushes a fast-forward update to the SAME
+# branch, and resolves the threads it addressed. Because everything lives on
+# GitHub, this may run on a different runner than the one that opened the PR.
+#
+# A conflict caused by the target branch advancing does not emit a PR event, so
+# for a conflict with no review feedback, re-run this workflow via
+# workflow_dispatch for the issue (a scheduled sweep can be added later).
 
 on:
-  # Auto-trigger when a reviewer submits feedback on a bugpatrol fix PR.
+  # Auto-trigger when a reviewer submits feedback on a bugpatrol fix PR (also
+  # resolves any target-branch conflict in the same run).
   pull_request_review:
     types: [submitted]
-  # Manual re-run for a specific issue.
+  # Manual re-run for a specific issue (feedback and/or conflict resolution).
   workflow_dispatch:
     inputs:
       issue_number:
-        description: Issue number whose open fix PR should address review feedback
+        description: Issue number whose open fix PR should address feedback / conflicts
         required: true
 
 # Share the fix concurrency group so a fix and a revise for the SAME issue never

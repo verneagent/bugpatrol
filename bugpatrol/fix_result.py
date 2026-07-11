@@ -253,17 +253,58 @@ def render_review_feedback_markdown(threads: tuple[ReviewThread, ...]) -> str:
     return "\n".join(lines).rstrip()
 
 
-def render_revise_pr_comment(*, result: FixResult, addressed: int) -> str:
+def render_conflict_instructions_markdown(*, base_branch: str, files: tuple[str, ...]) -> str:
+    """Instruct the revise agent to resolve an in-progress merge's conflicts."""
+    lines = [
+        f"## 与目标分支 `{base_branch}` 的合并冲突（需要先解决）",
+        "",
+        f"这个 PR 与目标分支 `{base_branch}` 冲突。已把 `{base_branch}` 合并进当前分支，"
+        "以下文件带有冲突标记（`<<<<<<<` / `=======` / `>>>>>>>`），"
+        "请在动其它改动之前**先解决这些冲突**：",
+        "",
+    ]
+    lines.extend(f"- `{path}`" for path in files)
+    lines.extend(
+        [
+            "",
+            "解决时保留双方各自的意图：既不要丢掉目标分支的新改动，也不要丢掉本修复的改动；"
+            "改完请**删除所有冲突标记**。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def render_revise_pr_comment(
+    *,
+    result: FixResult,
+    addressed: int,
+    conflicted: bool = False,
+    base_branch: str = "",
+) -> str:
+    if conflicted and addressed == 0:
+        headline = f"已合并目标分支 `{base_branch}` 解决冲突并推送更新到本 PR。"
+    elif conflicted:
+        headline = (
+            f"已合并目标分支 `{base_branch}` 解决冲突，并处理 {addressed} 条评审意见，"
+            "推送更新到本 PR。"
+        )
+    else:
+        headline = f"已处理 {addressed} 条评审意见并推送更新到本 PR。"
+    tail = (
+        "请再次 review（BugPatrol 不会自动合并）。"
+        if conflicted and addressed == 0
+        else "对应的 review threads 已 resolve；请再次 review（BugPatrol 不会自动合并）。"
+    )
     return "\n".join(
         [
             "## BugPatrol 已按评审反馈更新",
             "",
-            f"已处理 {addressed} 条评审意见并推送更新到本 PR。",
+            headline,
             "",
             f"改动：{result.summary.strip()}",
             f"测试：{'已添加/调整' if result.tests_added else '未新增'}",
             "",
-            "对应的 review threads 已 resolve；请再次 review（BugPatrol 不会自动合并）。",
+            tail,
         ]
     )
 
@@ -277,15 +318,20 @@ def render_revise_lark_message(
     addressed: int,
     reviewer_open_id: str = "",
     run_stats: TriageRunStats | None = None,
+    conflicted: bool = False,
+    base_branch: str = "",
 ) -> str:
     reviewer = f'<at user_id="{reviewer_open_id}"></at> ' if reviewer_open_id else ""
-    lines = [
-        f"{reviewer}已按评审反馈更新修复 PR，GitHub issue [#{issue_number}]({issue_url})",
-        f"PR：{pr_url}",
-        f"处理反馈：{addressed} 条",
-        f"改动：{result.summary.strip()}",
-        "请再次 review（不会自动合并）。",
-    ]
+    if conflicted and addressed == 0:
+        head = f"{reviewer}已合并目标分支 `{base_branch}` 解决冲突，GitHub issue [#{issue_number}]({issue_url})"
+    elif conflicted:
+        head = f"{reviewer}已解决与 `{base_branch}` 的冲突并按评审反馈更新修复 PR，GitHub issue [#{issue_number}]({issue_url})"
+    else:
+        head = f"{reviewer}已按评审反馈更新修复 PR，GitHub issue [#{issue_number}]({issue_url})"
+    lines = [head, f"PR：{pr_url}"]
+    if addressed:
+        lines.append(f"处理反馈：{addressed} 条")
+    lines.extend([f"改动：{result.summary.strip()}", "请再次 review（不会自动合并）。"])
     runner = triage_runner_name()
     if runner:
         lines.append(f"修复执行机：{runner}")
@@ -307,6 +353,8 @@ def notify_fix_revise(
     lark: LarkMessengerClient | None,
     reviewer_open_id: str = "",
     run_stats: TriageRunStats | None = None,
+    conflicted: bool = False,
+    base_branch: str = "",
 ) -> None:
     """Notify that revise updated the PR (Lark-first, then PR comment).
 
@@ -327,12 +375,91 @@ def notify_fix_revise(
                 addressed=addressed,
                 reviewer_open_id=reviewer_open_id,
                 run_stats=run_stats,
+                conflicted=conflicted,
+                base_branch=base_branch,
             ),
         )
     github.add_pull_request_comment(
         repo=repo,
         pr=pr_url,
-        body=render_revise_pr_comment(result=result, addressed=addressed),
+        body=render_revise_pr_comment(
+            result=result, addressed=addressed, conflicted=conflicted, base_branch=base_branch
+        ),
+    )
+
+
+def render_conflict_escalation_pr_comment(*, base_branch: str, files: tuple[str, ...]) -> str:
+    lines = [
+        "## BugPatrol 冲突过于复杂，需人工解决",
+        "",
+        f"这个 PR 与目标分支 `{base_branch}` 冲突，冲突文件较多，自动解决不安全，已放弃：",
+        "",
+    ]
+    lines.extend(f"- `{path}`" for path in files)
+    lines.append("")
+    lines.append("请人工 rebase / 解决冲突后再合并（BugPatrol 不会自动合并）。")
+    return "\n".join(lines)
+
+
+def render_conflict_escalation_lark_message(
+    *,
+    issue_number: int,
+    issue_url: str,
+    pr_url: str,
+    base_branch: str,
+    files: tuple[str, ...],
+    reviewer_open_id: str = "",
+) -> str:
+    reviewer = f'<at user_id="{reviewer_open_id}"></at> ' if reviewer_open_id else ""
+    lines = [
+        f"{reviewer}修复 PR 与目标分支 `{base_branch}` 冲突且过于复杂，"
+        f"自动解决不安全，需人工处理，GitHub issue [#{issue_number}]({issue_url})",
+        f"PR：{pr_url}",
+        f"冲突文件：{len(files)} 个",
+        "请人工 rebase / 解决冲突后再合并（不会自动合并）。",
+    ]
+    runner = triage_runner_name()
+    if runner:
+        lines.append(f"修复执行机：{runner}")
+    return "\n".join(lines)
+
+
+def notify_conflict_escalation(
+    *,
+    repo: str,
+    issue_number: int,
+    issue_url: str,
+    pr_url: str,
+    base_branch: str,
+    files: tuple[str, ...],
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient | None,
+    reviewer_open_id: str = "",
+) -> None:
+    """Escalate an un-auto-resolvable conflict to a human (Lark-first, then PR).
+
+    Same Lark-first ordering as the other fix notifications so a Lark failure
+    never silently drops the escalation before the durable PR comment lands.
+    """
+    if lark is not None:
+        send_intake_topic_message(
+            repo=repo,
+            issue_number=issue_number,
+            github=github,
+            lark=lark,
+            text=render_conflict_escalation_lark_message(
+                issue_number=issue_number,
+                issue_url=issue_url,
+                pr_url=pr_url,
+                base_branch=base_branch,
+                files=files,
+                reviewer_open_id=reviewer_open_id,
+            ),
+        )
+    github.add_pull_request_comment(
+        repo=repo,
+        pr=pr_url,
+        body=render_conflict_escalation_pr_comment(base_branch=base_branch, files=files),
     )
 
 

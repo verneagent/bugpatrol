@@ -192,6 +192,11 @@ class FixConfig:
     max_diff_lines: int = 800
     protected_globs: tuple[str, ...] = DEFAULT_FIX_PROTECTED_GLOBS
     allowed_verdicts: tuple[str, ...] = ("代码 Bug",)
+    # When an open fix PR conflicts with its target branch, revise merges the
+    # target in and lets the agent resolve the markers — but only up to this
+    # many conflicted files. Beyond it the merge is aborted and the conflict is
+    # escalated to a human (auto-resolving a sprawling conflict is unsafe).
+    max_conflict_files: int = 5
     branch_prefix: str = "bugpatrol/fix-issue-"
     # 0 = unlimited; otherwise a device-level counting semaphore caps how many
     # heavy fix builds run at once across all runners sharing one machine.
@@ -437,6 +442,10 @@ def _parse_fix(data: dict[str, Any]) -> FixConfig | None:
     max_diff_lines = int(gate.get("max_diff_lines") or 800)
     if max_diff_lines <= 0:
         raise ValueError("fix.gate.max_diff_lines must be positive")
+    max_conflict_files_raw = gate.get("max_conflict_files")
+    max_conflict_files = 5 if max_conflict_files_raw is None else int(max_conflict_files_raw)
+    if max_conflict_files <= 0:
+        raise ValueError("fix.gate.max_conflict_files must be positive")
     protected_globs = gate.get("protected_globs")
     if protected_globs is None:
         protected = DEFAULT_FIX_PROTECTED_GLOBS
@@ -479,6 +488,7 @@ def _parse_fix(data: dict[str, Any]) -> FixConfig | None:
         max_diff_lines=max_diff_lines,
         protected_globs=protected,
         allowed_verdicts=verdicts,
+        max_conflict_files=max_conflict_files,
         branch_prefix=branch_prefix,
         max_concurrent_per_device=max_concurrent,
         agent=agent,
