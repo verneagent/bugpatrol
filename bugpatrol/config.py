@@ -373,25 +373,25 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
         ),
         media=MediaConfig(
             description_command=tuple(_optional_str_list(media, "description_command")),
-            description_timeout_seconds=int(media.get("description_timeout_seconds") or 300),
+            description_timeout_seconds=_num(media, "description_timeout_seconds", 300),
             description_temp_dir=str(media.get("description_temp_dir") or ""),
             redaction_command=tuple(_optional_str_list(media, "redaction_command")),
-            redaction_timeout_seconds=int(media.get("redaction_timeout_seconds") or 300),
-            resize_max_image_width=int(media.get("resize_max_image_width") or 0),
-            resize_max_image_height=int(media.get("resize_max_image_height") or 0),
-            resize_image_quality=int(media.get("resize_image_quality") or 85),
+            redaction_timeout_seconds=_num(media, "redaction_timeout_seconds", 300),
+            resize_max_image_width=_num(media, "resize_max_image_width", 0),
+            resize_max_image_height=_num(media, "resize_max_image_height", 0),
+            resize_image_quality=_num(media, "resize_image_quality", 85),
             convert_images_to_jpeg=bool(media.get("convert_images_to_jpeg") or False),
-            max_image_bytes=int(media.get("max_image_bytes") or 0),
-            max_video_bytes=int(media.get("max_video_bytes") or 0),
-            max_file_bytes=int(media.get("max_file_bytes") or 0),
-            max_video_duration_seconds=float(media.get("max_video_duration_seconds") or 0.0),
+            max_image_bytes=_num(media, "max_image_bytes", 0),
+            max_video_bytes=_num(media, "max_video_bytes", 0),
+            max_file_bytes=_num(media, "max_file_bytes", 0),
+            max_video_duration_seconds=_num(media, "max_video_duration_seconds", 0.0, cast=float),
             video_probe_command=tuple(_optional_str_list(media, "video_probe_command")),
-            video_probe_timeout_seconds=int(media.get("video_probe_timeout_seconds") or 30),
+            video_probe_timeout_seconds=_num(media, "video_probe_timeout_seconds", 30),
             video_frame_command=tuple(_optional_str_list(media, "video_frame_command")),
-            video_frame_timeout_seconds=int(media.get("video_frame_timeout_seconds") or 300),
-            video_frame_min_duration_seconds=float(media.get("video_frame_min_duration_seconds") or 0.0),
-            description_retries=int(media.get("description_retries") or 0),
-            description_retry_backoff_seconds=float(media.get("description_retry_backoff_seconds") or 1.0),
+            video_frame_timeout_seconds=_num(media, "video_frame_timeout_seconds", 300),
+            video_frame_min_duration_seconds=_num(media, "video_frame_min_duration_seconds", 0.0, cast=float),
+            description_retries=_num(media, "description_retries", 0),
+            description_retry_backoff_seconds=_num(media, "description_retry_backoff_seconds", 1.0, cast=float),
         ),
         owners=OwnersConfig(
             default=tuple(_optional_str_list(owners, "default")),
@@ -439,11 +439,10 @@ def _parse_fix(data: dict[str, Any]) -> FixConfig | None:
     gate = fix.get("gate") or {}
     if not isinstance(gate, dict):
         raise ValueError("[fix.gate] must be a table")
-    max_diff_lines = int(gate.get("max_diff_lines") or 800)
+    max_diff_lines = _num(gate, "max_diff_lines", 800)
     if max_diff_lines <= 0:
         raise ValueError("fix.gate.max_diff_lines must be positive")
-    max_conflict_files_raw = gate.get("max_conflict_files")
-    max_conflict_files = 5 if max_conflict_files_raw is None else int(max_conflict_files_raw)
+    max_conflict_files = _num(gate, "max_conflict_files", 5)
     if max_conflict_files <= 0:
         raise ValueError("fix.gate.max_conflict_files must be positive")
     protected_globs = gate.get("protected_globs")
@@ -467,7 +466,7 @@ def _parse_fix(data: dict[str, Any]) -> FixConfig | None:
     runner = fix.get("runner") or {}
     if not isinstance(runner, dict):
         raise ValueError("[fix.runner] must be a table")
-    max_concurrent = int(runner.get("max_concurrent_per_device") or 0)
+    max_concurrent = _num(runner, "max_concurrent_per_device", 0)
     if max_concurrent < 0:
         raise ValueError("fix.runner.max_concurrent_per_device must be >= 0")
     branch_prefix = str(fix.get("branch_prefix") or "bugpatrol/fix-issue-")
@@ -515,6 +514,18 @@ def _required_str(data: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"missing string field {key!r}")
     return value
+
+
+def _num(table: dict[str, Any], key: str, default: float, *, cast: Any = int) -> Any:
+    """Default a numeric config field ONLY when the key is missing.
+
+    Never use ``table.get(key) or default``: ``or`` also fires on a legitimately
+    configured ``0`` / ``0.0``, silently replacing it with the default (and
+    skipping any downstream ``<= 0`` validation). Default on ``None`` alone so a
+    configured zero is honored or rejected, never silently coerced.
+    """
+    raw = table.get(key)
+    return default if raw is None else cast(raw)
 
 
 def _required_list(data: dict[str, Any], key: str) -> list[str]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -137,6 +138,29 @@ class ConfigTest(unittest.TestCase):
         data["fix"] = {"verify": {"test": "make test"}, "gate": {"max_conflict_files": 0}}
         with self.assertRaisesRegex(ValueError, r"max_conflict_files must be positive"):
             parse_project_config(data)
+
+    def test_fix_gate_rejects_non_positive_max_diff_lines(self) -> None:
+        # Regression: `int(gate.get("max_diff_lines") or 800)` silently coerced a
+        # configured 0 to the default 800, so the `<= 0` guard was dead code.
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["fix"] = {"verify": {"test": "make test"}, "gate": {"max_diff_lines": 0}}
+        with self.assertRaisesRegex(ValueError, r"max_diff_lines must be positive"):
+            parse_project_config(data)
+
+    def test_config_has_no_numeric_or_default_footgun(self) -> None:
+        # `int(x.get(k) or D)` / `float(...)` fire on a legitimately configured 0
+        # or 0.0, silently replacing it with D and skipping any `<= 0` validation.
+        # Numeric defaults must go through `_num` (defaults on None only). Guard
+        # against reintroduction since CI runs unittest, not a semantic linter.
+        source = Path("bugpatrol/config.py").read_text()
+        pattern = re.compile(r"\b(?:int|float)\([^\n]*\.get\([^\n]*\)\s+or\s")
+        offenders = [
+            line
+            for line in source.splitlines()
+            if pattern.search(line) and "def _num(" not in line
+        ]
+        self.assertEqual(offenders, [], f"use _num() instead of `or`: {offenders}")
 
     def test_lark_platform_defaults_to_international(self) -> None:
         config = load_project_config(Path("projects/example.toml"))
