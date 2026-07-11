@@ -7,13 +7,12 @@ Project-neutral implementation items.
 - Reconcile, cross-repo triage references, and operations tracks: **done**,
   deployed to fived and verified live (reconcile dry-run run 29112422738;
   cross-repo triage #3946 run 29112882288).
-- Runner checkout & credential hardening: **done** and rolled out to the two
-  company runners (`macstudio-bugpatrol`, `minici16g-bugpatrol`) — secrets
-  injected from Actions, per-runner cache clones, on-disk bot key removed from
-  the minis. `minici32g-bugpatrol` (user's home network) is **parked**: its LAN
-  throttles HTTPS git pack transfer entirely, so the cache-clone design can't
-  run there without provisioning SSH read access for weaver + bugpatrol. See
-  that section's note.
+- Runner checkout & credential hardening: **done** and rolled out to all three
+  runners (`macstudio-bugpatrol`, `minici16g-bugpatrol`, `minici32g-bugpatrol`)
+  — secrets injected from Actions, per-runner cache clones, on-disk bot key
+  removed from the minis (kept on relay for the watcher). Verified end-to-end on
+  each. `minici32g` (user's home network) needed a runner `.env` proxy pointing
+  at its own local Surge (`127.0.0.1:6152`); see that section's note.
 
 ## Reconcile (done)
 
@@ -56,7 +55,7 @@ checkout.
   triage_runner/__main__ (nested worktrees + workspace_dirs + context), workflow
   template (ref checkout), plus unit tests.
 
-## Runner checkout & credential hardening (done; 32g parked)
+## Runner checkout & credential hardening (done; all 3 runners)
 
 Goal: keep secrets off the runner disk and stop piggybacking triage on human dev
 checkouts. Applies to the example workflows and the deployed ones alike.
@@ -69,19 +68,19 @@ checkouts. Applies to the example workflows and the deployed ones alike.
 > via `bugpatrol-cache-bootstrap.sh` (tokenless origin + repo-local credential
 > helper) and a per-runner Python>=3.11 venv. Verified end-to-end on
 > `macstudio-bugpatrol` and `minici16g-bugpatrol`: DEEPSEEK/Lark secrets
-> commented out of both runners' `.env`, on-disk key `~/.fived-bot/private-key.pem`
-> renamed to `.decommissioned-2026-07-11` on the minis (kept on relay for the
-> watcher). `.env.bak-2026-07-11` retained on each for rollback.
+> commented out of all three runners' `.env`, on-disk key
+> `~/.fived-bot/private-key.pem` renamed to `.decommissioned-2026-07-11` on the
+> minis (kept on relay for the watcher). `.env.bak-2026-07-11` retained on each
+> for rollback. All three runners online and verified end-to-end.
 >
-> **`minici32g-bugpatrol` parked (needs a decision):** its home LAN throttles
-> HTTPS git *pack* transfer entirely — `git ls-remote` works but any clone
-> (even `--depth 1`) stalls at ~75s ("Recv failure: Operation timed out"). Its
-> `~/clover` checkouts only work via SSH-over-443 with a repo-scoped
-> `~/.ssh/fived_ci_deploy` key, and no single SSH identity on the box can read
-> fived + weaver + bugpatrol. So the HTTPS cache-clone can't run there. Options:
-> (a) provision SSH read deploy keys for weaver + bugpatrol on 32g and add an
-> `insteadOf` HTTPS→SSH rewrite, or (b) leave 32g out of the triage pool. Runner
-> is stopped; the fleet runs on relay + 16g.
+> **`minici32g-bugpatrol` (fixed, was mis-diagnosed as parked):** its home LAN
+> blocks github HTTPS *pack* transfer on a *direct* connection (`git ls-remote`
+> works but clone stalls ~75s), but the box has its own local Surge proxy
+> (`127.0.0.1:6152` HTTP / `6153` SOCKS). The fix was one runner `.env` change —
+> point `http_proxy`/`https_proxy` at that local Surge (NOT the company Mac
+> Studio proxy, which is unreachable from home); deepseek stays direct via
+> `no_proxy`. Clone through the local Surge takes ~1.5s. SSH deploy keys are not
+> needed. All three runners now share one cache-clone design.
 
 - Credentials from the workflow, not the box: inject `DEEPSEEK_API_KEY` and the
   Lark app secret via Actions `secrets` in the step env; the code already reads
