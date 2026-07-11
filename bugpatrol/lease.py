@@ -8,6 +8,7 @@ import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 
 class LeaseHeldError(RuntimeError):
@@ -44,7 +45,18 @@ class FileLease:
         except FileExistsError:
             existing = read_lease_info(self._path)
             if existing is not None and existing.expires_at <= current_time:
-                self._path.unlink(missing_ok=True)
+                # Steal atomically: rename the stale lease to a unique path
+                # instead of unlinking it in place. Only one racer's rename can
+                # succeed (the source vanishes for the others -> FileNotFound),
+                # so concurrent takeovers can't each unlink a peer's freshly
+                # recreated lease. The O_EXCL create on retry then arbitrates
+                # the single winner.
+                steal_path = self._path.with_name(f"{self._path.name}.steal.{uuid4().hex}")
+                try:
+                    os.rename(self._path, steal_path)
+                except FileNotFoundError:
+                    return self.acquire(now=current_time)
+                os.unlink(steal_path)
                 return self.acquire(now=current_time)
             owner = existing.owner if existing is not None else "unknown"
             raise LeaseHeldError(f"watcher lease is held by {owner}")

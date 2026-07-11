@@ -101,6 +101,9 @@ def resolve_triage_branch(
             status="branch",
         )
 
+    # Refresh origin/main before the ancestor check: on a stale runner checkout
+    # a merged-and-deleted branch could otherwise be misclassified as unmerged.
+    driver.fetch_branch("main")
     if branch_tip_sha and driver.is_ancestor(branch_tip_sha, "origin/main"):
         return BranchResolution(
             analyzed_branch="main",
@@ -193,7 +196,16 @@ class SubprocessGitDriver:
 
     def fetch_branch(self, branch: str) -> None:
         # Best-effort: a merged+deleted branch simply won't update any ref.
-        self._git("fetch", "origin", branch, check=False)
+        # Use an explicit refspec so refs/remotes/origin/<branch> is actually
+        # updated. A bare `git fetch origin <branch>` only writes FETCH_HEAD and
+        # leaves origin/<branch> stale, so the worktree add below (checked out at
+        # `origin/<branch>`) would analyze an outdated tip.
+        self._git(
+            "fetch",
+            "origin",
+            f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+            check=False,
+        )
 
     def remote_branch_exists(self, branch: str) -> bool:
         result = self._git("ls-remote", "--heads", "origin", branch, check=False)

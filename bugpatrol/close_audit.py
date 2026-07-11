@@ -62,11 +62,10 @@ def audit_issue_close(
         return CloseAuditSummary(issue_number=issue_number, audited=True, skipped_reason="already nagged")
     if dry_run:
         return CloseAuditSummary(issue_number=issue_number, audited=True)
-    github.add_issue_comment(
-        repo=repo,
-        issue_number=issue_number,
-        body=_render_nag_comment(issue_number=issue_number, assignees=issue.assignees),
-    )
+    # Send Lark first, then write the GitHub nag comment (which doubles as the
+    # _already_nagged idempotency marker) LAST. If the marker went first, a Lark
+    # failure would be permanently suppressed on retry — a silent lost ping,
+    # which is worse than the rare duplicate a marker-last order can cause.
     lark_sent = False
     if lark is not None:
         metadata = parse_intake_metadata(issue.body or "") or {}
@@ -79,6 +78,11 @@ def audit_issue_close(
                 text=_render_nag_lark_text(issue=issue, config=config),
             )
             lark_sent = True
+    github.add_issue_comment(
+        repo=repo,
+        issue_number=issue_number,
+        body=_render_nag_comment(issue_number=issue_number, assignees=issue.assignees),
+    )
     return CloseAuditSummary(issue_number=issue_number, audited=True, nagged=True, lark_sent=lark_sent)
 
 
