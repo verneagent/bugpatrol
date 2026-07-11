@@ -49,6 +49,7 @@ from bugpatrol.triage_context import (
     render_triage_context_markdown,
 )
 from bugpatrol.triage_result import apply_triage_result, build_triage_dry_run_report, parse_triage_result
+from bugpatrol.fix_runner import read_triage_verdict, run_fix
 from bugpatrol.triage_runner import execute_triage_run, prepare_triage_run, resolve_issue_branch
 from bugpatrol.worktree import (
     SubprocessGitDriver,
@@ -328,6 +329,13 @@ def main(argv: list[str] | None = None) -> int:
             "repeatable, e.g. --reference-repo org/weaver=/cache/weaver"
         ),
     )
+
+    run_fix_parser = sub.add_parser("run-fix", help="auto-fix a triaged code bug and open a PR")
+    run_fix_parser.add_argument("project_config", type=Path)
+    run_fix_parser.add_argument("--issue", type=int, required=True)
+    run_fix_parser.add_argument("--repo-path", type=Path, required=True)
+    run_fix_parser.add_argument("--output-dir", type=Path, default=Path(".bugpatrol/fix-run"))
+    run_fix_parser.add_argument("--execute", action="store_true", help="actually run the agent and open a PR")
 
     reconcile_triage_parser = sub.add_parser(
         "reconcile-triage", help="triage intook issues that never got a triage result"
@@ -836,6 +844,44 @@ def main(argv: list[str] | None = None) -> int:
                 ensure_ascii=False,
             )
         )
+        return 0
+
+    if args.command == "run-fix":
+        config = load_project_config(args.project_config)
+        if config.fix is None:
+            print("project config has no [fix] table; auto-fix is not enabled", file=sys.stderr)
+            return 2
+        github = GitHubCliIssuesClient(gh=config.github_cli)
+        issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
+        if not args.execute:
+            # Dry run: report the verdict and gate readiness without touching code.
+            verdict = read_triage_verdict(config=config, issue_number=args.issue, issue_fields=issue_fields)
+            from bugpatrol.fix_gate import evaluate_triage_readiness
+
+            readiness = evaluate_triage_readiness(verdict=verdict, fix=config.fix)
+            print(
+                json.dumps(
+                    {
+                        "execute": False,
+                        "issue": args.issue,
+                        "verdict": verdict,
+                        "fixable": readiness.allowed,
+                        "reason": readiness.reason,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 0
+        status = run_fix(
+            config=config,
+            issue_number=args.issue,
+            base_repo=args.repo_path,
+            output_dir=args.output_dir,
+            github=github,
+            issue_fields=issue_fields,
+            lark=_optional_lark_client(config),
+        )
+        print(json.dumps({"execute": True, "issue": args.issue, "status": status}, ensure_ascii=False))
         return 0
 
     if args.command == "reconcile-triage":

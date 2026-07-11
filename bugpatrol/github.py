@@ -390,6 +390,76 @@ class GitHubCliIssuesClient:
             return ""
         return result.stdout.strip()
 
+    def find_open_pull_request_by_head(self, *, repo: str, head: str) -> str:
+        """URL of an open PR whose head branch is `head`, or "" if none.
+
+        Used for fix idempotency: a fix run must not open a second PR for an
+        issue that already has an open one.
+        """
+        result = self._run(
+            [
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--head",
+                head,
+                "--state",
+                "open",
+                "--json",
+                "url",
+            ]
+        )
+        data = json.loads(result.stdout)
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            return str(data[0].get("url") or "")
+        return ""
+
+    def create_pull_request(
+        self,
+        *,
+        repo: str,
+        head: str,
+        base: str,
+        title: str,
+        body: str,
+    ) -> str:
+        """Open a PR from `head` into `base`; return the PR URL."""
+        result = self._run(
+            [
+                "pr",
+                "create",
+                "--repo",
+                repo,
+                "--head",
+                head,
+                "--base",
+                base,
+                "--title",
+                title,
+                "--body-file",
+                "-",
+            ],
+            stdin=body,
+        )
+        return result.stdout.strip().splitlines()[-1].strip()
+
+    def add_pull_request_reviewer(self, *, repo: str, pr: str, reviewer: str) -> None:
+        """Request a review from `reviewer`; a non-collaborator reviewer or a
+        self-review is not fatal to the fix run, so failures are surfaced by the
+        caller rather than raised here."""
+        self._run(
+            [
+                "pr",
+                "edit",
+                pr,
+                "--repo",
+                repo,
+                "--add-reviewer",
+                reviewer,
+            ]
+        )
+
     def add_assignee(self, *, repo: str, issue_number: int, assignee: str) -> None:
         self._run(
             [

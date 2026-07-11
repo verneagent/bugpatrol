@@ -250,6 +250,15 @@ def _build_claude_command(
             f"Write final JSON to: {output_path}",
         ]
     )
+    return _claude_task_command(prompt, workspace_dirs=workspace_dirs, model=config.triage_agent.model or default_model)
+
+
+def _claude_task_command(
+    prompt: str,
+    *,
+    workspace_dirs: Sequence[Path] = (),
+    model: str = "",
+) -> list[str]:
     # The agent runs with cwd set to the repo checkout (main or a branch
     # worktree), so CODEOWNERS, source, and git history/blame of the right
     # branch are naturally in scope. `--dangerously-skip-permissions` is
@@ -271,7 +280,57 @@ def _build_claude_command(
     ]
     for workspace in workspace_dirs:
         command.extend(["--add-dir", str(workspace)])
-    model = config.triage_agent.model or default_model
     if model:
         command.extend(["--model", model])
     return command
+
+
+def build_fix_agent_invocation(
+    config: ProjectConfig,
+    *,
+    issue_number: int,
+    prompt_path: Path,
+    schema_path: Path,
+    output_path: Path,
+    context_path: Path,
+    workspace_dirs: Sequence[Path] = (),
+) -> AgentInvocation:
+    """Build the agent command for an auto-fix run.
+
+    Unlike triage, the fix agent edits the working tree (cwd = the fix branch
+    worktree) and then writes a JSON summary. Only the claude/deepseek path is
+    supported: fix relies on the Claude CLI's in-place file editing.
+    """
+    provider = config.triage_agent.provider
+    if provider not in ("claude", "deepseek"):
+        raise ValueError(
+            f"fix runner requires a claude or deepseek provider, got: {provider}"
+        )
+    env: dict[str, str] = {}
+    default_model = ""
+    if provider == "deepseek":
+        api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        if not api_key:
+            raise ValueError("deepseek provider requires DEEPSEEK_API_KEY in the environment")
+        env = {
+            "ANTHROPIC_BASE_URL": DEEPSEEK_ANTHROPIC_BASE_URL,
+            "ANTHROPIC_API_KEY": api_key,
+            "ANTHROPIC_AUTH_TOKEN": api_key,
+        }
+        default_model = DEEPSEEK_DEFAULT_MODEL
+    prompt = "\n".join(
+        [
+            f"Use fix prompt file: {prompt_path}",
+            f"Project: {config.project}",
+            f"Repository: {config.github_repo}",
+            f"Issue: #{issue_number}",
+            f"Use fix context file: {context_path}",
+            "Edit the code in the current working directory to fix the bug, "
+            "adding or adjusting tests as needed.",
+            f"Schema file: {schema_path}",
+            f"After editing, write final JSON summary to: {output_path}",
+        ]
+    )
+    model = config.triage_agent.model or default_model
+    command = _claude_task_command(prompt, workspace_dirs=workspace_dirs, model=model)
+    return AgentInvocation(provider=provider, command=command, env=env, model=model)

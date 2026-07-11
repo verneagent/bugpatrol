@@ -1,0 +1,94 @@
+name: BugPatrol fix
+
+# Manual-gate auto-fix: a human dispatches this for a triaged code bug. BugPatrol
+# edits code on a fresh branch worktree, gates the real diff, runs the project's
+# own verify commands, and opens a PR (it never merges). Any gate/verify failure
+# posts a note and opens nothing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: GitHub issue number to auto-fix (must be triaged as a code bug)
+        required: true
+      reason:
+        description: Why this fix was requested
+        required: false
+        default: "manual"
+
+# One fix at a time per issue. Do NOT cancel-in-progress: a half-run that gets
+# cancelled after pushing a branch would leave a dangling branch.
+concurrency:
+  group: bugpatrol-fix-${{ github.repository }}-${{ inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    # Give fix its own runner label so heavy build/test verification does not
+    # queue behind (or starve) triage. On one physical device hosting several
+    # runners, also set [fix.runner] max_concurrent_per_device in the project
+    # config to cap concurrent builds.
+    runs-on: ${{ vars.BUGPATROL_FIX_RUNNER_LABEL || 'self-hosted' }}
+    env:
+      NODE_USE_ENV_PROXY: "1"
+    steps:
+      # Mint a short-lived installation token. The BugPatrol GitHub App needs
+      # contents:write (push the fix branch) and pull_requests:write (open the
+      # PR + request a reviewer) in addition to the triage permissions.
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.BUGPATROL_APP_ID }}
+          private-key: ${{ secrets.BUGPATROL_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Checkout BugPatrol tool
+        uses: actions/checkout@v5
+        with:
+          repository: verneagent/bugpatrol
+          path: .bugpatrol/tool
+
+      # Per-runner cache clone of the app repo (full history, tokenless origin,
+      # repo-local credential helper echoing $GH_TOKEN so the fix-branch push
+      # authenticates without a token on disk).
+      - name: Bootstrap app repo cache
+        id: app-cache
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          repo_path="$(bash "$GITHUB_WORKSPACE/.bugpatrol/tool/examples/github-actions/bugpatrol-cache-bootstrap.sh" "${{ github.repository }}")"
+          echo "repo_path=$repo_path" >> "$GITHUB_OUTPUT"
+
+      # git commit needs an author identity in the cache clone.
+      - name: Configure git identity
+        shell: bash
+        run: |
+          git -C "${{ steps.app-cache.outputs.repo_path }}" config user.name "bugpatrol[bot]"
+          git -C "${{ steps.app-cache.outputs.repo_path }}" config user.email "bugpatrol[bot]@users.noreply.github.com"
+
+      # DEEPSEEK_API_KEY: the fix agent edits code (claude/deepseek provider).
+      # LARK_APP_SECRET: fix progress/PR notifications to the reporting topic.
+      - name: Run fix
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BUGPATROL_PROJECT_CONFIG: ${{ vars.BUGPATROL_PROJECT_CONFIG }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+        run: |
+          PY=""
+          for c in python3.13 python3.12 python3.11 python3; do
+            if command -v "$c" >/dev/null 2>&1 \
+              && "$c" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+              PY="$c"; break
+            fi
+          done
+          [ -n "$PY" ] || { echo "no Python >= 3.11 on this runner" >&2; exit 1; }
+          PYTHONPATH="$GITHUB_WORKSPACE/.bugpatrol/tool" \
+          "$PY" -m bugpatrol run-fix "$BUGPATROL_PROJECT_CONFIG" \
+            --issue "${{ inputs.issue_number }}" \
+            --repo-path "${{ steps.app-cache.outputs.repo_path }}" \
+            --output-dir "$GITHUB_WORKSPACE/.bugpatrol/fix-runs/issue-${{ inputs.issue_number }}" \
+            --execute

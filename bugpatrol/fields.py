@@ -183,6 +183,35 @@ def triage_output_schema(
     return schema
 
 
+FIX_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["summary", "root_cause", "tests_added", "pr_title", "pr_body"],
+    "properties": {
+        "summary": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What was changed, in Chinese, tied to the confirmed root cause.",
+        },
+        "root_cause": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Restatement of the root cause this fix addresses.",
+        },
+        "tests_added": {
+            "type": "boolean",
+            "description": "Whether tests covering the bug were added or adjusted.",
+        },
+        "pr_title": {"type": "string", "minLength": 1},
+        "pr_body": {"type": "string", "minLength": 1},
+    },
+}
+
+
+def fix_output_schema() -> dict[str, Any]:
+    return copy.deepcopy(FIX_OUTPUT_SCHEMA)
+
+
 def validate_field_value(field_name: str, value: str, specs: dict[str, FieldSpec] | None = None) -> None:
     field_specs = specs or default_field_specs()
     spec = field_specs.get(field_name)

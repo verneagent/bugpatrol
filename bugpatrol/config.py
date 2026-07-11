@@ -157,6 +157,50 @@ class FollowupClassifierConfig:
     fix_status_keywords: tuple[str, ...] = ()
 
 
+# Default paths a fix run must never touch. Editing CI/CD, lockfiles, secrets,
+# or DB migrations from an auto-fix is high-blast-radius and must go through a
+# human, so any diff touching these blocks the PR.
+DEFAULT_FIX_PROTECTED_GLOBS: tuple[str, ...] = (
+    ".github/**",
+    "**/*.lock",
+    "**/package-lock.json",
+    "**/pnpm-lock.yaml",
+    "**/yarn.lock",
+    "**/Cargo.lock",
+    "**/poetry.lock",
+    "**/go.sum",
+    "**/*.pem",
+    "**/*.key",
+    "**/.env",
+    "**/.env.*",
+    "**/migrations/**",
+)
+
+
+@dataclass(frozen=True)
+class FixConfig:
+    """Configuration for the auto-fix runner.
+
+    ``verify`` maps a human label (build/typecheck/test/lint or any name) to a
+    shell command the project owns; BugPatrol only runs each and reads the exit
+    code, so the toolchain stays fully decoupled from BugPatrol. The gate keeps
+    fixes small and out of high-blast-radius paths; ``allowed_verdicts`` limits
+    auto-fix to triage conclusions that are actually code fixes.
+    """
+
+    verify: dict[str, str]
+    max_diff_lines: int = 800
+    protected_globs: tuple[str, ...] = DEFAULT_FIX_PROTECTED_GLOBS
+    allowed_verdicts: tuple[str, ...] = ("代码 Bug",)
+    branch_prefix: str = "bugpatrol/fix-issue-"
+    # 0 = unlimited; otherwise a device-level counting semaphore caps how many
+    # heavy fix builds run at once across all runners sharing one machine.
+    max_concurrent_per_device: int = 0
+
+    def branch_for_issue(self, issue_number: int) -> str:
+        return f"{self.branch_prefix}{issue_number}"
+
+
 @dataclass(frozen=True)
 class ProjectConfig:
     github_repo: str
@@ -171,6 +215,7 @@ class ProjectConfig:
     followup_classifier: FollowupClassifierConfig
     issue_field_names: dict[str, str]
     reference_repos: tuple[ReferenceRepo, ...] = ()
+    fix: FixConfig | None = None
 
     @property
     def project(self) -> str:
@@ -334,6 +379,72 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
             if isinstance(value, str)
         },
         reference_repos=_parse_reference_repos(data),
+        fix=_parse_fix(data),
+    )
+
+
+def _parse_fix(data: dict[str, Any]) -> FixConfig | None:
+    """Parse the optional `[fix]` table (auto-fix runner).
+
+    Absent `[fix]` -> None (the project has no fix runner). When present, at
+    least one `[fix.verify]` command must be non-empty: an auto-fix with no
+    verification is not shippable, so a config that would skip every gate is
+    rejected loudly rather than opening unverified PRs.
+    """
+    fix = data.get("fix")
+    if fix is None:
+        return None
+    if not isinstance(fix, dict):
+        raise ValueError("[fix] must be a table")
+    verify_raw = fix.get("verify") or {}
+    if not isinstance(verify_raw, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in verify_raw.items()
+    ):
+        raise ValueError("[fix.verify] must be a table of string commands")
+    verify = {key: value for key, value in verify_raw.items() if value.strip()}
+    if not verify:
+        raise ValueError(
+            "[fix.verify] must define at least one non-empty command; "
+            "an auto-fix with no verification is not shippable"
+        )
+    gate = fix.get("gate") or {}
+    if not isinstance(gate, dict):
+        raise ValueError("[fix.gate] must be a table")
+    max_diff_lines = int(gate.get("max_diff_lines") or 800)
+    if max_diff_lines <= 0:
+        raise ValueError("fix.gate.max_diff_lines must be positive")
+    protected_globs = gate.get("protected_globs")
+    if protected_globs is None:
+        protected = DEFAULT_FIX_PROTECTED_GLOBS
+    else:
+        if not isinstance(protected_globs, list) or not all(
+            isinstance(item, str) for item in protected_globs
+        ):
+            raise ValueError("fix.gate.protected_globs must be a string list")
+        protected = tuple(protected_globs)
+    allowed_verdicts = gate.get("allowed_verdicts")
+    if allowed_verdicts is None:
+        verdicts = ("代码 Bug",)
+    else:
+        if not isinstance(allowed_verdicts, list) or not all(
+            isinstance(item, str) and item for item in allowed_verdicts
+        ):
+            raise ValueError("fix.gate.allowed_verdicts must be a non-empty string list")
+        verdicts = tuple(allowed_verdicts)
+    runner = fix.get("runner") or {}
+    if not isinstance(runner, dict):
+        raise ValueError("[fix.runner] must be a table")
+    max_concurrent = int(runner.get("max_concurrent_per_device") or 0)
+    if max_concurrent < 0:
+        raise ValueError("fix.runner.max_concurrent_per_device must be >= 0")
+    branch_prefix = str(fix.get("branch_prefix") or "bugpatrol/fix-issue-")
+    return FixConfig(
+        verify=verify,
+        max_diff_lines=max_diff_lines,
+        protected_globs=protected,
+        allowed_verdicts=verdicts,
+        branch_prefix=branch_prefix,
+        max_concurrent_per_device=max_concurrent,
     )
 
 

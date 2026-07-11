@@ -258,3 +258,103 @@ def triage_worktree(*, base_repo: Path, ref: str) -> Iterator[Path]:
             capture_output=True,
             text=True,
         )
+
+
+@contextmanager
+def fix_worktree(*, base_repo: Path, ref: str, branch: str) -> Iterator[Path]:
+    """Yield a fresh worktree of `base_repo` on a new `branch` off `ref`.
+
+    Unlike `triage_worktree` (detached, read-only), a fix run needs a real
+    branch to commit and push. The worktree and the local branch are always
+    removed afterwards; a stale local branch from a previous crashed run is
+    force-deleted first so the run is idempotent-safe on one runner.
+    """
+    subprocess.run(
+        ["git", "-C", str(base_repo), "worktree", "prune"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(base_repo), "branch", "-D", branch],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    worktree_path = base_repo / ".bugpatrol-worktrees" / f"fix-{uuid4().hex}"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(base_repo),
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            str(worktree_path),
+            ref,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        yield worktree_path
+    finally:
+        subprocess.run(
+            ["git", "-C", str(base_repo), "worktree", "remove", "--force", str(worktree_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(base_repo), "branch", "-D", branch],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+
+def _git_in(worktree: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(worktree), *args],
+        check=check,
+        capture_output=True,
+        text=True,
+    )
+
+
+def worktree_changed_files(worktree: Path) -> tuple[str, ...]:
+    """Repo-relative paths the agent changed in the worktree (staged or not)."""
+    _git_in(worktree, "add", "-A")
+    result = _git_in(worktree, "diff", "--cached", "--name-only")
+    return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+
+
+def worktree_diff_line_count(worktree: Path) -> int:
+    """Total added+removed lines of the staged diff (the gate's size metric)."""
+    _git_in(worktree, "add", "-A")
+    result = _git_in(worktree, "diff", "--cached", "--numstat")
+    total = 0
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        added, removed = parts[0], parts[1]
+        # Binary files report "-"; count them as 0 lines (their path is still
+        # gated separately, and a binary blob has no meaningful line count).
+        total += (int(added) if added.isdigit() else 0)
+        total += (int(removed) if removed.isdigit() else 0)
+    return total
+
+
+def worktree_commit_all(worktree: Path, *, message: str) -> str:
+    """Stage everything and commit; return the new commit SHA."""
+    _git_in(worktree, "add", "-A")
+    _git_in(worktree, "commit", "-m", message)
+    return _git_in(worktree, "rev-parse", "HEAD").stdout.strip()
+
+
+def worktree_push_branch(worktree: Path, *, branch: str) -> None:
+    """Push the fix branch to origin, setting upstream."""
+    _git_in(worktree, "push", "--set-upstream", "origin", branch)

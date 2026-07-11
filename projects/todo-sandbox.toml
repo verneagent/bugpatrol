@@ -45,6 +45,17 @@ description_command = [
 ]
 description_timeout_seconds = 300
 
+[fix.verify]
+# Project-owned verification commands (BugPatrol only runs each and reads the
+# exit code). Every command must pass before a fix PR is opened. The fix runs in
+# a fresh worktree with no node_modules, so install deps before typecheck/test.
+install = "npm install --no-audit --no-fund"
+typecheck = "npm run typecheck"
+test = "npm test"
+
+[fix.gate]
+max_diff_lines = 800
+
 [issue_field_names]
 Priority = "Priority"
 "Triage status" = "Triage status"

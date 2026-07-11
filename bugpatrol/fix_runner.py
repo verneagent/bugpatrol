@@ -1,0 +1,460 @@
+"""Prepare and execute an auto-fix agent run.
+
+Mirrors triage_runner but for the fix lifecycle: read the confirmed triage
+verdict/root-cause, edit code in an ephemeral branch worktree, gate the *real*
+git diff, run the project's own verify commands, then open a PR (never merge).
+
+Every failure path here is a hard stop that does not open a PR: a bad verdict,
+a protected/oversized diff, or a failing verify command all short-circuit to a
+blocked/verify-failed notification and return without landing anything.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Sequence
+from uuid import uuid4
+
+from bugpatrol.agents import (
+    AgentInvocation,
+    build_fix_agent_invocation,
+    detect_sandbox_denial,
+    parse_claude_token_usage,
+)
+from bugpatrol.clients import GitHubIssue, GitHubIssueComment, LarkMessengerClient
+from bugpatrol.config import ProjectConfig
+from bugpatrol.fields import fix_output_schema
+from bugpatrol.fix_gate import (
+    evaluate_post_edit,
+    evaluate_triage_readiness,
+    run_verify_commands,
+    verify_all_passed,
+)
+from bugpatrol.fix_result import (
+    build_pr_body,
+    fix_result_fingerprint,
+    notify_fix_pr,
+    parse_fix_result,
+    render_blocked_comment,
+    render_fix_blocked_lark_message,
+    render_verify_failed_comment,
+    render_verify_failed_lark_message,
+)
+from bugpatrol.github import GitHubCliIssuesClient
+from bugpatrol.github_fields import GitHubIssueFieldsClient
+from bugpatrol.intake import require_bugpatrol_managed_issue
+from bugpatrol.triage_result import (
+    TriageRunStats,
+    parse_triage_metadata,
+    send_intake_topic_message,
+    triage_runner_name,
+)
+from bugpatrol.triage_runner import resolve_issue_branch
+from bugpatrol.worktree import (
+    fix_worktree,
+    worktree_changed_files,
+    worktree_commit_all,
+    worktree_diff_line_count,
+    worktree_push_branch,
+)
+
+
+@dataclass(frozen=True)
+class FixRunPlan:
+    context_path: Path
+    schema_path: Path
+    output_path: Path
+    invocation: AgentInvocation
+    # The fix branch worktree the agent edits (and where the diff is measured).
+    agent_cwd: Path
+    verdict: str
+    # Branch the PR targets (the branch triage analyzed: main or a feature branch).
+    base_branch: str
+    # New fix branch pushed and used as PR head.
+    head_branch: str
+    reviewer: str
+    reviewer_open_id: str
+    branch_note: str
+
+
+def read_triage_verdict(
+    *,
+    config: ProjectConfig,
+    issue_number: int,
+    issue_fields: GitHubIssueFieldsClient,
+) -> str:
+    """The current Triage verdict field value ("" when unset)."""
+    values = issue_fields.get_issue_field_values(repo=config.github_repo, issue_number=issue_number)
+    github_name = config.issue_field_names.get("Triage verdict", "Triage verdict")
+    return values.get(github_name, "")
+
+
+def latest_triage_analysis(comments: Sequence[GitHubIssueComment]) -> str:
+    """Markdown of the most recent applied triage comment (root cause etc.).
+
+    Fix relies on triage's confirmed analysis; the last comment carrying a
+    BUGPATROL_TRIAGE_META marker is the authoritative verdict comment.
+    """
+    latest = ""
+    for comment in comments:
+        if parse_triage_metadata(comment.body) is not None:
+            latest = comment.body
+    return latest
+
+
+def render_fix_context_markdown(
+    *,
+    issue: GitHubIssue,
+    verdict: str,
+    triage_analysis: str,
+    branch_note: str,
+) -> str:
+    lines = [
+        f"# Fix context — issue #{issue.number}",
+        "",
+        f"标题：{issue.title}",
+        f"链接：{issue.url}",
+        f"分诊结论（Triage verdict）：{verdict}",
+    ]
+    if branch_note:
+        lines.append(f"分支范围：{branch_note}")
+    lines.extend(
+        [
+            "",
+            "## 上游 triage 的确认分析（根因 / 复现 / 涉及位置 / 负责人）",
+            "",
+            triage_analysis.strip() or "（无 triage 分析评论，禁止在此情况下修复）",
+            "",
+            "## 原始 issue 正文",
+            "",
+            (issue.body or "").strip(),
+        ]
+    )
+    return "\n".join(lines)
+
+
+def prepare_fix_run(
+    *,
+    config: ProjectConfig,
+    issue_number: int,
+    worktree_path: Path,
+    output_dir: Path,
+    github: GitHubCliIssuesClient,
+    issue_fields: GitHubIssueFieldsClient,
+    base_branch: str,
+    head_branch: str,
+    branch_note: str = "",
+    prompt_path: Path = Path("prompts/fix.zh.md"),
+) -> FixRunPlan:
+    issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
+    require_bugpatrol_managed_issue(issue)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    # The agent runs with cwd=worktree, so every path handed to it must be
+    # absolute (a relative path would resolve against the checkout and vanish).
+    output_dir = output_dir.resolve()
+    prompt_path = prompt_path.resolve()
+    worktree_path = worktree_path.resolve()
+    verdict = read_triage_verdict(config=config, issue_number=issue_number, issue_fields=issue_fields)
+    comments = github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)
+    triage_analysis = latest_triage_analysis(comments)
+    context_path = output_dir / "fix-context.md"
+    schema_path = output_dir / "fix.schema.json"
+    output_path = output_dir / "fix-output.json"
+    context_path.write_text(
+        render_fix_context_markdown(
+            issue=issue,
+            verdict=verdict,
+            triage_analysis=triage_analysis,
+            branch_note=branch_note,
+        )
+    )
+    schema_path.write_text(json.dumps(fix_output_schema(), ensure_ascii=False, indent=2))
+    invocation = build_fix_agent_invocation(
+        config,
+        issue_number=issue_number,
+        prompt_path=prompt_path,
+        schema_path=schema_path,
+        output_path=output_path,
+        context_path=context_path,
+        # Re-admit the runner-side workspace (prompt + output dir) that sits
+        # outside the branch worktree the agent is cwd'd into.
+        workspace_dirs=(prompt_path.parent, output_dir),
+    )
+    reviewer = issue.assignees[0] if issue.assignees else ""
+    reviewer_open_id = (config.lark.user_open_ids or {}).get(reviewer, "") if reviewer else ""
+    return FixRunPlan(
+        context_path=context_path,
+        schema_path=schema_path,
+        output_path=output_path,
+        invocation=invocation,
+        agent_cwd=worktree_path,
+        verdict=verdict,
+        base_branch=base_branch,
+        head_branch=head_branch,
+        reviewer=reviewer,
+        reviewer_open_id=reviewer_open_id,
+        branch_note=branch_note,
+    )
+
+
+def run_fix(
+    *,
+    config: ProjectConfig,
+    issue_number: int,
+    base_repo: Path,
+    output_dir: Path,
+    github: GitHubCliIssuesClient,
+    issue_fields: GitHubIssueFieldsClient,
+    lark: LarkMessengerClient | None = None,
+    prompt_path: Path = Path("prompts/fix.zh.md"),
+) -> str:
+    """Full auto-fix lifecycle for one issue; returns a terminal status string.
+
+    Statuses: not_fixable, already_open_pr, blocked, verify_failed, no_changes,
+    no_output, opened_pr.
+    """
+    if config.fix is None:
+        raise ValueError("project config has no [fix] table; auto-fix is not enabled")
+    fix = config.fix
+    issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
+    require_bugpatrol_managed_issue(issue)
+
+    verdict = read_triage_verdict(config=config, issue_number=issue_number, issue_fields=issue_fields)
+    readiness = evaluate_triage_readiness(verdict=verdict, fix=fix)
+    if not readiness.allowed:
+        _post_blocked(
+            config=config,
+            issue=issue,
+            reason=readiness.reason,
+            github=github,
+            lark=lark,
+        )
+        return "not_fixable"
+
+    head_branch = fix.branch_for_issue(issue_number)
+    existing_pr = github.find_open_pull_request_by_head(repo=config.github_repo, head=head_branch)
+    if existing_pr:
+        # Idempotency: a prior fix run already opened a PR for this issue.
+        return "already_open_pr"
+
+    resolution = resolve_issue_branch(
+        config=config,
+        issue_number=issue_number,
+        base_repo=base_repo,
+        github=github,
+    )
+    with fix_worktree(base_repo=base_repo, ref=resolution.ref, branch=head_branch) as worktree:
+        plan = prepare_fix_run(
+            config=config,
+            issue_number=issue_number,
+            worktree_path=worktree,
+            output_dir=output_dir,
+            github=github,
+            issue_fields=issue_fields,
+            base_branch=resolution.analyzed_branch,
+            head_branch=head_branch,
+            branch_note=resolution.note,
+            prompt_path=prompt_path,
+        )
+        return execute_fix_run(
+            config=config,
+            issue=issue,
+            plan=plan,
+            github=github,
+            lark=lark,
+        )
+
+
+def execute_fix_run(
+    *,
+    config: ProjectConfig,
+    issue: GitHubIssue,
+    plan: FixRunPlan,
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient | None = None,
+) -> str:
+    fix = config.fix
+    assert fix is not None  # run_fix guards this; kept for callers using execute directly.
+    if lark is not None:
+        send_intake_topic_message(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            github=github,
+            lark=lark,
+            text=_render_fix_start_message(issue_number=issue.number, issue_url=issue.url, branch_note=plan.branch_note),
+        )
+    agent_env = {**os.environ, **plan.invocation.env} if plan.invocation.env else None
+    started = time.monotonic()
+    # stdin must be closed: in CI runners stdin is a pipe that never reaches
+    # EOF, and `claude -p` blocks reading it forever after finishing its work.
+    completed = subprocess.run(
+        plan.invocation.command,
+        check=False,
+        env=agent_env,
+        cwd=str(plan.agent_cwd),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+    )
+    duration_seconds = time.monotonic() - started
+    _write_turn_log(plan.output_path.parent, completed.stdout, completed.stderr)
+    input_tokens, cached_input_tokens, output_tokens = parse_claude_token_usage(completed.stdout or "")
+    run_stats = TriageRunStats(
+        duration_seconds=duration_seconds,
+        input_tokens=input_tokens,
+        cached_input_tokens=cached_input_tokens,
+        output_tokens=output_tokens,
+        model=plan.invocation.model,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"fix agent failed with exit {completed.returncode}")
+    denial = detect_sandbox_denial(completed.stdout or "")
+    if denial:
+        raise RuntimeError(f"fix agent blocked by sandbox/permission denial: {denial}")
+
+    # The gate trusts the real working-tree diff, never the agent's self-report.
+    changed_files = worktree_changed_files(plan.agent_cwd)
+    diff_line_count = worktree_diff_line_count(plan.agent_cwd)
+    gate = evaluate_post_edit(changed_files=changed_files, diff_line_count=diff_line_count, fix=fix)
+    if not gate.allowed:
+        _post_blocked(config=config, issue=issue, reason=gate.reason, github=github, lark=lark)
+        return "no_changes" if not changed_files else "blocked"
+
+    if not plan.output_path.exists():
+        # The agent edited code but never wrote its JSON summary; without it we
+        # can't build a trustworthy PR body, so treat like a blocked run.
+        _post_blocked(
+            config=config,
+            issue=issue,
+            reason="fix agent edited code but wrote no output JSON summary",
+            github=github,
+            lark=lark,
+        )
+        return "no_output"
+    result = parse_fix_result(json.loads(plan.output_path.read_text()))
+
+    verify_outcomes = run_verify_commands(fix=fix, cwd=plan.agent_cwd)
+    if not verify_all_passed(verify_outcomes):
+        _post_verify_failed(
+            config=config,
+            issue=issue,
+            verify_outcomes=verify_outcomes,
+            github=github,
+            lark=lark,
+        )
+        return "verify_failed"
+
+    commit_message = f"fix: {result.pr_title} (#{issue.number})"
+    worktree_commit_all(plan.agent_cwd, message=commit_message)
+    worktree_push_branch(plan.agent_cwd, branch=plan.head_branch)
+    pr_url = github.create_pull_request(
+        repo=config.github_repo,
+        head=plan.head_branch,
+        base=plan.base_branch,
+        title=result.pr_title,
+        body=build_pr_body(
+            result=result,
+            issue_number=issue.number,
+            issue_url=issue.url,
+            changed_files=changed_files,
+            verify_outcomes=verify_outcomes,
+        ),
+    )
+    if plan.reviewer:
+        # A non-collaborator or self-review reviewer must not fail a landed PR;
+        # the PR already exists, so log the miss and move on rather than raise.
+        try:
+            github.add_pull_request_reviewer(repo=config.github_repo, pr=pr_url, reviewer=plan.reviewer)
+        except Exception as error:
+            print(f"bugpatrol: could not request review from {plan.reviewer!r}: {error}", file=sys.stderr)
+    fingerprint = fix_result_fingerprint(issue_number=issue.number, changed_files=changed_files)
+    notify_fix_pr(
+        repo=config.github_repo,
+        issue_number=issue.number,
+        issue_url=issue.url,
+        pr_url=pr_url,
+        result=result,
+        fingerprint=fingerprint,
+        github=github,
+        lark=lark,
+        reviewer_open_id=plan.reviewer_open_id,
+        run_stats=run_stats,
+    )
+    return "opened_pr"
+
+
+def _render_fix_start_message(*, issue_number: int, issue_url: str, branch_note: str = "") -> str:
+    text = f"开始自动修复，GitHub issue [#{issue_number}]({issue_url})"
+    if branch_note:
+        text += f"\n{branch_note}"
+    runner = triage_runner_name()
+    if runner:
+        text += f"\n修复执行机：{runner}"
+    return text
+
+
+def _post_blocked(
+    *,
+    config: ProjectConfig,
+    issue: GitHubIssue,
+    reason: str,
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient | None,
+) -> None:
+    if lark is not None:
+        send_intake_topic_message(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            github=github,
+            lark=lark,
+            text=render_fix_blocked_lark_message(
+                issue_number=issue.number,
+                issue_url=issue.url,
+                reason=reason,
+            ),
+        )
+    github.add_issue_comment(
+        repo=config.github_repo,
+        issue_number=issue.number,
+        body=render_blocked_comment(reason=reason),
+    )
+
+
+def _post_verify_failed(
+    *,
+    config: ProjectConfig,
+    issue: GitHubIssue,
+    verify_outcomes,
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient | None,
+) -> None:
+    if lark is not None:
+        send_intake_topic_message(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            github=github,
+            lark=lark,
+            text=render_verify_failed_lark_message(
+                issue_number=issue.number,
+                issue_url=issue.url,
+                verify_outcomes=verify_outcomes,
+            ),
+        )
+    github.add_issue_comment(
+        repo=config.github_repo,
+        issue_number=issue.number,
+        body=render_verify_failed_comment(verify_outcomes=verify_outcomes),
+    )
+
+
+def _write_turn_log(output_dir: Path, stdout: str | None, stderr: str | None) -> None:
+    if stdout:
+        (output_dir / "agent-turns.jsonl").write_text(stdout)
+    if stderr:
+        (output_dir / "agent-stderr.log").write_text(stderr)
