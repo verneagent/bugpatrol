@@ -47,6 +47,20 @@ repo = "TheCloverLab/weaver"
 path = "~/clover/weaver"
 purpose = "Go backend for the fived frontend (proto routes, comment/chat permissions, quest errors)"
 
+# Auto-fix runner. The fix agent edits code in a `bugpatrol/fix-issue-N`
+# worktree, then this gate runs the project's own verify commands before opening
+# a PR (never merges). Verify is deliberately light: the heavy native/web/api/e2e
+# validation is handled on the PR by bugpatrol-pr-ci.yml (it adds the standing
+# ci-native/ci-web/ci-api/ci-e2e labels). Here we only catch obvious breakage
+# before pushing — a fresh worktree has no node_modules, so install then typecheck.
+[fix.verify]
+install = "npm ci --no-audit --no-fund"
+typecheck = "npm run typecheck:app"
+
+[fix.gate]
+max_diff_lines = 800
+max_conflict_files = 5
+
 [prd]
 root_wiki_node = "LOCAL_PRD_DOCS"
 cache_path = "openspec"
