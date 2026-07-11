@@ -84,10 +84,14 @@ class NeedsInfoLoopE2ETest(unittest.TestCase):
         self.assertEqual(len(github.created), 1)
         self.assertEqual(len(github.created[0].comments), 1)
         self.assertIn("BUGPATROL_TRIAGE_META", github.created[0].comments[0])
-        self.assertEqual(len(lark.replies), 2)
+        self.assertEqual(len(lark.replies), 3)
         self.assertIn("已创建 GitHub issue", lark.replies[0].text)
         self.assertIn("请补充浏览器版本", lark.replies[1].text)
         self.assertEqual(lark.replies[1].message_id, "om_root")
+        # The idempotent re-run doesn't repeat the follow-up; it pings the topic
+        # once so the reporter knows the run completed and didn't hang.
+        self.assertIn("结论无变化", lark.replies[2].text)
+        self.assertEqual(lark.replies[2].message_id, "om_root")
 
 
 if __name__ == "__main__":
