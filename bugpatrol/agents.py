@@ -301,7 +301,7 @@ def build_fix_agent_invocation(
     worktree) and then writes a JSON summary. Only the claude/deepseek path is
     supported: fix relies on the Claude CLI's in-place file editing.
     """
-    provider = config.triage_agent.provider
+    provider = config.fix_agent.provider
     if provider not in ("claude", "deepseek"):
         raise ValueError(
             f"fix runner requires a claude or deepseek provider, got: {provider}"
@@ -331,6 +331,6 @@ def build_fix_agent_invocation(
             f"After editing, write final JSON summary to: {output_path}",
         ]
     )
-    model = config.triage_agent.model or default_model
+    model = config.fix_agent.model or default_model
     command = _claude_task_command(prompt, workspace_dirs=workspace_dirs, model=model)
     return AgentInvocation(provider=provider, command=command, env=env, model=model)

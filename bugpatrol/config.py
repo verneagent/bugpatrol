@@ -196,6 +196,11 @@ class FixConfig:
     # 0 = unlimited; otherwise a device-level counting semaphore caps how many
     # heavy fix builds run at once across all runners sharing one machine.
     max_concurrent_per_device: int = 0
+    # Optional [fix.agent] override. When set it decides the fix agent's
+    # provider/model independently of triage (e.g. triage on deepseek, fix on
+    # claude). When None the fix runner inherits triage_agent. runner_labels are
+    # unused for the fix agent (fix picks its runner via the workflow label var).
+    agent: "TriageAgentConfig | None" = None
 
     def branch_for_issue(self, issue_number: int) -> str:
         return f"{self.branch_prefix}{issue_number}"
@@ -220,6 +225,25 @@ class ProjectConfig:
     @property
     def project(self) -> str:
         return self.github_repo.rsplit("/", 1)[-1]
+
+    @property
+    def fix_agent(self) -> TriageAgentConfig:
+        """Effective agent config for the fix runner.
+
+        A `[fix.agent]` override lets fix use a different provider/model than
+        triage; each unset override field inherits from triage_agent so a
+        partial override (e.g. provider only) still works.
+        """
+        base = self.triage_agent
+        override = self.fix.agent if self.fix else None
+        if override is None:
+            return base
+        return TriageAgentConfig(
+            runner_labels=base.runner_labels,
+            provider=override.provider or base.provider,
+            model=override.model or base.model,
+            effort=override.effort or base.effort,
+        )
 
     def validate_against(self, field_specs: dict[str, FieldSpec]) -> None:
         missing = [name for name in field_specs if name not in self.issue_field_names]
@@ -438,6 +462,18 @@ def _parse_fix(data: dict[str, Any]) -> FixConfig | None:
     if max_concurrent < 0:
         raise ValueError("fix.runner.max_concurrent_per_device must be >= 0")
     branch_prefix = str(fix.get("branch_prefix") or "bugpatrol/fix-issue-")
+    agent_raw = fix.get("agent")
+    if agent_raw is None:
+        agent = None
+    else:
+        if not isinstance(agent_raw, dict):
+            raise ValueError("[fix.agent] must be a table")
+        agent = TriageAgentConfig(
+            runner_labels=(),
+            provider=str(agent_raw.get("provider") or ""),
+            model=str(agent_raw.get("model") or ""),
+            effort=str(agent_raw.get("effort") or ""),
+        )
     return FixConfig(
         verify=verify,
         max_diff_lines=max_diff_lines,
@@ -445,6 +481,7 @@ def _parse_fix(data: dict[str, Any]) -> FixConfig | None:
         allowed_verdicts=verdicts,
         branch_prefix=branch_prefix,
         max_concurrent_per_device=max_concurrent,
+        agent=agent,
     )
 
 

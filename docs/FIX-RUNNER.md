@@ -67,6 +67,25 @@ test = "pnpm test -- <scope>" # optional
 lint = "pnpm lint"            # optional
 ```
 
+### Agent provider — inherits triage, overridable per fix
+
+By default the fix agent reuses `[triage_agent]` (provider + model). Fix only
+supports `claude` or `deepseek` (both run the Claude Code CLI; `deepseek` just
+swaps `ANTHROPIC_BASE_URL` to DeepSeek's Anthropic-compatible endpoint) — not
+`codex`, since fix relies on the CLI's in-place file editing. To run fix on a
+different model than triage (e.g. triage on DeepSeek, fix on Claude), add an
+optional override; unset fields inherit from `[triage_agent]`:
+
+```toml
+[fix.agent]
+provider = "claude"   # or "deepseek"; omit to inherit triage's provider
+model = ""            # omit to inherit triage's model
+```
+
+Because the agent runs `claude -p` with `cwd = the project worktree`, it also
+picks up the project's own agent conventions (root `CLAUDE.md`/`AGENTS.md`,
+project-level skills/tooling) so fixes match project standards.
+
 `execute_fix_run`:
 
 1. `subprocess` `claude -p` with `cwd = worktree`; the agent edits code and

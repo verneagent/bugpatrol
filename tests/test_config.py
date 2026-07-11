@@ -92,6 +92,36 @@ class ConfigTest(unittest.TestCase):
             "issue_field_names": dict(config.issue_field_names),
         }
 
+    def test_fix_agent_inherits_triage_when_no_override(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["triage_agent"] = {"runner_labels": ["ci"], "provider": "deepseek", "model": "dv4"}
+        data["fix"] = {"verify": {"test": "make test"}}
+        parsed = parse_project_config(data)
+
+        self.assertIsNone(parsed.fix.agent)
+        self.assertEqual(parsed.fix_agent.provider, "deepseek")
+        self.assertEqual(parsed.fix_agent.model, "dv4")
+
+    def test_fix_agent_override_selects_provider_independently(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["triage_agent"] = {"runner_labels": ["ci"], "provider": "deepseek", "model": "dv4"}
+        data["fix"] = {"verify": {"test": "make test"}, "agent": {"provider": "claude"}}
+        parsed = parse_project_config(data)
+
+        # provider overridden, model still inherited from triage_agent.
+        self.assertEqual(parsed.fix_agent.provider, "claude")
+        self.assertEqual(parsed.fix_agent.model, "dv4")
+        self.assertEqual(parsed.triage_agent.provider, "deepseek")
+
+    def test_fix_agent_rejects_non_table(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["fix"] = {"verify": {"test": "make test"}, "agent": "claude"}
+        with self.assertRaisesRegex(ValueError, r"\[fix.agent\] must be a table"):
+            parse_project_config(data)
+
     def test_lark_platform_defaults_to_international(self) -> None:
         config = load_project_config(Path("projects/example.toml"))
         parsed = parse_project_config(self._minimal_data(config))
