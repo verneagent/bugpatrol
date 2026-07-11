@@ -46,6 +46,28 @@ helper='!f() { echo "username=x-access-token"; echo "password=$GH_TOKEN"; }; f'
 # Bounded fetch/clone retry — never loop unbounded on a flaky network.
 max_attempts=3
 
+# On terminal git failure, print an actionable network diagnostic. A restricted
+# network (e.g. a home ISP) can silently drop github's HTTPS *pack* transfer
+# while still answering metadata GETs — so `git ls-remote` succeeds but any
+# clone/fetch times out. That looks like a dead machine but is usually just a
+# missing proxy in the runner env, not an unfixable box. Say so out loud.
+git_failure_hint() {
+  {
+    echo "----"
+    echo "BugPatrol cache bootstrap: git HTTPS to github.com/$repo failed."
+    echo "http_proxy=${http_proxy:-<unset>} https_proxy=${https_proxy:-<unset>}"
+    if [[ -z "${http_proxy:-}${https_proxy:-}${HTTPS_PROXY:-}" ]]; then
+      echo "No proxy is set. If this runner is on a restricted/home network that"
+      echo "blocks github HTTPS pack transfer (git ls-remote works but clone times"
+      echo "out), point the runner .env at a working proxy, e.g. a local Surge:"
+      echo "  http_proxy=http://127.0.0.1:6152"
+      echo "  https_proxy=http://127.0.0.1:6152"
+      echo "then restart the runner. Do NOT assume the machine is unusable."
+    fi
+    echo "----"
+  } >&2
+}
+
 run_git_with_retry() {
   local attempt=1
   while true; do
@@ -54,6 +76,7 @@ run_git_with_retry() {
     fi
     if (( attempt >= max_attempts )); then
       echo "git $* failed after $attempt attempts" >&2
+      git_failure_hint
       return 1
     fi
     echo "git $* failed (attempt $attempt/$max_attempts); retrying" >&2
