@@ -1,8 +1,17 @@
 # bugpatrol TODO
 
-Project-neutral implementation items:
+Project-neutral implementation items.
 
-## Reconcile
+## Status (2026-07-11)
+
+- Reconcile, cross-repo triage references, and operations tracks: **done**,
+  deployed to fived and verified live (reconcile dry-run run 29112422738;
+  cross-repo triage #3946 run 29112882288).
+- Runner checkout & credential hardening: code/template side **done**; the
+  fived production rip-replace (secret migration + deleting the on-disk bot
+  key) is **deferred to a maintenance window** — see that section's note.
+
+## Reconcile (done)
 
 - Extend fix notification reconcile beyond JSON input.
   - Collect recent merged PRs, linked commits, closed issues, and issue timeline
@@ -15,7 +24,7 @@ Project-neutral implementation items:
   - Manual trigger.
   - Separate triage and notify reconcile jobs or clearly separated steps.
 
-## Cross-repo triage references
+## Cross-repo triage references (done)
 
 Goal: an app repo's bug sometimes lives in a sibling repo (e.g. fived's frontend
 calls weaver's backend). Let triage read declared reference repos read-only,
@@ -43,10 +52,17 @@ checkout.
   triage_runner/__main__ (nested worktrees + workspace_dirs + context), workflow
   template (ref checkout), plus unit tests.
 
-## Runner checkout & credential hardening
+## Runner checkout & credential hardening (code done; fived rollout DEFERRED)
 
 Goal: keep secrets off the runner disk and stop piggybacking triage on human dev
 checkouts. Applies to the example workflows and the deployed ones alike.
+
+> **Deferred (2026-07-11):** the code/template side is done. The fived
+> production rip-replace is a high-risk maintenance-window task and is NOT yet
+> done. Note: fived already has SOBIT App-token secrets (used by
+> `notify-fix.yml` via `actions/create-github-app-token@v3`), so the triage.yml
+> migration off `gh-bot-token.sh` + on-disk key `~/.fived-bot/private-key.pem`
+> is feasible but must be done under a maintenance window across all 3 runners.
 
 - Credentials from the workflow, not the box: inject `DEEPSEEK_API_KEY` and the
   Lark app secret via Actions `secrets` in the step env; the code already reads
@@ -82,7 +98,7 @@ checkouts. Applies to the example workflows and the deployed ones alike.
 Project-specific rollout (secret creation, runner `.env` edits, deleting on-disk
 keys) is tracked outside this repo.
 
-## Operations
+## Operations (done)
 
 - Document outage recovery procedures in `docs/OPERATIONS.md` (replay is already
   covered by the Replay Triage / Rollback sections).
