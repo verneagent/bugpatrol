@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from bugpatrol.config import load_project_config, parse_project_config
 from bugpatrol.fields import default_field_specs
@@ -311,6 +313,27 @@ class ConfigTest(unittest.TestCase):
         config = load_project_config(Path("projects/example.toml"))
 
         self.assertEqual(config.github_cli, "gh")
+
+    def test_github_cli_env_override_beats_config(self) -> None:
+        with mock.patch.dict(os.environ, {"BUGPATROL_GITHUB_CLI": "gh"}):
+            parsed = parse_project_config(
+                {
+                    "github_repo": "owner/repo",
+                    "github_cli": "~/clover/fived/scripts/gh-as-bot.sh",
+                    "lark": {
+                        "chat_id": "oc_x",
+                        "app_id": "cli_x",
+                        "app_secret_env": "SECRET_ENV",
+                        "bot_open_id": "ou_x",
+                    },
+                    "triage_agent": {"runner_labels": ["self-hosted"]},
+                    "prd": {"root_wiki_node": "NODE"},
+                    "intake": {"language": "zh-CN"},
+                    "issue_field_names": {},
+                }
+            )
+
+        self.assertEqual(parsed.github_cli, "gh")
 
     def test_intake_defaults_have_no_since_cutoff(self) -> None:
         config = load_project_config(Path("projects/example.toml"))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any
 
@@ -255,7 +256,16 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
     return ProjectConfig(
         github_repo=_required_str(data, "github_repo"),
         # expanduser so one config works across machines with different homes.
-        github_cli=str(Path(str(data.get("github_cli") or "gh")).expanduser()),
+        # BUGPATROL_GITHUB_CLI overrides the config value at runtime so one
+        # shared config serves two runtimes: the watcher keeps the config's
+        # self-refreshing bot wrapper (mints from an on-disk key), while a
+        # triage runner sets BUGPATROL_GITHUB_CLI=gh and passes a workflow-minted
+        # GH_TOKEN, keeping no credential on the box.
+        github_cli=str(
+            Path(
+                os.environ.get("BUGPATROL_GITHUB_CLI") or str(data.get("github_cli") or "gh")
+            ).expanduser()
+        ),
         lark=LarkConfig(
             chat_id=_required_str(lark, "chat_id"),
             app_id=_required_str(lark, "app_id"),
