@@ -48,14 +48,16 @@ path = "~/clover/weaver"
 purpose = "Go backend for the fived frontend (proto routes, comment/chat permissions, quest errors)"
 
 # Auto-fix runner. The fix agent edits code in a `bugpatrol/fix-issue-N`
-# worktree, then this gate runs the project's own verify commands before opening
-# a PR (never merges). Verify is deliberately light: the heavy native/web/api/e2e
-# validation is handled on the PR by bugpatrol-pr-ci.yml (it adds the standing
-# ci-native/ci-web/ci-api/ci-e2e labels). Here we only catch obvious breakage
-# before pushing — a fresh worktree has no node_modules, so install then typecheck.
+# worktree, then this gate runs fived's OWN pre-PR check before opening a PR
+# (never merges) — same philosophy as revise/[fix.verify]: we only read the
+# project's own gate, not reimplement it. `scripts/preflight.sh lint` is fived's
+# canonical pre-push gate in its lightest mode (type check + lint); the heavy
+# build/unit/surface + native/web/api/e2e all run on the PR via bugpatrol-pr-ci.yml.
+# A fresh worktree has no node_modules and preflight requires it, so `npm ci`
+# first (unavoidable — preflight itself refuses to run without node_modules).
 [fix.verify]
 install = "npm ci --no-audit --no-fund"
-typecheck = "npm run typecheck:app"
+preflight = "./scripts/preflight.sh lint"
 
 [fix.gate]
 max_diff_lines = 800
