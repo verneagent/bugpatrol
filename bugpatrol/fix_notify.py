@@ -107,6 +107,7 @@ def apply_fix_notification(
     pr: str = "",
     commit: str = "",
     dry_run: bool = True,
+    resend: bool = False,
 ) -> FixNotificationSummary:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
     comments = github.list_issue_comments(repo=repo, issue_number=issue_number)
@@ -118,7 +119,9 @@ def apply_fix_notification(
         pr=pr,
         commit=commit,
     )
-    if dry_run or notification.duplicate:
+    # `resend` re-delivers an already-notified event in the current message
+    # format (e.g. after a rendering fix), without minting a second marker.
+    if dry_run or (notification.duplicate and not resend):
         return FixNotificationSummary(
             key=notification.key,
             event=event,
@@ -148,27 +151,31 @@ def apply_fix_notification(
             file=sys.stderr,
         )
         lark_sent = False
-    github.add_issue_comment(
-        repo=repo,
-        issue_number=issue_number,
-        body=render_fix_metadata_comment(
-            {
-                "version": 1,
-                "issue": issue_number,
-                "key": notification.key,
-                "event": event,
-                "pr": pr,
-                "commit": commit,
-            }
-        ),
-    )
+    # A resend of an already-marked event keeps the existing marker; only a
+    # first-time notification writes one.
+    metadata_written = not notification.duplicate
+    if metadata_written:
+        github.add_issue_comment(
+            repo=repo,
+            issue_number=issue_number,
+            body=render_fix_metadata_comment(
+                {
+                    "version": 1,
+                    "issue": issue_number,
+                    "key": notification.key,
+                    "event": event,
+                    "pr": pr,
+                    "commit": commit,
+                }
+            ),
+        )
     return FixNotificationSummary(
         key=notification.key,
         event=event,
         dry_run=False,
         duplicate_skipped=False,
         lark_sent=lark_sent,
-        metadata_written=True,
+        metadata_written=metadata_written,
     )
 
 
@@ -291,6 +298,7 @@ def reconcile_fix_notifications(
     github: GitHubCliIssuesClient,
     lark: LarkMessengerClient | None = None,
     dry_run: bool = True,
+    resend: bool = False,
 ) -> FixReconcileResult:
     summaries: list[FixNotificationSummary] = []
     errors: list[str] = []
@@ -320,6 +328,7 @@ def reconcile_fix_notifications(
                 github=github,
                 lark=lark,
                 dry_run=dry_run,
+                resend=resend,
             )
         except (ValueError, LarkOpenApiError) as error:
             # Isolate a bad candidate (unresolvable issue, transient Lark/API
