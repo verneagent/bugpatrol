@@ -82,7 +82,7 @@ branch = "main"
 
 [media]
 description_command = [
-  "python3",
+  "{python}",
   "-m",
   "bugpatrol.media_vision",
   "{path}",

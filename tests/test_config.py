@@ -37,7 +37,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.assets.base_path, ".github/issue-assets")
         self.assertEqual(config.assets.branch, "main")
         self.assertEqual(config.assets.remote_url, "https://github.com/example-org/example-assets.git")
-        self.assertEqual(config.media.description_command[:3], ("python3", "-m", "bugpatrol.media_vision"))
+        self.assertEqual(config.media.description_command[:3], ("{python}", "-m", "bugpatrol.media_vision"))
         self.assertEqual(config.media.description_retries, 2)
         self.assertEqual(config.media.description_retry_backoff_seconds, 1.0)
         self.assertEqual(config.media.redaction_command, ())
@@ -68,7 +68,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.assets.github_repo, "TheCloverLab/bugpatrol-todo-sandbox-assets")
         self.assertEqual(config.assets.checkout_path, "~/clover/bugpatrol-todo-sandbox-assets")
         self.assertEqual(config.assets.remote_url, "https://github.com/TheCloverLab/bugpatrol-todo-sandbox-assets.git")
-        self.assertEqual(config.media.description_command[:3], ("python3", "-m", "bugpatrol.media_vision"))
+        self.assertEqual(config.media.description_command[:3], ("{python}", "-m", "bugpatrol.media_vision"))
 
     def test_minimal_and_full_examples_validate(self) -> None:
         for path in (Path("projects/minimal.example.toml"), Path("projects/full.example.toml")):
@@ -161,6 +161,24 @@ class ConfigTest(unittest.TestCase):
             if pattern.search(line) and "def _num(" not in line
         ]
         self.assertEqual(offenders, [], f"use _num() instead of `or`: {offenders}")
+
+    def test_media_description_command_uses_python_placeholder(self) -> None:
+        # A bare `python3` in description_command resolves via PATH — on the relay
+        # watcher that's /usr/bin/python3 (3.9), which can't import bugpatrol and
+        # dies in runpy._get_module_details. The vision helper is a bugpatrol
+        # submodule, so it must run under `{python}` (== the interpreter running
+        # bugpatrol, sys.executable). Guard every shipped project config.
+        for toml_path in sorted(Path("projects").glob("*.toml")):
+            config = load_project_config(toml_path)
+            command = config.media.description_command
+            if not command:
+                continue
+            self.assertNotIn(
+                command[0],
+                ("python", "python3"),
+                f"{toml_path}: description_command must start with '{{python}}', "
+                f"not a bare '{command[0]}' (PATH may resolve a python without bugpatrol)",
+            )
 
     def test_lark_platform_defaults_to_international(self) -> None:
         config = load_project_config(Path("projects/example.toml"))

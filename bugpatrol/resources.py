@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -653,6 +654,7 @@ def _format_command_part(
     resource: DownloadedLarkResource,
 ) -> str:
     formatted = part.format(
+        python=sys.executable,
         path=str(path),
         output_path=str(output_path or ""),
         kind=ref.kind,

@@ -46,7 +46,7 @@ remote_url = "https://github.com/example-org/example-assets.git"
 
 [media]
 description_command = [
-  "python3",
+  "{python}",
   "-m",
   "bugpatrol.media_vision",
   "{path}",

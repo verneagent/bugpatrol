@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from io import BytesIO
@@ -225,6 +226,42 @@ class ResourcesTest(unittest.TestCase):
             )
 
         self.assertEqual(materialized.attachments[0].description, "visual: image-bytes")
+
+    def test_command_python_placeholder_runs_current_interpreter(self) -> None:
+        # `{python}` must expand to the interpreter running bugpatrol (sys.executable),
+        # not a bare `python3` that PATH may resolve to some other python lacking the
+        # bugpatrol package (e.g. macOS /usr/bin/python3 == 3.9, which cannot import
+        # `bugpatrol.media_vision` and dies in runpy._get_module_details).
+        record = IntakeRecord(
+            reporter_name="Reporter",
+            reporter_open_id="ou_1",
+            created_at="2026-07-01T00:00:00Z",
+            chat_id="oc_1",
+            root_id="om_1",
+            message_id="om_1",
+            original_text="bug",
+            attachments=(Attachment(kind="image", url="lark://message/om_1/image/img_v2_abc"),),
+        )
+        downloader = FakeDownloader()
+        describer = CommandResourceDescriber(
+            command=(
+                "{python}",
+                "-c",
+                "import sys; print('PYEXE:' + sys.executable)",
+                "{path}",
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            materialized = materialize_lark_attachments(
+                record=record,
+                lark=downloader,
+                store=LocalResourceStore(Path(tmp)),
+                describer=describer,
+            )
+
+        self.assertEqual(
+            materialized.attachments[0].description, f"PYEXE:{sys.executable}"
+        )
 
     def test_materialize_redacts_before_store_and_description(self) -> None:
         record = IntakeRecord(
