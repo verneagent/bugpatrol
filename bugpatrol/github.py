@@ -274,7 +274,7 @@ class GitHubCliIssuesClient:
                 "--limit",
                 str(limit),
                 "--json",
-                "number,url,title,body,closingIssuesReferences,mergedAt",
+                "number,url,title,body,closingIssuesReferences,mergedAt,mergeCommit",
             ]
         )
         pulls: list[GitHubPullRequest] = []
@@ -285,6 +285,8 @@ class GitHubCliIssuesClient:
                 for item in closing:
                     if isinstance(item, dict) and isinstance(item.get("number"), int):
                         closing_numbers.append(int(item["number"]))
+            merge_commit = data.get("mergeCommit")
+            merge_commit_sha = str(merge_commit.get("oid") or "") if isinstance(merge_commit, dict) else ""
             pulls.append(
                 GitHubPullRequest(
                     number=int(data["number"]),
@@ -293,6 +295,7 @@ class GitHubCliIssuesClient:
                     body=str(data.get("body") or ""),
                     closing_issue_numbers=tuple(closing_numbers),
                     merged_at=str(data.get("mergedAt") or ""),
+                    merge_commit_sha=merge_commit_sha,
                 )
             )
         return tuple(pulls)

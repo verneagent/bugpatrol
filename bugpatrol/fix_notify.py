@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -11,6 +12,7 @@ from typing import Any
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment, GitHubPullRequest, LarkMessengerClient
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.intake import parse_intake_metadata
+from bugpatrol.lark import LarkOpenApiError, is_message_withdrawn_error
 
 FIX_META_START = "<!-- BUGPATROL_FIX_META"
 FIX_META_END = "BUGPATROL_FIX_META -->"
@@ -127,11 +129,25 @@ def apply_fix_notification(
         )
     if lark is None:
         raise ValueError("lark client is required when dry_run is false")
-    lark.reply_to_message(
-        chat_id=notification.chat_id,
-        message_id=notification.message_id,
-        text=notification.text,
-    )
+    lark_sent = True
+    try:
+        lark.reply_to_message(
+            chat_id=notification.chat_id,
+            message_id=notification.message_id,
+            text=notification.text,
+        )
+    except LarkOpenApiError as error:
+        # The Lark thread's root message was recalled — the notification target
+        # is permanently gone, so retrying every reconcile pass is futile and
+        # would abort the whole batch. Record it as handled (write the marker)
+        # and move on; a genuinely transient error still propagates.
+        if not is_message_withdrawn_error(error):
+            raise
+        print(
+            f"fix notification for {repo}#{issue_number} skipped: Lark message withdrawn",
+            file=sys.stderr,
+        )
+        lark_sent = False
     github.add_issue_comment(
         repo=repo,
         issue_number=issue_number,
@@ -151,7 +167,7 @@ def apply_fix_notification(
         event=event,
         dry_run=False,
         duplicate_skipped=False,
-        lark_sent=True,
+        lark_sent=lark_sent,
         metadata_written=True,
     )
 
@@ -185,18 +201,28 @@ def render_fix_notification_text(
     pr: str = "",
     commit: str = "",
 ) -> str:
-    issue_link = f"Issue [#{issue.number}]({issue.url})"
+    # Lark text messages only auto-linkify *bare* URLs sitting on their own
+    # line — markdown `[text](url)` and `owner/repo#N` shorthand render as inert
+    # plain text. So every reference is emitted as a full URL on its own line.
+    def _pr_lines(verb: str) -> list[str]:
+        number = _normalize_pr(pr)
+        lines = [f"修复 PR 已{verb}：#{number}", f"https://github.com/{repo}/pull/{number}"]
+        if commit:
+            lines += ["修复 commit：", f"https://github.com/{repo}/commit/{commit}"]
+        return lines
+
     if event == "pr_opened":
-        text = f"修复 PR 已创建：{repo}#{_normalize_pr(pr)}\n{issue_link}"
+        lines = _pr_lines("创建")
     elif event == "pr_merged":
-        text = f"修复 PR 已合并：{repo}#{_normalize_pr(pr)}\n{issue_link}"
+        lines = _pr_lines("合并")
     elif event == "commit_linked":
-        text = f"关联修复 commit：{repo}@{commit}\n{issue_link}"
+        lines = [f"关联修复 commit：{commit[:12]}", f"https://github.com/{repo}/commit/{commit}"]
     elif event == "issue_fixed":
-        text = f"该问题已标记修复：{issue_link}"
+        lines = ["该问题已标记修复"]
     else:
         raise ValueError(f"unsupported fix event: {event}")
-    return text
+    lines += [f"Issue #{issue.number}", issue.url]
+    return "\n".join(lines)
 
 
 def render_fix_metadata_comment(metadata: dict[str, Any]) -> str:
@@ -292,9 +318,12 @@ def reconcile_fix_notifications(
                 lark=lark,
                 dry_run=dry_run,
             )
-        except ValueError as error:
+        except (ValueError, LarkOpenApiError) as error:
+            # Isolate a bad candidate (unresolvable issue, transient Lark/API
+            # error) so it can't abort the whole batch; no marker is written, so
+            # a transient failure is retried on the next reconcile pass.
             skipped += 1
-            errors.append(str(error))
+            errors.append(f"{candidate.event} #{issue_number}: {error}")
             continue
         summaries.append(summary)
     return FixReconcileResult(
@@ -364,6 +393,7 @@ def collect_fix_candidates_from_github(
                         event="pr_merged",
                         issue_number=issue_number,
                         pr=str(pull.number),
+                        commit=pull.merge_commit_sha,
                     )
                 )
 

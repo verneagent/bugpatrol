@@ -19,8 +19,10 @@ from bugpatrol.fix_notify import (
     parse_fix_metadata,
     reconcile_fix_notifications,
     render_fix_metadata_comment,
+    render_fix_notification_text,
     resolve_single_issue_from_pr,
 )
+from bugpatrol.lark import LarkOpenApiError
 from bugpatrol.intake import IntakeRecord
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.testing.fakes import FakeGitHubIssuesClient, FakeLarkMessengerClient
@@ -380,6 +382,73 @@ class FixNotifyTest(unittest.TestCase):
         self.assertFalse(summary.lark_sent)
         self.assertEqual(len(lark.replies), 1)
         self.assertEqual(github.created[0].comments, [])
+
+    def test_notification_text_uses_bare_clickable_urls_and_commit_link(self) -> None:
+        issue = GitHubIssue(
+            number=3982,
+            title="bug",
+            body="",
+            url="https://github.com/o/r/issues/3982",
+            state="closed",
+        )
+        text = render_fix_notification_text(
+            issue=issue, event="pr_merged", repo="o/r", pr="3983", commit="abc123def456"
+        )
+        # Bare URLs on their own line so Lark auto-linkifies them; no inert
+        # markdown or owner/repo#N shorthand.
+        self.assertIn("https://github.com/o/r/pull/3983", text)
+        self.assertIn("https://github.com/o/r/commit/abc123def456", text)
+        self.assertIn("https://github.com/o/r/issues/3982", text)
+        self.assertNotIn("[#3982]", text)
+        self.assertNotIn("o/r#3983", text)
+        for url in ("pull/3983", "commit/abc123def456", "issues/3982"):
+            line = next(l for l in text.splitlines() if url in l)
+            self.assertTrue(line.startswith("https://"), f"URL not bare on its line: {line!r}")
+
+    def test_withdrawn_message_is_tolerated_and_still_records_marker(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = _WithdrawnLarkClient()
+        workflow = IntakeWorkflow(
+            config=config, github=github, lark=FakeLarkMessengerClient()
+        )
+        issue = workflow.process(
+            IntakeRecord(
+                reporter_name="Reporter",
+                reporter_open_id="ou_1",
+                created_at="2026-07-01T00:00:00Z",
+                chat_id=config.lark.chat_id,
+                root_id="om_root",
+                message_id="om_1",
+                original_text="bug",
+            )
+        ).issue
+
+        summary = apply_fix_notification(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            event="pr_merged",
+            pr="123",
+            dry_run=False,
+            github=github,  # type: ignore[arg-type]
+            lark=lark,  # type: ignore[arg-type]
+        )
+
+        # Withdrawn Lark target: reply is not delivered, but the marker is still
+        # written so the reconcile pass records it as handled and never retries.
+        self.assertFalse(summary.lark_sent)
+        self.assertTrue(summary.metadata_written)
+        self.assertEqual(
+            notified_fix_keys(
+                github.list_issue_comments(repo=config.github_repo, issue_number=issue.number)
+            ),
+            {summary.key},
+        )
+
+
+class _WithdrawnLarkClient:
+    def reply_to_message(self, *, chat_id: str, message_id: str, text: str) -> None:
+        raise LarkOpenApiError('Lark HTTP 400: {"code":230011,"msg":"The message was withdrawn."}')
 
 
 if __name__ == "__main__":

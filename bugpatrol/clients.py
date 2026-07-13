@@ -69,6 +69,7 @@ class GitHubPullRequest:
     timeline_issue_numbers: tuple[int, ...] = ()
     base_ref: str = ""
     merged_at: str = ""
+    merge_commit_sha: str = ""
 
 
 class GitHubIssuesClient(Protocol):
