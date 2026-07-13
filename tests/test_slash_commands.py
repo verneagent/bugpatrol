@@ -202,7 +202,9 @@ class SlashCommandHandlerTest(unittest.TestCase):
         self.assertEqual(result.reason, "slash_assign")
         self.assertEqual(github.assigned, [(42, "naohn42")])
         self.assertIn("已指派", lark.replies[0])
-        self.assertIn("@naohn42", lark.replies[0])
+        # Real Lark @mention (pings the person), never plain-text `@login`.
+        self.assertIn('<at user_id="ou_naohn">naohn42</at>', lark.replies[0])
+        self.assertNotIn("@naohn42", lark.replies[0])
 
     def test_assign_unknown_reports_choices(self) -> None:
         github = _StubIssueClient(_issue(42))

@@ -26,6 +26,16 @@ called and the result was read back.
   sandbox repo/group, and clean up test issues or messages where the platform
   allows it.
 
+## Lark Notifications
+
+- To @-mention a person in ANY message or reply sent to Lark, always emit a real
+  at-tag `<at user_id="OPEN_ID">name</at>` (open_id from
+  `config.lark.user_open_ids`). `build_post_content` in `lark.py` renders these
+  into real Lark mentions that actually ping the person.
+- NEVER write plain-text `@name` / `@login` for a mention — it looks right but
+  does not notify anyone. This bug has recurred (triage summaries, `/assign`
+  reply); assert on the `<at ...>` tag in tests, not on `@name`.
+
 ## Product Boundaries
 
 - Intake records what the reporter said. It does not triage.

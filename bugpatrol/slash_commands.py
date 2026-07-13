@@ -210,7 +210,12 @@ class SlashCommandHandler:
             issue_number=issue.number,
             assignee=login,
         )
-        self._reply(message, f"✅ 已指派 [#{issue.number}]({issue.url}) 给 @{login}")
+        # A real Lark @mention (`<at user_id=...>`) actually pings the assignee;
+        # plain `@login` text does not. `login` always comes from
+        # `user_open_ids`, so the open_id is present.
+        open_id = (self._config.lark.user_open_ids or {})[login]
+        mention = f'<at user_id="{open_id}">{login}</at>'
+        self._reply(message, f"✅ 已指派 [#{issue.number}]({issue.url}) 给 {mention}")
         return SlashResult(command="assign", issue_number=issue.number, reason="slash_assign")
 
     def _reply(self, message: LarkMessage, text: str) -> None:
