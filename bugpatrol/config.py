@@ -201,6 +201,10 @@ class FixConfig:
     # 0 = unlimited; otherwise a device-level counting semaphore caps how many
     # heavy fix builds run at once across all runners sharing one machine.
     max_concurrent_per_device: int = 0
+    # Interval (seconds) of the in-run progress heartbeat posted to the
+    # reporter's Lark topic during a long fix run. 0 disables it. See
+    # docs/PROGRESS-REPORTER.md.
+    progress_heartbeat_seconds: int = 300
     # Optional [fix.agent] override. When set it decides the fix agent's
     # provider/model independently of triage (e.g. triage on deepseek, fix on
     # claude). When None the fix runner inherits triage_agent. runner_labels are
@@ -469,6 +473,12 @@ def _parse_fix(data: dict[str, Any]) -> FixConfig | None:
     max_concurrent = _num(runner, "max_concurrent_per_device", 0)
     if max_concurrent < 0:
         raise ValueError("fix.runner.max_concurrent_per_device must be >= 0")
+    progress = fix.get("progress") or {}
+    if not isinstance(progress, dict):
+        raise ValueError("[fix.progress] must be a table")
+    progress_heartbeat = _num(progress, "heartbeat_seconds", 300)
+    if progress_heartbeat < 0:
+        raise ValueError("fix.progress.heartbeat_seconds must be >= 0")
     branch_prefix = str(fix.get("branch_prefix") or "bugpatrol/fix-issue-")
     agent_raw = fix.get("agent")
     if agent_raw is None:
@@ -490,6 +500,7 @@ def _parse_fix(data: dict[str, Any]) -> FixConfig | None:
         max_conflict_files=max_conflict_files,
         branch_prefix=branch_prefix,
         max_concurrent_per_device=max_concurrent,
+        progress_heartbeat_seconds=progress_heartbeat,
         agent=agent,
     )
 

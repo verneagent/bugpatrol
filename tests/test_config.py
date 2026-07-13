@@ -148,6 +148,26 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"max_diff_lines must be positive"):
             parse_project_config(data)
 
+    def test_fix_progress_heartbeat_defaults_and_overrides(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["fix"] = {"verify": {"test": "make test"}}
+        self.assertEqual(parse_project_config(data).fix.progress_heartbeat_seconds, 300)
+
+        data["fix"] = {"verify": {"test": "make test"}, "progress": {"heartbeat_seconds": 0}}
+        # 0 is a valid explicit "disable heartbeat", not a footgun default.
+        self.assertEqual(parse_project_config(data).fix.progress_heartbeat_seconds, 0)
+
+        data["fix"] = {"verify": {"test": "make test"}, "progress": {"heartbeat_seconds": 120}}
+        self.assertEqual(parse_project_config(data).fix.progress_heartbeat_seconds, 120)
+
+    def test_fix_progress_rejects_negative_heartbeat(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["fix"] = {"verify": {"test": "make test"}, "progress": {"heartbeat_seconds": -1}}
+        with self.assertRaisesRegex(ValueError, r"heartbeat_seconds must be >= 0"):
+            parse_project_config(data)
+
     def test_config_has_no_numeric_or_default_footgun(self) -> None:
         # `int(x.get(k) or D)` / `float(...)` fire on a legitimately configured 0
         # or 0.0, silently replacing it with D and skipping any `<= 0` validation.

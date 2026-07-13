@@ -61,7 +61,9 @@ from bugpatrol.fix_result import (
 )
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
-from bugpatrol.intake import require_bugpatrol_managed_issue
+from bugpatrol.intake import parse_intake_metadata, require_bugpatrol_managed_issue
+from bugpatrol.lark import is_message_withdrawn_error
+from bugpatrol.progress import ProgressReporter
 from bugpatrol.triage_result import (
     TriageRunStats,
     parse_triage_metadata,
@@ -616,6 +618,7 @@ def execute_fix_run(
 ) -> str:
     fix = config.fix
     assert fix is not None  # run_fix guards this; kept for callers using execute directly.
+    reporter = _build_progress_reporter(config=config, issue=issue, lark=lark)
     if lark is not None:
         send_intake_topic_message(
             repo=config.github_repo,
@@ -624,66 +627,75 @@ def execute_fix_run(
             lark=lark,
             text=_render_fix_start_message(issue_number=issue.number, issue_url=issue.url, branch_note=plan.branch_note),
         )
-    run_stats = _run_fix_agent(plan)
+    reporter.set_phase("agent 正在编辑代码")
+    reporter.start()
+    try:
+        run_stats = _run_fix_agent(plan)
 
-    # The gate trusts the real working-tree diff, never the agent's self-report.
-    changed_files = worktree_changed_files(plan.agent_cwd)
-    diff_line_count = worktree_diff_line_count(plan.agent_cwd)
-    gate = evaluate_post_edit(changed_files=changed_files, diff_line_count=diff_line_count, fix=fix)
-    if not gate.allowed:
-        _post_blocked(config=config, issue=issue, reason=gate.reason, github=github, lark=lark)
-        return "no_changes" if not changed_files else "blocked"
+        # The gate trusts the real working-tree diff, never the agent's self-report.
+        changed_files = worktree_changed_files(plan.agent_cwd)
+        diff_line_count = worktree_diff_line_count(plan.agent_cwd)
+        gate = evaluate_post_edit(changed_files=changed_files, diff_line_count=diff_line_count, fix=fix)
+        if not gate.allowed:
+            _post_blocked(config=config, issue=issue, reason=gate.reason, github=github, lark=lark)
+            return "no_changes" if not changed_files else "blocked"
 
-    if not plan.output_path.exists():
-        # The agent edited code but never wrote its JSON summary; without it we
-        # can't build a trustworthy PR body, so treat like a blocked run.
-        _post_blocked(
-            config=config,
-            issue=issue,
-            reason="fix agent edited code but wrote no output JSON summary",
-            github=github,
-            lark=lark,
+        if not plan.output_path.exists():
+            # The agent edited code but never wrote its JSON summary; without it we
+            # can't build a trustworthy PR body, so treat like a blocked run.
+            _post_blocked(
+                config=config,
+                issue=issue,
+                reason="fix agent edited code but wrote no output JSON summary",
+                github=github,
+                lark=lark,
+            )
+            return "no_output"
+        result = parse_fix_result(json.loads(plan.output_path.read_text()))
+
+        reporter.set_phase("跑验证门（安装依赖 + preflight）")
+        status, verify_outcomes = _verify_with_baseline_attribution(fix=fix, worktree=plan.agent_cwd)
+        if status == "baseline_broken":
+            _post_baseline_broken(
+                config=config,
+                issue=issue,
+                base_branch=plan.base_branch,
+                verify_outcomes=verify_outcomes,
+                github=github,
+                lark=lark,
+            )
+            return "baseline_broken"
+        if status == "fix_failed":
+            _post_verify_failed(
+                config=config,
+                issue=issue,
+                verify_outcomes=verify_outcomes,
+                github=github,
+                lark=lark,
+            )
+            return "verify_failed"
+
+        reporter.set_phase("提交并开 PR")
+        commit_message = f"fix: {result.pr_title} (#{issue.number})"
+        worktree_commit_all(plan.agent_cwd, message=commit_message)
+        worktree_push_branch(plan.agent_cwd, branch=plan.head_branch)
+        pr_url = github.create_pull_request(
+            repo=config.github_repo,
+            head=plan.head_branch,
+            base=plan.base_branch,
+            title=result.pr_title,
+            body=build_pr_body(
+                result=result,
+                issue_number=issue.number,
+                issue_url=issue.url,
+                changed_files=changed_files,
+                verify_outcomes=verify_outcomes,
+            ),
         )
-        return "no_output"
-    result = parse_fix_result(json.loads(plan.output_path.read_text()))
-
-    status, verify_outcomes = _verify_with_baseline_attribution(fix=fix, worktree=plan.agent_cwd)
-    if status == "baseline_broken":
-        _post_baseline_broken(
-            config=config,
-            issue=issue,
-            base_branch=plan.base_branch,
-            verify_outcomes=verify_outcomes,
-            github=github,
-            lark=lark,
-        )
-        return "baseline_broken"
-    if status == "fix_failed":
-        _post_verify_failed(
-            config=config,
-            issue=issue,
-            verify_outcomes=verify_outcomes,
-            github=github,
-            lark=lark,
-        )
-        return "verify_failed"
-
-    commit_message = f"fix: {result.pr_title} (#{issue.number})"
-    worktree_commit_all(plan.agent_cwd, message=commit_message)
-    worktree_push_branch(plan.agent_cwd, branch=plan.head_branch)
-    pr_url = github.create_pull_request(
-        repo=config.github_repo,
-        head=plan.head_branch,
-        base=plan.base_branch,
-        title=result.pr_title,
-        body=build_pr_body(
-            result=result,
-            issue_number=issue.number,
-            issue_url=issue.url,
-            changed_files=changed_files,
-            verify_outcomes=verify_outcomes,
-        ),
-    )
+    finally:
+        # Terminal notifications (below and in the _post_* paths) supersede the
+        # heartbeat, so always tear the thread down on the way out.
+        reporter.stop()
     if plan.reviewer:
         # A non-collaborator or self-review reviewer must not fail a landed PR;
         # the PR already exists, so log the miss and move on rather than raise.
@@ -715,6 +727,30 @@ def _render_fix_start_message(*, issue_number: int, issue_url: str, branch_note:
     if runner:
         text += f"\n修复执行机：{runner}"
     return text
+
+
+def _build_progress_reporter(
+    *, config: ProjectConfig, issue: GitHubIssue, lark: LarkMessengerClient | None
+) -> ProgressReporter:
+    """Heartbeat reporter wired to the issue's Lark topic; inert when unconfigured.
+
+    chat_id/message_id come from the issue body's intake meta (no extra GitHub
+    round-trip). When lark is None, the meta is missing, or the configured
+    interval is 0, the reporter is simply disabled and its ``start()`` is a
+    no-op — the run behaves exactly as before.
+    """
+    fix = config.fix
+    assert fix is not None
+    metadata = parse_intake_metadata(issue.body or "") or {}
+    return ProgressReporter(
+        replier=lark,
+        chat_id=str(metadata.get("chat_id") or ""),
+        message_id=str(metadata.get("message_id") or ""),
+        issue_number=issue.number,
+        interval_seconds=float(fix.progress_heartbeat_seconds),
+        runner=triage_runner_name(),
+        swallow=is_message_withdrawn_error,
+    )
 
 
 def _render_revise_start_message(

@@ -2,6 +2,21 @@
 
 Project-neutral implementation items.
 
+## Fix-run progress reporter (in progress, 2026-07-13)
+
+Fill the silent 10–30 min *during* a long fix run (before any PR). A bounded
+in-process heartbeat thread pings the reporter's Lark topic with the current
+phase + elapsed time. Design + arrangement vs the CI-fix loop:
+`docs/PROGRESS-REPORTER.md`. Ship before CI-FIX-FEEDBACK (which is blocked on a
+real green fix PR through pr-ci; the reporter has no such prerequisite).
+
+## PR CI feedback loop (design done, blocked on a green fix PR)
+
+`docs/CI-FIX-FEEDBACK.md`: post-PR `workflow_run` reactor — success ⇒
+build-ready ping, failure ⇒ auto-fix revise loop. Prerequisite (fix+revise live
+on fived) is done; still needs a real `bugpatrol/fix-issue-N` PR that passes
+preflight and fires pr-ci before wiring.
+
 ## Status (2026-07-11)
 
 - Reconcile, cross-repo triage references, and operations tracks: **done**,
