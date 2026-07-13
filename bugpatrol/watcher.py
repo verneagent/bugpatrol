@@ -23,6 +23,7 @@ from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.ledger import JsonMessageLedger, MessageLedger
 from bugpatrol.lease import FileLease
 from bugpatrol.lark import LarkOpenApiError, LarkOpenApiMessengerClient
+from bugpatrol.slash_commands import SlashCommandHandler
 from bugpatrol.resources import (
     LocalResourceStore,
     ResourceDescriber,
@@ -103,6 +104,7 @@ def run_polling_watcher(
     triage_status_reader: TriageStatusReader | None = None,
     parallel_topics: int = 1,
     branch_tip_resolver: BranchTipResolver | None = None,
+    slash_handler: SlashCommandHandler | None = None,
 ) -> WatchResult:
     if event_log is not None and event_log_path is not None:
         raise ValueError("event_log and event_log_path are mutually exclusive")
@@ -196,6 +198,7 @@ def run_polling_watcher(
                         resource_redactor=resource_redactor,
                         resource_transformer=resource_transformer,
                         branch_tip_resolver=branch_tip_resolver,
+                        slash_handler=slash_handler,
                     )
                 final_iteration = once or (max_iterations is not None and iterations >= max_iterations)
                 results = _harvest_topic_results(in_flight, wait_all=final_iteration)

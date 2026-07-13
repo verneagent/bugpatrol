@@ -67,6 +67,9 @@ class LarkMessage:
     raw_content: str = ""
     sender_id: str = ""
     sender_id_type: str = ""
+    # open_ids of people @mentioned in this message, used to resolve
+    # `/assign @person` deterministically.
+    mention_open_ids: tuple[str, ...] = ()
     # True when the message was withdrawn/recalled in Lark.
     deleted: bool = False
 
@@ -360,8 +363,28 @@ def parse_lark_message(item: dict[str, object], *, default_chat_id: str) -> Lark
         raw_content=content,
         sender_id=sender_raw_id,
         sender_id_type=sender_id_type,
+        mention_open_ids=_mention_open_ids(item.get("mentions")),
         deleted=bool(item.get("deleted")),
     )
+
+
+def _mention_open_ids(mentions: object) -> tuple[str, ...]:
+    """Collect the open_ids of @mentioned users (order preserved, de-duped)."""
+    if not isinstance(mentions, list):
+        return ()
+    open_ids: list[str] = []
+    for mention in mentions:
+        if not isinstance(mention, dict):
+            continue
+        identity = mention.get("id")
+        open_id = ""
+        if isinstance(identity, dict):
+            open_id = str(identity.get("open_id") or "")
+        elif isinstance(identity, str):
+            open_id = identity
+        if open_id and open_id not in open_ids:
+            open_ids.append(open_id)
+    return tuple(open_ids)
 
 
 def _resolve_mentions(text: str, mentions: object) -> str:

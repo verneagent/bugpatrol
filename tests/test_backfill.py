@@ -725,6 +725,54 @@ class TopicBatchTest(unittest.TestCase):
         self.assertIn("boom", result.error)
         self.assertEqual([e.action for e in result.events], ["error", "processed"])
 
+    def test_process_topic_batch_intercepts_slash_command(self) -> None:
+        # A `/fix` reply in a topic is consumed by the slash handler: it is
+        # marked processed and never re-enters intake (no issue created).
+        from bugpatrol.slash_commands import SlashCommandHandler
+
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        # Register an issue mapped to this topic root so /fix resolves it.
+        github.create_issue(
+            repo=config.github_repo,
+            title="bug",
+            body=f'<!-- {{"chat_id":"{config.lark.chat_id}","root_id":"om_a1"}} -->',
+            issue_type="Bug",
+            fields={},
+        )
+        calls: list[int] = []
+        handler = SlashCommandHandler(
+            config=config, github=github, lark=lark, fix_dispatch=calls.append
+        )
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        batch = TopicBatch(
+            root_key="om_a1",
+            messages=(
+                message(
+                    message_id="om_a1",
+                    root_id="om_a1",
+                    chat_id=config.lark.chat_id,
+                    text="/fix",
+                ),
+            ),
+        )
+
+        result = process_topic_batch(
+            batch,
+            config=config,
+            lark=lark,
+            workflow=workflow,
+            slash_handler=handler,
+        )
+
+        self.assertEqual(result.processed_message_ids, ("om_a1",))
+        self.assertEqual(result.outcomes, ())
+        self.assertEqual([e.reason for e in result.events], ["slash_fix"])
+        self.assertEqual(calls, [1])
+        # Only the pre-registered issue exists; /fix did not create a new one.
+        self.assertEqual(len(github.created), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,6 +22,7 @@ from bugpatrol.resources import (
     ResourceTransformer,
     materialize_lark_attachments,
 )
+from bugpatrol.slash_commands import SlashCommandHandler
 
 
 # branch name -> best-effort remote tip SHA (or "" when unavailable). Injected
@@ -229,6 +230,7 @@ def _process_message_group(
     resource_redactor: ResourceRedactor | None = None,
     resource_transformer: ResourceTransformer | None = None,
     branch_tip_resolver: BranchTipResolver | None = None,
+    slash_handler: SlashCommandHandler | None = None,
 ) -> tuple[IntakeOutcome | None, list[BackfillEvent], list[str], str]:
     """Coalesce one topic's messages into a single intake write.
 
@@ -241,6 +243,29 @@ def _process_message_group(
     error = ""
     if not messages:
         return None, events, [], error
+    # Deterministic slash commands (`/fix`, `/assign`) are executed literally and
+    # peeled off before intake — they must not become issues or feed triage. Run
+    # before the orphan check so `/fix` always gets a reply. Never in dry_run.
+    processed_command_ids: list[str] = []
+    if slash_handler is not None and not dry_run:
+        remaining: list[LarkMessage] = []
+        for message in messages:
+            result = slash_handler.handle(message)
+            if result is None:
+                remaining.append(message)
+                continue
+            events.append(
+                BackfillEvent(
+                    message_id=message.message_id,
+                    action="processed",
+                    reason=result.reason,
+                    issue_number=result.issue_number,
+                )
+            )
+            processed_command_ids.append(message.message_id)
+        messages = remaining
+        if not messages:
+            return None, events, processed_command_ids, error
     chat_id = messages[0].chat_id
     root_key = messages[0].root_id or messages[0].message_id
     if config.intake.skip_orphan_replies:
@@ -253,7 +278,7 @@ def _process_message_group(
                 BackfillEvent(message_id=message.message_id, action="skipped", reason="orphan_reply")
                 for message in messages
             )
-            return None, events, [], error
+            return None, events, processed_command_ids, error
     records: list[IntakeRecord] = []
     record_message_ids: list[str] = []
     for message in messages:
@@ -280,13 +305,13 @@ def _process_message_group(
         records.append(record)
         record_message_ids.append(message.message_id)
     if not records:
-        return None, events, [], error
+        return None, events, processed_command_ids, error
     try:
         outcome = workflow.process_batch(records)
     except Exception as exc:  # noqa: BLE001 - never marked processed, retries next scan
         error = f"{type(exc).__name__}: {exc}"
         events.append(BackfillEvent(message_id=records[0].message_id, action="error", reason=error))
-        return None, events, [], error
+        return None, events, processed_command_ids, error
     events.extend(
         BackfillEvent(
             message_id=message_id,
@@ -296,7 +321,7 @@ def _process_message_group(
         )
         for message_id in record_message_ids
     )
-    return outcome, events, record_message_ids, error
+    return outcome, events, [*processed_command_ids, *record_message_ids], error
 
 
 def scan_topic_batches(
@@ -356,6 +381,7 @@ def process_topic_batch(
     resource_redactor: ResourceRedactor | None = None,
     resource_transformer: ResourceTransformer | None = None,
     branch_tip_resolver: BranchTipResolver | None = None,
+    slash_handler: SlashCommandHandler | None = None,
 ) -> TopicResult:
     """Coalesce one topic's messages into a single write. Never raises: an
     error stops the topic and is reported in the result so unprocessed messages
@@ -372,6 +398,7 @@ def process_topic_batch(
         resource_redactor=resource_redactor,
         resource_transformer=resource_transformer,
         branch_tip_resolver=branch_tip_resolver,
+        slash_handler=slash_handler,
     )
     return TopicResult(
         root_key=batch.root_key,

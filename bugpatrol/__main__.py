@@ -56,6 +56,7 @@ from bugpatrol.worktree import (
     resolve_reference_branch,
     triage_worktree,
 )
+from bugpatrol.slash_commands import SlashCommandHandler, make_fix_dispatch
 from bugpatrol.watcher import GitHubTriageStatusReader, run_polling_watcher
 
 
@@ -262,6 +263,14 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "command used for due triage requests; supports {issue_number}, "
             "{trigger_fingerprint}, and {reason}"
+        ),
+    )
+    watch.add_argument(
+        "--fix-dispatch-command",
+        nargs="+",
+        help=(
+            "command run when a reporter posts `/fix` in a bug topic; supports "
+            "{issue_number}. Without it, `/fix` replies that it is unconfigured."
         ),
     )
     watch.add_argument(
@@ -577,6 +586,14 @@ def main(argv: list[str] | None = None) -> int:
         resource_redactor = media_resource_redactor(config)
         resource_transformer = media_resource_transformer(config)
         resource_policy = media_resource_policy(config)
+        slash_handler = SlashCommandHandler(
+            config=config,
+            github=github,
+            lark=lark,
+            fix_dispatch=(
+                make_fix_dispatch(args.fix_dispatch_command) if args.fix_dispatch_command else None
+            ),
+        )
         result = run_polling_watcher(
             config=config,
             lark=lark,
@@ -610,6 +627,7 @@ def main(argv: list[str] | None = None) -> int:
                 if config.lark.branch_chats
                 else None
             ),
+            slash_handler=slash_handler,
         )
         print(json.dumps(result.__dict__, ensure_ascii=False))
         return 0
