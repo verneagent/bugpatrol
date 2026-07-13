@@ -35,6 +35,12 @@ called and the result was read back.
 - NEVER write plain-text `@name` / `@login` for a mention — it looks right but
   does not notify anyone. This bug has recurred (triage summaries, `/assign`
   reply); assert on the `<at ...>` tag in tests, not on `@name`.
+- For links in Lark messages, always emit a masked markdown link with a short
+  label: `[#3996](url)` / `[abc123def456](url)`, never a bare full URL.
+  `reply_to_message` renders `[text](url)` as a clickable rich-text link; a bare
+  URL shows the whole ugly URL and is not what we want. This has recurred for PR
+  links (fix PR notifications, reconcile). Issue/PR labels are `#<number>`,
+  commits are the 12-char short SHA. Assert on `[#N](url)` in tests, not the URL.
 
 ## Product Boundaries
 

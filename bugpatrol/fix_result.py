@@ -27,6 +27,17 @@ FIX_META_RE = re.compile(
 )
 
 
+def _pr_link(pr_url: str) -> str:
+    """Masked PR link for Lark: `[#3996](url)` displays a clickable `#3996`.
+
+    `reply_to_message` renders markdown `[text](url)` as a rich-text link, so we
+    never emit a bare full URL. PR urls end in `/pull/<number>`.
+    """
+    number = pr_url.rstrip("/").rsplit("/", 1)[-1]
+    label = f"#{number}" if number.isdigit() else pr_url
+    return f"[{label}]({pr_url})"
+
+
 @dataclass(frozen=True)
 class FixResult:
     summary: str
@@ -123,7 +134,7 @@ def render_fix_lark_message(
     reviewer = f'<at user_id="{reviewer_open_id}"></at> ' if reviewer_open_id else ""
     lines = [
         f"{reviewer}已自动生成修复 PR，GitHub issue [#{issue_number}]({issue_url})",
-        f"PR：{pr_url}",
+        f"PR：{_pr_link(pr_url)}",
         f"改动：{result.summary.strip()}",
         "请 review 后合并（不会自动合并）。",
     ]
@@ -373,7 +384,7 @@ def render_revise_lark_message(
         head = f"{reviewer}已解决与 `{base_branch}` 的冲突并按评审反馈更新修复 PR，GitHub issue [#{issue_number}]({issue_url})"
     else:
         head = f"{reviewer}已按评审反馈更新修复 PR，GitHub issue [#{issue_number}]({issue_url})"
-    lines = [head, f"PR：{pr_url}"]
+    lines = [head, f"PR：{_pr_link(pr_url)}"]
     if addressed:
         lines.append(f"处理反馈：{addressed} 条")
     lines.extend([f"改动：{result.summary.strip()}", "请再次 review（不会自动合并）。"])
@@ -459,7 +470,7 @@ def render_conflict_escalation_lark_message(
     lines = [
         f"{reviewer}修复 PR 与目标分支 `{base_branch}` 冲突且过于复杂，"
         f"自动解决不安全，需人工处理，GitHub issue [#{issue_number}]({issue_url})",
-        f"PR：{pr_url}",
+        f"PR：{_pr_link(pr_url)}",
         f"冲突文件：{len(files)} 个",
         "请人工 rebase / 解决冲突后再合并（不会自动合并）。",
     ]

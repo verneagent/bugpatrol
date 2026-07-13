@@ -122,7 +122,9 @@ class RenderTest(unittest.TestCase):
             result=_result(),
             reviewer_open_id="ou_reviewer",
         )
-        self.assertIn("pull/9", text)
+        # PR is a masked link (`[#9](url)`), never a bare full URL in Lark.
+        self.assertIn("[#9](https://github.test/o/r/pull/9)", text)
+        self.assertNotIn("PR：https://", text)
         self.assertIn('<at user_id="ou_reviewer">', text)
 
     def test_blocked_and_verify_failed_messages(self) -> None:
