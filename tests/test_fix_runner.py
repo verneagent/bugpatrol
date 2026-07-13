@@ -288,7 +288,14 @@ class ExecuteFixRunTest(unittest.TestCase):
             output_dir = root / "out"
             output_dir.mkdir()
             command = self._edit_and_write_output(worktree, output_dir / "fix-output.json")
-            config, plan = self._plan(worktree=worktree, output_dir=output_dir, verify={"bad": "false"}, command=command)
+            # The gate passes on the pristine baseline (`x = 1`) but fails once the
+            # fix flips it to `x = 2` — so the failure is the fix's fault.
+            config, plan = self._plan(
+                worktree=worktree,
+                output_dir=output_dir,
+                verify={"guard": "grep -q 'x = 1' src/todo.ts"},
+                command=command,
+            )
             github = FakeGithub()
             status = execute_fix_run(
                 config=config,
@@ -299,6 +306,37 @@ class ExecuteFixRunTest(unittest.TestCase):
             self.assertEqual(status, "verify_failed")
             self.assertFalse(github.created_prs)
             self.assertTrue(any("未通过验证" in c for c in github.added_comments))
+
+    def test_baseline_broken_reports_and_does_not_blame_fix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_git_repo(root)
+            worktree = _add_worktree(root)
+            output_dir = root / "out"
+            output_dir.mkdir()
+            command = self._edit_and_write_output(worktree, output_dir / "fix-output.json")
+            # A gate that fails regardless of the edit: after the post-fix run
+            # fails, resetting to the pristine baseline and re-running still fails,
+            # so the target branch itself is red — don't blame the fix.
+            config, plan = self._plan(
+                worktree=worktree,
+                output_dir=output_dir,
+                verify={"guard": "false"},
+                command=command,
+            )
+            github = FakeGithub()
+            status = execute_fix_run(
+                config=config,
+                issue=github.get_issue(repo=config.github_repo, issue_number=7),
+                plan=plan,
+                github=github,  # type: ignore[arg-type]
+            )
+            self.assertEqual(status, "baseline_broken")
+            self.assertFalse(github.created_prs)
+            self.assertTrue(any("baseline 本就红" in c for c in github.added_comments))
+            self.assertFalse(any("未通过验证" in c for c in github.added_comments))
+            # The worktree was reset back to the pristine baseline (`x = 1`).
+            self.assertEqual((worktree / "src" / "todo.ts").read_text(), "export const x = 1\n")
 
     def test_opened_pr_on_clean_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

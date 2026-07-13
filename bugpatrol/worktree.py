@@ -436,6 +436,21 @@ def worktree_push_branch(worktree: Path, *, branch: str) -> None:
     _git_in(worktree, "push", "--set-upstream", "origin", branch)
 
 
+def worktree_reset_to_head(worktree: Path) -> None:
+    """Discard the agent's uncommitted edits and reach the pristine base HEAD.
+
+    `reset --hard` reverts tracked modifications and un-stages any files the
+    agent added; `clean -fd` then removes those now-untracked files. `-fd`
+    (without `-x`) deliberately keeps git-ignored paths like `node_modules/`,
+    so a follow-up verify run reuses the installed dependencies rather than
+    reinstalling. Used to re-run the verify gate on the untouched target
+    branch when a fix's verify fails, to tell a broken baseline apart from a
+    fix that actually introduced the failure.
+    """
+    _git_in(worktree, "reset", "--hard", "HEAD")
+    _git_in(worktree, "clean", "-fd")
+
+
 @dataclass(frozen=True)
 class MergeOutcome:
     # "clean" when git merged the target with no textual conflict (a merge

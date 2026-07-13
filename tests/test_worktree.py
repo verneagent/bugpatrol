@@ -10,6 +10,7 @@ from bugpatrol.worktree import (
     resolve_triage_branch,
     worktree_merge_abort,
     worktree_merge_base,
+    worktree_reset_to_head,
     worktree_unresolved_conflict_markers,
 )
 
@@ -237,6 +238,29 @@ class WorktreeMergeBaseTest(unittest.TestCase):
             self.assertEqual(
                 worktree_unresolved_conflict_markers(clone, ("file.txt",)), ()
             )
+
+
+class WorktreeResetToHeadTest(unittest.TestCase):
+    def test_reverts_edits_and_new_files_but_keeps_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, clone = _make_fix_clone(root)
+            (clone / ".gitignore").write_text("node_modules/\n")
+            _git(clone, "add", ".gitignore")
+            _git(clone, "commit", "-q", "-m", "ignore deps")
+            (clone / "node_modules").mkdir()
+            (clone / "node_modules" / "dep.js").write_text("installed\n")
+
+            # Simulate the agent: modify a tracked file + add a new untracked file.
+            (clone / "file.txt").write_text("agent edit\n")
+            (clone / "new_test.ts").write_text("new\n")
+
+            worktree_reset_to_head(clone)
+
+            # Tracked edit reverted, new file removed, ignored deps preserved.
+            self.assertEqual((clone / "file.txt").read_text(), "fix\n")
+            self.assertFalse((clone / "new_test.ts").exists())
+            self.assertTrue((clone / "node_modules" / "dep.js").exists())
 
 
 if __name__ == "__main__":

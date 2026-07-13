@@ -11,6 +11,8 @@ from bugpatrol.fix_result import (
     notify_fix_pr,
     parse_fix_metadata,
     parse_fix_result,
+    render_baseline_broken_comment,
+    render_baseline_broken_lark_message,
     render_fix_blocked_lark_message,
     render_fix_comment,
     render_fix_lark_message,
@@ -135,6 +137,22 @@ class RenderTest(unittest.TestCase):
         self.assertIn("test", lark)
         comment = render_verify_failed_comment(verify_outcomes=failed_outcomes)
         self.assertIn("boom", comment)
+
+    def test_baseline_broken_messages_name_branch_and_do_not_blame_fix(self) -> None:
+        failed_outcomes = (
+            VerifyOutcome(label="preflight", command="./scripts/preflight.sh", returncode=1, stdout_tail="", stderr_tail="tsc boom"),
+        )
+        lark = render_baseline_broken_lark_message(
+            issue_number=7, issue_url="u", base_branch="2026/chat-live", verify_outcomes=failed_outcomes
+        )
+        self.assertIn("2026/chat-live", lark)
+        self.assertIn("baseline 本就红", lark)
+        self.assertIn("暂停", lark)
+        comment = render_baseline_broken_comment(
+            base_branch="2026/chat-live", verify_outcomes=failed_outcomes
+        )
+        self.assertIn("2026/chat-live", comment)
+        self.assertIn("tsc boom", comment)
 
     def test_metadata_append_parse(self) -> None:
         text = append_fix_metadata("body", {"version": 1, "issue": 7})

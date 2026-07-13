@@ -50,14 +50,15 @@ purpose = "Go backend for the fived frontend (proto routes, comment/chat permiss
 # Auto-fix runner. The fix agent edits code in a `bugpatrol/fix-issue-N`
 # worktree, then this gate runs fived's OWN pre-PR check before opening a PR
 # (never merges) — same philosophy as revise/[fix.verify]: we only read the
-# project's own gate, not reimplement it. `scripts/preflight.sh lint` is fived's
-# canonical pre-push gate in its lightest mode (type check + lint); the heavy
-# build/unit/surface + native/web/api/e2e all run on the PR via bugpatrol-pr-ci.yml.
+# project's own gate, not reimplement it. `scripts/preflight.sh` (no arg = full)
+# is fived's canonical pre-push gate: type check + lint + unit + build + surface
+# tests — the same bar a human must clear before opening a fived PR, so the bot
+# holds itself to the same rule.
 # A fresh worktree has no node_modules and preflight requires it, so `npm ci`
 # first (unavoidable — preflight itself refuses to run without node_modules).
 [fix.verify]
 install = "npm ci --no-audit --no-fund"
-preflight = "./scripts/preflight.sh lint"
+preflight = "./scripts/preflight.sh"
 
 [fix.gate]
 max_diff_lines = 800

@@ -50,6 +50,8 @@ from bugpatrol.fix_result import (
     notify_fix_pr,
     notify_fix_revise,
     parse_fix_result,
+    render_baseline_broken_comment,
+    render_baseline_broken_lark_message,
     render_blocked_comment,
     render_conflict_instructions_markdown,
     render_fix_blocked_lark_message,
@@ -76,6 +78,7 @@ from bugpatrol.worktree import (
     worktree_merge_abort,
     worktree_merge_base,
     worktree_push_branch,
+    worktree_reset_to_head,
     worktree_unresolved_conflict_markers,
 )
 
@@ -231,8 +234,8 @@ def run_fix(
 ) -> str:
     """Full auto-fix lifecycle for one issue; returns a terminal status string.
 
-    Statuses: not_fixable, already_open_pr, blocked, verify_failed, no_changes,
-    no_output, opened_pr.
+    Statuses: not_fixable, already_open_pr, blocked, verify_failed,
+    baseline_broken, no_changes, no_output, opened_pr.
     """
     if config.fix is None:
         raise ValueError("project config has no [fix] table; auto-fix is not enabled")
@@ -644,8 +647,18 @@ def execute_fix_run(
         return "no_output"
     result = parse_fix_result(json.loads(plan.output_path.read_text()))
 
-    verify_outcomes = run_verify_commands(fix=fix, cwd=plan.agent_cwd)
-    if not verify_all_passed(verify_outcomes):
+    status, verify_outcomes = _verify_with_baseline_attribution(fix=fix, worktree=plan.agent_cwd)
+    if status == "baseline_broken":
+        _post_baseline_broken(
+            config=config,
+            issue=issue,
+            base_branch=plan.base_branch,
+            verify_outcomes=verify_outcomes,
+            github=github,
+            lark=lark,
+        )
+        return "baseline_broken"
+    if status == "fix_failed":
         _post_verify_failed(
             config=config,
             issue=issue,
@@ -771,6 +784,61 @@ def _post_verify_failed(
         repo=config.github_repo,
         issue_number=issue.number,
         body=render_verify_failed_comment(verify_outcomes=verify_outcomes),
+    )
+
+
+def _verify_with_baseline_attribution(*, fix, worktree: Path):
+    """Run the verify gate and, on failure, attribute it.
+
+    A failing gate could mean the fix is wrong OR that the target branch is
+    already red (in which case blaming the fix is misleading and we should not
+    keep grinding). So when the post-fix run fails, reset the worktree back to
+    the untouched base HEAD (keeping node_modules) and run the SAME gate again:
+    if the pristine baseline also fails, the failure is not the fix's fault.
+
+    Returns ``(status, outcomes)`` where status is:
+      - "passed"          — outcomes is the successful post-fix run
+      - "fix_failed"      — outcomes is the failing post-fix run (baseline is green)
+      - "baseline_broken" — outcomes is the failing baseline run
+    """
+    outcomes = run_verify_commands(fix=fix, cwd=worktree)
+    if verify_all_passed(outcomes):
+        return "passed", outcomes
+    worktree_reset_to_head(worktree)
+    baseline = run_verify_commands(fix=fix, cwd=worktree)
+    if not verify_all_passed(baseline):
+        return "baseline_broken", baseline
+    return "fix_failed", outcomes
+
+
+def _post_baseline_broken(
+    *,
+    config: ProjectConfig,
+    issue: GitHubIssue,
+    base_branch: str,
+    verify_outcomes,
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient | None,
+) -> None:
+    if lark is not None:
+        send_intake_topic_message(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            github=github,
+            lark=lark,
+            text=render_baseline_broken_lark_message(
+                issue_number=issue.number,
+                issue_url=issue.url,
+                base_branch=base_branch,
+                verify_outcomes=verify_outcomes,
+            ),
+        )
+    github.add_issue_comment(
+        repo=config.github_repo,
+        issue_number=issue.number,
+        body=render_baseline_broken_comment(
+            base_branch=base_branch, verify_outcomes=verify_outcomes
+        ),
     )
 
 

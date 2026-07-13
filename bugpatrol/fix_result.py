@@ -183,6 +183,51 @@ def render_blocked_comment(*, reason: str) -> str:
     return "\n".join(["## BugPatrol 自动修复已跳过", "", reason, "", "未开 PR，待人工处理。"])
 
 
+def render_baseline_broken_lark_message(
+    *,
+    issue_number: int,
+    issue_url: str,
+    base_branch: str,
+    verify_outcomes: tuple[VerifyOutcome, ...],
+) -> str:
+    lines = [
+        f"⚠️ 目标分支 `{base_branch}` 自身未通过验证（baseline 本就红），"
+        f"GitHub issue [#{issue_number}]({issue_url})",
+        "把修复回退到未改动的 baseline 后同一验证仍失败，所以这不是本次修复引入的：",
+    ]
+    for outcome in verify_outcomes:
+        mark = "✅" if outcome.ok else "❌"
+        lines.append(f"{mark} {outcome.label}（exit {outcome.returncode}）")
+    lines.append(f"已暂停修复，未开 PR。请先修复 `{base_branch}` 的 baseline，绿了之后再重跑修复。")
+    return "\n".join(lines)
+
+
+def render_baseline_broken_comment(
+    *,
+    base_branch: str,
+    verify_outcomes: tuple[VerifyOutcome, ...],
+) -> str:
+    lines = [
+        "## BugPatrol 暂停修复：目标分支 baseline 本就红",
+        "",
+        f"把本次修复回退到未改动的 `{base_branch}` baseline 后，同一验证命令仍然失败，"
+        "说明失败不是本次修复引入的，而是目标分支自身已经红了：",
+        "",
+    ]
+    for outcome in verify_outcomes:
+        mark = "✅" if outcome.ok else "❌"
+        lines.append(f"- {mark} `{outcome.label}` (`{outcome.command}`, exit {outcome.returncode})")
+        tail = outcome.stderr_tail or outcome.stdout_tail
+        if not outcome.ok and tail:
+            lines.append("")
+            lines.append("```")
+            lines.append(tail)
+            lines.append("```")
+    lines.append("")
+    lines.append(f"已暂停修复、未开 PR。请先让 `{base_branch}` 的 baseline 通过验证，然后重跑修复。")
+    return "\n".join(lines)
+
+
 def notify_fix_pr(
     *,
     repo: str,
