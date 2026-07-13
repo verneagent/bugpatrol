@@ -383,7 +383,7 @@ class FixNotifyTest(unittest.TestCase):
         self.assertEqual(len(lark.replies), 1)
         self.assertEqual(github.created[0].comments, [])
 
-    def test_notification_text_uses_bare_clickable_urls_and_commit_link(self) -> None:
+    def test_notification_text_uses_masked_short_links_and_commit_link(self) -> None:
         issue = GitHubIssue(
             number=3982,
             title="bug",
@@ -392,18 +392,18 @@ class FixNotifyTest(unittest.TestCase):
             state="closed",
         )
         text = render_fix_notification_text(
-            issue=issue, event="pr_merged", repo="o/r", pr="3983", commit="abc123def456"
+            issue=issue, event="pr_merged", repo="o/r", pr="3983", commit="abc123def4567890"
         )
-        # Bare URLs on their own line so Lark auto-linkifies them; no inert
-        # markdown or owner/repo#N shorthand.
-        self.assertIn("https://github.com/o/r/pull/3983", text)
-        self.assertIn("https://github.com/o/r/commit/abc123def456", text)
-        self.assertIn("https://github.com/o/r/issues/3982", text)
-        self.assertNotIn("[#3982]", text)
+        # Masked markdown links: short label displayed, full URL only in href.
+        # reply_to_message renders these as clickable Lark post links.
+        self.assertIn("[#3983](https://github.com/o/r/pull/3983)", text)
+        self.assertIn("[abc123def456](https://github.com/o/r/commit/abc123def4567890)", text)
+        self.assertIn("[#3982](https://github.com/o/r/issues/3982)", text)
+        # No bare full URL sitting in the visible text, no owner/repo#N shorthand.
+        self.assertNotIn("：https://", text)
         self.assertNotIn("o/r#3983", text)
-        for url in ("pull/3983", "commit/abc123def456", "issues/3982"):
-            line = next(l for l in text.splitlines() if url in l)
-            self.assertTrue(line.startswith("https://"), f"URL not bare on its line: {line!r}")
+        # commit display is truncated to 12 chars.
+        self.assertNotIn("abc123def4567890]", text)
 
     def test_withdrawn_message_is_tolerated_and_still_records_marker(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

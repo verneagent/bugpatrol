@@ -201,14 +201,17 @@ def render_fix_notification_text(
     pr: str = "",
     commit: str = "",
 ) -> str:
-    # Lark text messages only auto-linkify *bare* URLs sitting on their own
-    # line — markdown `[text](url)` and `owner/repo#N` shorthand render as inert
-    # plain text. So every reference is emitted as a full URL on its own line.
+    # `reply_to_message` turns markdown `[text](url)` into masked Lark links (a
+    # rich-text "post"), so every reference is a short label (`#3983`, a 12-char
+    # SHA) that is clickable — never a bare full URL or inert `owner/repo#N`.
+    def _link(label: str, url: str) -> str:
+        return f"[{label}]({url})"
+
     def _pr_lines(verb: str) -> list[str]:
         number = _normalize_pr(pr)
-        lines = [f"修复 PR 已{verb}：#{number}", f"https://github.com/{repo}/pull/{number}"]
+        lines = [f"修复 PR 已{verb}：{_link(f'#{number}', f'https://github.com/{repo}/pull/{number}')}"]
         if commit:
-            lines += ["修复 commit：", f"https://github.com/{repo}/commit/{commit}"]
+            lines.append(f"关联 commit：{_link(commit[:12], f'https://github.com/{repo}/commit/{commit}')}")
         return lines
 
     if event == "pr_opened":
@@ -216,12 +219,12 @@ def render_fix_notification_text(
     elif event == "pr_merged":
         lines = _pr_lines("合并")
     elif event == "commit_linked":
-        lines = [f"关联修复 commit：{commit[:12]}", f"https://github.com/{repo}/commit/{commit}"]
+        lines = [f"关联修复 commit：{_link(commit[:12], f'https://github.com/{repo}/commit/{commit}')}"]
     elif event == "issue_fixed":
         lines = ["该问题已标记修复"]
     else:
         raise ValueError(f"unsupported fix event: {event}")
-    lines += [f"Issue #{issue.number}", issue.url]
+    lines.append(f"Issue {_link(f'#{issue.number}', issue.url)}")
     return "\n".join(lines)
 
 
