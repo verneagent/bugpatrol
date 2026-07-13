@@ -14,6 +14,7 @@ class GitHubIssue:
     body: str
     state: str = ""
     state_reason: str = ""
+    closed_at: str = ""
     assignees: tuple[str, ...] = ()
 
 
@@ -67,6 +68,7 @@ class GitHubPullRequest:
     closing_issue_numbers: tuple[int, ...] = ()
     timeline_issue_numbers: tuple[int, ...] = ()
     base_ref: str = ""
+    merged_at: str = ""
 
 
 class GitHubIssuesClient(Protocol):

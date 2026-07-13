@@ -390,6 +390,12 @@ def main(argv: list[str] | None = None) -> int:
         default=100,
         help="closed issues to scan with --from-github",
     )
+    reconcile_fix.add_argument(
+        "--since-days",
+        type=int,
+        default=0,
+        help="only backfill fix events within the last N days (0 = no window)",
+    )
     reconcile_fix.add_argument("--write", action="store_true", help="send Lark notifications and write metadata")
 
     cleanup_assets = sub.add_parser("cleanup-assets", help="dry-run or delete materialized asset repo files")
@@ -1064,6 +1070,7 @@ def main(argv: list[str] | None = None) -> int:
                 github=github,
                 pr_limit=args.pr_limit,
                 closed_issue_limit=args.closed_issue_limit,
+                since_days=args.since_days,
             )
         else:
             candidates = fix_event_candidates_from_json(json.loads(args.input.read_text()))

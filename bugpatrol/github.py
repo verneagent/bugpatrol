@@ -85,7 +85,7 @@ class GitHubCliIssuesClient:
                 "--limit",
                 str(self._search_limit),
                 "--json",
-                "number,url,title,body",
+                "number,url,title,body,state,stateReason,closedAt",
             ]
         )
         return tuple(
@@ -94,6 +94,9 @@ class GitHubCliIssuesClient:
                 url=str(item["url"]),
                 title=str(item["title"]),
                 body=str(item.get("body") or ""),
+                state=str(item.get("state") or ""),
+                state_reason=str(item.get("stateReason") or ""),
+                closed_at=str(item.get("closedAt") or ""),
             )
             for item in json.loads(result.stdout)
         )
@@ -271,7 +274,7 @@ class GitHubCliIssuesClient:
                 "--limit",
                 str(limit),
                 "--json",
-                "number,url,title,body,closingIssuesReferences",
+                "number,url,title,body,closingIssuesReferences,mergedAt",
             ]
         )
         pulls: list[GitHubPullRequest] = []
@@ -289,6 +292,7 @@ class GitHubCliIssuesClient:
                     title=str(data.get("title") or ""),
                     body=str(data.get("body") or ""),
                     closing_issue_numbers=tuple(closing_numbers),
+                    merged_at=str(data.get("mergedAt") or ""),
                 )
             )
         return tuple(pulls)

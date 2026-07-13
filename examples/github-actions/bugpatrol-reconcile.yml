@@ -107,6 +107,10 @@ jobs:
           args=(
             "$BUGPATROL_PROJECT_CONFIG"
             --from-github
+            # Periodic safety net: only backfill fixes from the last 2 weeks.
+            # Older events were either already notified live or covered by an
+            # earlier reconcile; a bounded window keeps API calls finite.
+            --since-days 14
           )
           # Scheduled runs always apply; manual runs honor the write toggle.
           if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.write }}" == "true" ]]; then

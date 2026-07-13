@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment, GitHubPullRequest, LarkMessengerClient
@@ -312,22 +313,32 @@ def collect_fix_candidates_from_github(
     github: GitHubCliIssuesClient,
     pr_limit: int = 30,
     closed_issue_limit: int = 100,
+    since_days: int = 0,
 ) -> tuple[FixEventCandidate, ...]:
     """Gather fix candidates from GitHub instead of a hand-authored JSON file.
 
-    Sources (all resolved to BugPatrol-managed issues only):
+    Only issues with concrete fix *evidence* qualify (the evidence gate):
       - recently merged PRs -> `pr_merged` per managed closing/referenced issue,
-      - recently closed managed issues -> `issue_fixed`,
-      - fix-related commits on those issues' timelines -> `commit_linked`.
+      - closed-as-`completed` managed issues carrying a linked fix commit on
+        their timeline -> `commit_linked`, unless the same issue is already
+        covered by a merged-PR notification (that PR is the canonical signal).
+
+    An issue closed with no merged PR and no linked fix commit — closed as
+    `not_planned`/duplicate, or manually closed with no work — carries no
+    evidence and is skipped, so reconcile never announces a "fix" that never
+    happened. `since_days > 0` bounds the backfill to a recent window (by PR
+    `merged_at` / issue `closed_at`); `0` disables the window.
 
     Candidates already covered by BUGPATROL_FIX_META are not filtered here; the
     downstream reconcile treats them as duplicates and skips the re-notify, so
     the dedup stays in one place. Bounded by `pr_limit` / `closed_issue_limit`
     to keep the API-call count (and timeline lookups) finite.
     """
+    cutoff = _window_cutoff(since_days)
     candidates: list[FixEventCandidate] = []
     seen: set[tuple[str, int | None, str, str]] = set()
     managed_cache: dict[int, bool] = {}
+    pr_covered: set[int] = set()
 
     def _managed(issue_number: int) -> bool:
         if issue_number not in managed_cache:
@@ -343,8 +354,11 @@ def collect_fix_candidates_from_github(
         candidates.append(candidate)
 
     for pull in github.list_merged_pull_requests(repo=repo, limit=pr_limit):
+        if not _within_window(pull.merged_at, cutoff):
+            continue
         for issue_number in associated_issue_numbers_from_pr(pull):
             if _managed(issue_number):
+                pr_covered.add(issue_number)
                 _add(
                     FixEventCandidate(
                         event="pr_merged",
@@ -357,7 +371,12 @@ def collect_fix_candidates_from_github(
         if parse_intake_metadata(issue.body or "") is None:
             continue
         managed_cache[issue.number] = True
-        _add(FixEventCandidate(event="issue_fixed", issue_number=issue.number))
+        if issue.state_reason.lower() != "completed":
+            continue
+        if not _within_window(issue.closed_at, cutoff):
+            continue
+        if issue.number in pr_covered:
+            continue
         timeline = github.list_issue_timeline(repo=repo, issue_number=issue.number)
         for commit in linked_commits_from_timeline(timeline):
             _add(
@@ -369,6 +388,43 @@ def collect_fix_candidates_from_github(
             )
 
     return tuple(candidates)
+
+
+def _window_cutoff(since_days: int) -> datetime | None:
+    """Earliest allowed timestamp for a bounded backfill (None = no window)."""
+    if since_days <= 0:
+        return None
+    return datetime.now(timezone.utc) - timedelta(days=since_days)
+
+
+def _within_window(timestamp: str, cutoff: datetime | None) -> bool:
+    """True when `timestamp` is at or after `cutoff` (None cutoff = unbounded).
+
+    With an active window, a missing or unparseable timestamp returns False: the
+    event can't be placed in time, so a bounded backfill deliberately skips it
+    rather than risk re-announcing ancient history.
+    """
+    if cutoff is None:
+        return True
+    parsed = _parse_github_timestamp(timestamp)
+    if parsed is None:
+        return False
+    return parsed >= cutoff
+
+
+def _parse_github_timestamp(value: str) -> datetime | None:
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def linked_commits_from_timeline(

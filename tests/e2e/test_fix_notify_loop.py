@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from bugpatrol.clients import GitHubPullRequest
@@ -20,7 +21,11 @@ class _CollectingFakeGitHub(FakeGitHubIssuesClient):
     """Fake that also serves the merged-PR / timeline surfaces reconcile scans."""
 
     def list_issues(self, *, repo: str, state: str = "open"):
-        return tuple(item.issue for item in self.created if item.repo == repo)
+        return tuple(
+            replace(item.issue, state="closed", state_reason="completed", closed_at="2026-07-10T00:00:00Z")
+            for item in self.created
+            if item.repo == repo
+        )
 
     def list_merged_pull_requests(self, *, repo: str, limit: int = 30):
         return (
@@ -30,6 +35,7 @@ class _CollectingFakeGitHub(FakeGitHubIssuesClient):
                 title="Fix",
                 body="Closes #1",
                 closing_issue_numbers=(1,),
+                merged_at="2026-07-10T00:00:00Z",
             ),
         )
 
@@ -140,20 +146,14 @@ class FixNotifyLoopE2ETest(unittest.TestCase):
             repo=config.github_repo,
             github=github,  # type: ignore[arg-type]
         )
-        # Merged PR, closed managed issue, and the linked commit all surface.
+        # The merged PR is the canonical fix signal. Because #1 is PR-covered the
+        # timeline commit is suppressed, and the evidence-less issue_fixed is gone.
         self.assertIn(
             FixEventCandidate(event="pr_merged", issue_number=issue.number, pr="456"),
             candidates,
         )
-        self.assertIn(
-            FixEventCandidate(event="issue_fixed", issue_number=issue.number), candidates
-        )
-        self.assertIn(
-            FixEventCandidate(
-                event="commit_linked", issue_number=issue.number, commit="deadbeef"
-            ),
-            candidates,
-        )
+        self.assertFalse(any(c.event == "issue_fixed" for c in candidates))
+        self.assertFalse(any(c.event == "commit_linked" for c in candidates))
 
         first = reconcile_fix_notifications(
             repo=config.github_repo,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bugpatrol.config import load_project_config
@@ -253,8 +254,10 @@ class FixNotifyTest(unittest.TestCase):
 
         self.assertEqual(linked_commits_from_timeline(events), ("abc", "def"))
 
-    def test_collect_fix_candidates_from_github_gathers_managed_only(self) -> None:
+    def _collector_fake(self):
         managed_body = '<!-- BUGPATROL_INTAKE_META:{"chat_id":"oc_1","root_id":"om_1"} -->'
+        recent = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        old = (datetime.now(timezone.utc) - timedelta(days=100)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         class CollectorFake:
             def list_merged_pull_requests(self, *, repo: str, limit: int = 30):
@@ -265,6 +268,7 @@ class FixNotifyTest(unittest.TestCase):
                         title="Fix",
                         body="Closes #1",
                         closing_issue_numbers=(1,),
+                        merged_at=recent,
                     ),
                     GitHubPullRequest(
                         number=51,
@@ -272,11 +276,12 @@ class FixNotifyTest(unittest.TestCase):
                         title="Fix",
                         body="Closes #9",
                         closing_issue_numbers=(9,),
+                        merged_at=recent,
                     ),
                 )
 
             def get_issue(self, *, repo: str, issue_number: int) -> GitHubIssue:
-                body = managed_body if issue_number == 1 else "unmanaged"
+                body = "unmanaged" if issue_number == 9 else managed_body
                 return GitHubIssue(
                     number=issue_number,
                     url=f"https://github.test/o/r/issues/{issue_number}",
@@ -286,40 +291,64 @@ class FixNotifyTest(unittest.TestCase):
 
             def list_issues(self, *, repo: str, state: str = "open"):
                 return (
-                    GitHubIssue(
-                        number=1,
-                        url="https://github.test/o/r/issues/1",
-                        title="bug",
-                        body=managed_body,
-                    ),
-                    GitHubIssue(
-                        number=9,
-                        url="https://github.test/o/r/issues/9",
-                        title="bug",
-                        body="unmanaged",
-                    ),
+                    # #1: PR-covered -> its commit must be suppressed.
+                    GitHubIssue(1, "https://github.test/o/r/issues/1", "bug", managed_body,
+                                state="closed", state_reason="completed", closed_at=recent),
+                    # #2: completed with a linked fix commit, no PR -> commit_linked.
+                    GitHubIssue(2, "https://github.test/o/r/issues/2", "bug", managed_body,
+                                state="closed", state_reason="completed", closed_at=recent),
+                    # #3: not_planned -> no evidence, skipped even with a commit.
+                    GitHubIssue(3, "https://github.test/o/r/issues/3", "bug", managed_body,
+                                state="closed", state_reason="not_planned", closed_at=recent),
+                    # #4: completed but closed long ago -> outside a recent window.
+                    GitHubIssue(4, "https://github.test/o/r/issues/4", "bug", managed_body,
+                                state="closed", state_reason="completed", closed_at=old),
+                    # #9: unmanaged -> skipped.
+                    GitHubIssue(9, "https://github.test/o/r/issues/9", "bug", "unmanaged",
+                                state="closed", state_reason="completed", closed_at=recent),
                 )
 
             def list_issue_timeline(self, *, repo: str, issue_number: int):
-                if issue_number == 1:
-                    return ({"event": "referenced", "commit_id": "cafef00d"},)
-                return ()
+                commits = {1: "cafef00d", 2: "deadbeef", 3: "c0ffee00", 4: "0ldc0de0"}
+                sha = commits.get(issue_number)
+                return ({"event": "referenced", "commit_id": sha},) if sha else ()
 
+        return CollectorFake()
+
+    def test_collect_fix_candidates_evidence_gate(self) -> None:
         candidates = collect_fix_candidates_from_github(
             repo="o/r",
-            github=CollectorFake(),  # type: ignore[arg-type]
+            github=self._collector_fake(),  # type: ignore[arg-type]
         )
 
-        self.assertIn(
-            FixEventCandidate(event="pr_merged", issue_number=1, pr="50"), candidates
+        # PR-covered issue #1 -> pr_merged only; its timeline commit is suppressed.
+        self.assertIn(FixEventCandidate(event="pr_merged", issue_number=1, pr="50"), candidates)
+        self.assertFalse(
+            any(c.event == "commit_linked" and c.issue_number == 1 for c in candidates)
         )
-        self.assertIn(FixEventCandidate(event="issue_fixed", issue_number=1), candidates)
+        # #2: completed + linked commit + no PR -> commit_linked.
         self.assertIn(
-            FixEventCandidate(event="commit_linked", issue_number=1, commit="cafef00d"),
+            FixEventCandidate(event="commit_linked", issue_number=2, commit="deadbeef"),
             candidates,
         )
-        # Unmanaged issue #9 must not appear in any form.
+        # #3 closed as not_planned carries no evidence -> nothing.
+        self.assertFalse(any(c.issue_number == 3 for c in candidates))
+        # Unmanaged #9 never appears; generic issue_fixed is no longer emitted.
         self.assertFalse(any(c.issue_number == 9 for c in candidates))
+        self.assertFalse(any(c.event == "issue_fixed" for c in candidates))
+
+    def test_collect_fix_candidates_since_days_window(self) -> None:
+        candidates = collect_fix_candidates_from_github(
+            repo="o/r",
+            github=self._collector_fake(),  # type: ignore[arg-type]
+            since_days=30,
+        )
+        # #2 (closed 2 days ago) is inside the window; #4 (100 days) is not.
+        self.assertIn(
+            FixEventCandidate(event="commit_linked", issue_number=2, commit="deadbeef"),
+            candidates,
+        )
+        self.assertFalse(any(c.issue_number == 4 for c in candidates))
 
     def test_notify_fix_dry_run_does_not_send_or_write(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
