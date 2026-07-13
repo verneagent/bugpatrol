@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from bugpatrol.agents import AgentInvocation
 from bugpatrol.clients import (
+    FailedRun,
     GitHubIssue,
     GitHubIssueComment,
     OpenPullRequest,
@@ -25,9 +26,12 @@ from bugpatrol.fix_runner import (
     prepare_fix_run,
     read_triage_verdict,
     render_fix_context_markdown,
+    run_build_ready,
+    run_ci_fix,
     run_fix,
     run_fix_revise,
 )
+from bugpatrol.fix_result import append_ci_fix_metadata
 from bugpatrol.intake import IntakeRecord, render_issue_body
 from bugpatrol.triage_result import append_triage_metadata
 
@@ -55,6 +59,9 @@ class FakeGithub:
         assignees=(),
         open_pull_request: OpenPullRequest | None = None,
         review_threads=(),
+        pr_comment_bodies=(),
+        failed_runs=(),
+        failed_logs=None,
     ) -> None:
         self.comments = list(comments or [])
         self.added_comments: list[str] = []
@@ -66,6 +73,9 @@ class FakeGithub:
         self.review_threads = tuple(review_threads)
         self.resolved_threads: list[str] = []
         self.pr_comments: list[dict] = []
+        self.pr_comment_bodies = list(pr_comment_bodies)
+        self.failed_runs = tuple(failed_runs)
+        self.failed_logs = dict(failed_logs or {})
 
     def get_issue(self, *, repo: str, issue_number: int) -> GitHubIssue:
         return GitHubIssue(
@@ -103,6 +113,20 @@ class FakeGithub:
 
     def add_pull_request_comment(self, *, repo, pr, body) -> None:
         self.pr_comments.append({"pr": pr, "body": body})
+        # A posted meta marker becomes visible to a subsequent read (de-dupe).
+        self.pr_comment_bodies.append(body)
+
+    def list_pull_request_comments(self, *, repo, pr_number):
+        return tuple(
+            GitHubIssueComment(id=str(i + 1), body=b)
+            for i, b in enumerate(self.pr_comment_bodies)
+        )
+
+    def list_failed_runs_for_sha(self, *, repo, head_sha):
+        return self.failed_runs
+
+    def get_run_failed_logs(self, *, repo, run_id):
+        return self.failed_logs.get(run_id, "")
 
 
 class FakeIssueFields:
@@ -649,6 +673,183 @@ class RunFixReviseConflictEscalationTest(unittest.TestCase):
             self.assertEqual(status, "conflict_escalated")
             self.assertTrue(any("人工" in c["body"] for c in github.pr_comments))
             self.assertFalse(github.resolved_threads)
+
+
+def _make_fix_remote(root: Path) -> Path:
+    """origin with a pushed fix branch; returns a base_repo clone (origin set).
+
+    Mirrors _make_conflicting_fix_remote but the fix branch does NOT conflict
+    with main, so fix_revise_worktree checks out a clean tip the CI-fix agent
+    can edit and push.
+    """
+    origin = root / "origin"
+    origin.mkdir()
+    subprocess.run(["git", "-C", str(origin), "init", "-q", "-b", "main"], check=True)
+    for k, v in (("user.email", "t@t.test"), ("user.name", "t")):
+        subprocess.run(["git", "-C", str(origin), "config", k, v], check=True)
+    (origin / "src").mkdir()
+    (origin / "src" / "todo.ts").write_text("export const x = 1\n")
+    subprocess.run(["git", "-C", str(origin), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(origin), "commit", "-q", "-m", "init"], check=True)
+    subprocess.run(
+        ["git", "-C", str(origin), "checkout", "-q", "-b", "bugpatrol/fix-issue-7"], check=True
+    )
+    (origin / "src" / "todo.ts").write_text("export const x = 1\n// fix\n")
+    subprocess.run(["git", "-C", str(origin), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(origin), "commit", "-q", "-m", "fix"], check=True)
+    subprocess.run(["git", "-C", str(origin), "checkout", "-q", "main"], check=True)
+
+    base_repo = root / "base"
+    subprocess.run(
+        ["git", "clone", "-q", str(origin), str(base_repo)], check=True, capture_output=True
+    )
+    for k, v in (("user.email", "t@t.test"), ("user.name", "t")):
+        subprocess.run(["git", "-C", str(base_repo), "config", k, v], check=True)
+    return base_repo
+
+
+class RunCiFixGuardsTest(unittest.TestCase):
+    def _run(self, github, base_repo, tmp):
+        return run_ci_fix(
+            config=_sandbox_config(),
+            issue_number=7,
+            head_sha="deadbeef",
+            base_repo=base_repo,
+            output_dir=Path(tmp) / "out",
+            github=github,  # type: ignore[arg-type]
+            issue_fields=FakeIssueFields("代码 Bug"),  # type: ignore[arg-type]
+        )
+
+    def test_no_pr_when_no_open_fix_pr(self) -> None:
+        github = FakeGithub(open_pull_request=None)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._run(github, Path(tmp), tmp), "no_pr")
+
+    def test_sha_already_handled_short_circuits(self) -> None:
+        pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
+        github = FakeGithub(
+            open_pull_request=pr,
+            pr_comment_bodies=[
+                append_ci_fix_metadata("x", {"attempts": 1, "last_fixed_sha": "deadbeef"})
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._run(github, Path(tmp), tmp), "ci_already_handled")
+
+    def test_no_ci_failure_when_no_failed_runs(self) -> None:
+        pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
+        github = FakeGithub(open_pull_request=pr, failed_runs=())
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._run(github, Path(tmp), tmp), "no_ci_failure")
+
+    def test_escalates_at_attempt_cap(self) -> None:
+        pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
+        github = FakeGithub(
+            open_pull_request=pr,
+            failed_runs=(FailedRun(run_id=1, name="iOS Build", workflow_name="iOS Build"),),
+            pr_comment_bodies=[
+                append_ci_fix_metadata("x", {"attempts": 3, "last_fixed_sha": "older"})
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            status = self._run(github, Path(tmp), tmp)
+        self.assertEqual(status, "ci_fix_escalated")
+        # The escalation PR comment carries the de-dupe marker at this sha.
+        self.assertTrue(any("人工" in c["body"] for c in github.pr_comments))
+        meta = None
+        from bugpatrol.fix_result import parse_ci_fix_metadata
+
+        for c in github.pr_comments:
+            meta = parse_ci_fix_metadata(c["body"]) or meta
+        assert meta is not None
+        self.assertEqual(meta["last_fixed_sha"], "deadbeef")
+
+
+class RunCiFixEndToEndTest(unittest.TestCase):
+    def test_ci_fixed_edits_pushes_and_records_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_repo = _make_fix_remote(root)
+            config = replace(_sandbox_config(), fix=replace(_sandbox_config().fix, verify={"ok": "true"}))
+            pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
+            github = FakeGithub(
+                open_pull_request=pr,
+                assignees=("dev1",),
+                failed_runs=(FailedRun(run_id=1, name="iOS Build", workflow_name="iOS Build"),),
+                failed_logs={1: "error: boom"},
+            )
+            # Patch the agent invocation to a real command that edits + writes output.
+            real_prepare = prepare_fix_run
+
+            def fake_prepare(**kwargs):
+                plan = real_prepare(**kwargs)
+                command = ExecuteFixRunTest._edit_and_write_output(
+                    plan.agent_cwd, plan.output_path
+                )
+                return replace(
+                    plan,
+                    invocation=replace(plan.invocation, command=command),
+                )
+
+            with patch("bugpatrol.fix_runner.prepare_fix_run", side_effect=fake_prepare), patch(
+                "bugpatrol.fix_runner.worktree_push_branch"
+            ) as push:
+                status = run_ci_fix(
+                    config=config,
+                    issue_number=7,
+                    head_sha="deadbeef",
+                    base_repo=base_repo,
+                    output_dir=root / "out",
+                    github=github,  # type: ignore[arg-type]
+                    issue_fields=FakeIssueFields("代码 Bug"),  # type: ignore[arg-type]
+                )
+            self.assertEqual(status, "ci_fixed")
+            push.assert_called_once()
+            self.assertFalse(github.created_prs)
+            from bugpatrol.fix_result import parse_ci_fix_metadata
+
+            metas = [parse_ci_fix_metadata(c["body"]) for c in github.pr_comments]
+            metas = [m for m in metas if m is not None]
+            self.assertTrue(metas)
+            self.assertEqual(metas[-1]["last_fixed_sha"], "deadbeef")
+            self.assertEqual(metas[-1]["attempts"], 1)
+
+
+class RunBuildReadyTest(unittest.TestCase):
+    def _run(self, github):
+        return run_build_ready(
+            config=_sandbox_config(),
+            issue_number=7,
+            head_sha="deadbeef",
+            github=github,  # type: ignore[arg-type]
+        )
+
+    def test_no_pr(self) -> None:
+        self.assertEqual(self._run(FakeGithub(open_pull_request=None)), "no_pr")
+
+    def test_already_notified_short_circuits(self) -> None:
+        pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
+        github = FakeGithub(
+            open_pull_request=pr,
+            pr_comment_bodies=[
+                append_ci_fix_metadata("x", {"last_notified_sha": "deadbeef"})
+            ],
+        )
+        self.assertEqual(self._run(github), "build_already_notified")
+
+    def test_notifies_once_and_records_marker(self) -> None:
+        pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
+        github = FakeGithub(open_pull_request=pr, assignees=("dev1",))
+        self.assertEqual(self._run(github), "build_notified")
+        self.assertTrue(any("可测试" in c for c in github.added_comments))
+        from bugpatrol.fix_result import parse_ci_fix_metadata
+
+        metas = [parse_ci_fix_metadata(c["body"]) for c in github.pr_comments]
+        metas = [m for m in metas if m is not None]
+        self.assertTrue(metas)
+        self.assertEqual(metas[-1]["last_notified_sha"], "deadbeef")
+        # A second event for the same sha now de-dupes.
+        self.assertEqual(self._run(github), "build_already_notified")
 
 
 if __name__ == "__main__":

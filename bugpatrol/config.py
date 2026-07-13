@@ -205,6 +205,10 @@ class FixConfig:
     # reporter's Lark topic during a long fix run. 0 disables it. See
     # docs/PROGRESS-REPORTER.md.
     progress_heartbeat_seconds: int = 300
+    # When a fix PR's CI build fails, the CI-fix loop feeds the failing logs back
+    # to the revise agent and retries, but only up to this many attempts per PR
+    # before escalating to a human. See docs/CI-FIX-FEEDBACK.md.
+    max_ci_fix_attempts: int = 3
     # Optional [fix.agent] override. When set it decides the fix agent's
     # provider/model independently of triage (e.g. triage on deepseek, fix on
     # claude). When None the fix runner inherits triage_agent. runner_labels are
@@ -449,6 +453,9 @@ def _parse_fix(data: dict[str, Any]) -> FixConfig | None:
     max_conflict_files = _num(gate, "max_conflict_files", 5)
     if max_conflict_files <= 0:
         raise ValueError("fix.gate.max_conflict_files must be positive")
+    max_ci_fix_attempts = _num(gate, "max_ci_fix_attempts", 3)
+    if max_ci_fix_attempts <= 0:
+        raise ValueError("fix.gate.max_ci_fix_attempts must be positive")
     protected_globs = gate.get("protected_globs")
     if protected_globs is None:
         protected = DEFAULT_FIX_PROTECTED_GLOBS
@@ -501,6 +508,7 @@ def _parse_fix(data: dict[str, Any]) -> FixConfig | None:
         branch_prefix=branch_prefix,
         max_concurrent_per_device=max_concurrent,
         progress_heartbeat_seconds=progress_heartbeat,
+        max_ci_fix_attempts=max_ci_fix_attempts,
         agent=agent,
     )
 

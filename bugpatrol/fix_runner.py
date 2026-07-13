@@ -44,8 +44,13 @@ from bugpatrol.fix_gate import (
 )
 from bugpatrol.fix_result import (
     FixResult,
+    append_ci_fix_metadata,
     build_pr_body,
     fix_result_fingerprint,
+    latest_ci_fix_meta,
+    notify_build_ready,
+    notify_ci_escalation,
+    notify_ci_fix,
     notify_conflict_escalation,
     notify_fix_pr,
     notify_fix_revise,
@@ -53,6 +58,7 @@ from bugpatrol.fix_result import (
     render_baseline_broken_comment,
     render_baseline_broken_lark_message,
     render_blocked_comment,
+    render_ci_fix_feedback_markdown,
     render_conflict_instructions_markdown,
     render_fix_blocked_lark_message,
     render_review_feedback_markdown,
@@ -571,6 +577,288 @@ def _revise_commit_message(
     if has_conflict:
         return f"fix: merge {base_branch} to resolve conflicts (#{issue_number})"
     return f"fix: address review feedback (#{issue_number})"
+
+
+def run_ci_fix(
+    *,
+    config: ProjectConfig,
+    issue_number: int,
+    head_sha: str,
+    base_repo: Path,
+    output_dir: Path,
+    github: GitHubCliIssuesClient,
+    issue_fields: GitHubIssueFieldsClient,
+    lark: LarkMessengerClient | None = None,
+    prompt_path: Path = Path("prompts/fix.zh.md"),
+) -> str:
+    """React to a failed PR CI build on a fix branch (the third revise trigger).
+
+    Stateless like run_fix_revise: rebuild from origin (the fix branch) and read
+    the failed runs + de-dupe meta from GitHub, so any runner can react. De-dupe
+    keys on ``head_sha`` (one push → many failed workflows → many events), not
+    run_id. Bounded by ``[fix.gate].max_ci_fix_attempts``; at the cap it escalates
+    to the PR reviewer instead of editing. Statuses: no_pr, ci_already_handled,
+    no_ci_failure, ci_fix_escalated, ci_fixed, blocked, no_changes, no_output,
+    verify_failed.
+    """
+    if config.fix is None:
+        raise ValueError("project config has no [fix] table; auto-fix is not enabled")
+    fix = config.fix
+    issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
+    require_bugpatrol_managed_issue(issue)
+
+    head_branch = fix.branch_for_issue(issue_number)
+    pr = github.get_open_pull_request_by_head(repo=config.github_repo, head=head_branch)
+    if pr is None:
+        # No open fix PR: nothing to react to (the PR may have merged/closed).
+        return "no_pr"
+    comments = github.list_pull_request_comments(repo=config.github_repo, pr_number=pr.number)
+    meta = latest_ci_fix_meta(comments)
+    if meta.get("last_fixed_sha") == head_sha:
+        # A sibling failed-run event for this same commit already reacted.
+        return "ci_already_handled"
+    failed_runs = github.list_failed_runs_for_sha(repo=config.github_repo, head_sha=head_sha)
+    if not failed_runs:
+        # The event fired but no run for this sha concluded failure (e.g. it was
+        # re-run green, or a transient/cancelled conclusion): nothing to fix.
+        return "no_ci_failure"
+
+    reviewer = issue.assignees[0] if issue.assignees else ""
+    reviewer_open_id = (config.lark.user_open_ids or {}).get(reviewer, "") if reviewer else ""
+    attempts_so_far = int(meta.get("attempts") or 0)
+    if attempts_so_far >= fix.max_ci_fix_attempts:
+        # At the cap: do not edit; hand off to the PR reviewer. Record the sha so
+        # sibling events for the same commit are de-duped (not re-escalated).
+        notify_ci_escalation(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            issue_url=issue.url,
+            pr_url=pr.url,
+            failed_names=tuple(r.workflow_name or r.name for r in failed_runs),
+            cap=fix.max_ci_fix_attempts,
+            meta={**meta, "attempts": attempts_so_far, "last_fixed_sha": head_sha},
+            github=github,
+            lark=lark,
+            reviewer_open_id=reviewer_open_id,
+        )
+        return "ci_fix_escalated"
+
+    failed_logs = tuple(
+        (
+            run.workflow_name or run.name,
+            github.get_run_failed_logs(repo=config.github_repo, run_id=run.run_id),
+        )
+        for run in failed_runs
+    )
+    with fix_revise_worktree(base_repo=base_repo, branch=head_branch) as worktree:
+        plan = prepare_fix_run(
+            config=config,
+            issue_number=issue_number,
+            worktree_path=worktree,
+            output_dir=output_dir,
+            github=github,
+            issue_fields=issue_fields,
+            base_branch="",
+            head_branch=head_branch,
+            branch_note="",
+            prompt_path=prompt_path,
+        )
+        with plan.context_path.open("a") as handle:
+            handle.write("\n\n" + render_ci_fix_feedback_markdown(failed_logs) + "\n")
+        return execute_ci_fix(
+            config=config,
+            issue=issue,
+            plan=plan,
+            pr=pr,
+            head_sha=head_sha,
+            attempt=attempts_so_far + 1,
+            prior_meta=meta,
+            github=github,
+            lark=lark,
+        )
+
+
+def execute_ci_fix(
+    *,
+    config: ProjectConfig,
+    issue: GitHubIssue,
+    plan: FixRunPlan,
+    pr: OpenPullRequest,
+    head_sha: str,
+    attempt: int,
+    prior_meta: dict,
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient | None = None,
+) -> str:
+    """Run the CI-fix agent, gate the edit, verify, push, and notify.
+
+    A CI fix is an in-scope edit, so the normal diff-size / protected-path gate
+    applies (unlike the conflict-merge path). Every terminal path records the sha
+    in the BUGPATROL_CI_FIX_META marker so sibling failed-run events for the same
+    commit are de-duped rather than re-attempted.
+    """
+    fix = config.fix
+    assert fix is not None  # run_ci_fix guards this.
+    if lark is not None:
+        send_intake_topic_message(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            github=github,
+            lark=lark,
+            text=_render_ci_fix_start_message(
+                issue_number=issue.number,
+                issue_url=issue.url,
+                attempt=attempt,
+                cap=fix.max_ci_fix_attempts,
+            ),
+        )
+    run_stats = _run_fix_agent(plan)
+
+    changed_files = worktree_changed_files(plan.agent_cwd)
+    diff_line_count = worktree_diff_line_count(plan.agent_cwd)
+    gate = evaluate_post_edit(
+        changed_files=changed_files, diff_line_count=diff_line_count, fix=fix
+    )
+    if not gate.allowed:
+        _post_blocked(config=config, issue=issue, reason=gate.reason, github=github, lark=lark)
+        _mark_ci_handled(
+            github=github, repo=config.github_repo, pr_url=pr.url,
+            prior_meta=prior_meta, attempt=attempt, head_sha=head_sha,
+        )
+        return "no_changes" if not changed_files else "blocked"
+
+    if not plan.output_path.exists():
+        _post_blocked(
+            config=config,
+            issue=issue,
+            reason="CI-fix agent edited code but wrote no output JSON summary",
+            github=github,
+            lark=lark,
+        )
+        _mark_ci_handled(
+            github=github, repo=config.github_repo, pr_url=pr.url,
+            prior_meta=prior_meta, attempt=attempt, head_sha=head_sha,
+        )
+        return "no_output"
+    result = parse_fix_result(json.loads(plan.output_path.read_text()))
+
+    verify_outcomes = run_verify_commands(fix=fix, cwd=plan.agent_cwd)
+    if not verify_all_passed(verify_outcomes):
+        _post_verify_failed(
+            config=config, issue=issue, verify_outcomes=verify_outcomes, github=github, lark=lark
+        )
+        _mark_ci_handled(
+            github=github, repo=config.github_repo, pr_url=pr.url,
+            prior_meta=prior_meta, attempt=attempt, head_sha=head_sha,
+        )
+        return "verify_failed"
+
+    if changed_files:
+        worktree_commit_all(
+            plan.agent_cwd, message=f"fix: address CI failure (#{issue.number}) [ci-fix]"
+        )
+    worktree_push_branch(plan.agent_cwd, branch=plan.head_branch)
+    # Notify BEFORE the meta marker lands (Lark-first, marker-last): the PR
+    # comment inside notify_ci_fix carries the de-dupe meta.
+    notify_ci_fix(
+        repo=config.github_repo,
+        issue_number=issue.number,
+        issue_url=issue.url,
+        pr_url=pr.url,
+        result=result,
+        attempt=attempt,
+        cap=fix.max_ci_fix_attempts,
+        meta={**prior_meta, "attempts": attempt, "last_fixed_sha": head_sha},
+        github=github,
+        lark=lark,
+        reviewer_open_id=plan.reviewer_open_id,
+        run_stats=run_stats,
+    )
+    return "ci_fixed"
+
+
+def _mark_ci_handled(
+    *,
+    github: GitHubCliIssuesClient,
+    repo: str,
+    pr_url: str,
+    prior_meta: dict,
+    attempt: int,
+    head_sha: str,
+) -> None:
+    """Record that this commit's CI failure was reacted to (de-dupe marker).
+
+    Written on the non-fixing terminal paths (blocked / no_output / verify_failed)
+    where notify_ci_fix does not run, so sibling failed-run events for the same
+    sha see last_fixed_sha and skip instead of re-attempting.
+    """
+    github.add_pull_request_comment(
+        repo=repo,
+        pr=pr_url,
+        body=append_ci_fix_metadata(
+            "BugPatrol：本次 CI 失败已处理（详情见 issue 评论）。",
+            {**prior_meta, "attempts": attempt, "last_fixed_sha": head_sha},
+        ),
+    )
+
+
+def run_build_ready(
+    *,
+    config: ProjectConfig,
+    issue_number: int,
+    head_sha: str,
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient | None = None,
+) -> str:
+    """Surface a passing fix-PR build to the issue + reporter's Lark topic.
+
+    Pure notification (no worktree, no agent, no gate): the fix PR built cleanly
+    and is testable. De-dupes on ``head_sha`` via ``last_notified_sha`` in the
+    BUGPATROL_CI_FIX_META marker so N green build workflows for one commit notify
+    once. Statuses: no_pr, build_already_notified, build_notified.
+    """
+    if config.fix is None:
+        raise ValueError("project config has no [fix] table; auto-fix is not enabled")
+    fix = config.fix
+    issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
+    require_bugpatrol_managed_issue(issue)
+
+    head_branch = fix.branch_for_issue(issue_number)
+    pr = github.get_open_pull_request_by_head(repo=config.github_repo, head=head_branch)
+    if pr is None:
+        return "no_pr"
+    comments = github.list_pull_request_comments(repo=config.github_repo, pr_number=pr.number)
+    meta = latest_ci_fix_meta(comments)
+    if meta.get("last_notified_sha") == head_sha:
+        return "build_already_notified"
+
+    assignee = issue.assignees[0] if issue.assignees else ""
+    assignee_open_id = (config.lark.user_open_ids or {}).get(assignee, "") if assignee else ""
+    notify_build_ready(
+        repo=config.github_repo,
+        issue_number=issue.number,
+        issue_url=issue.url,
+        pr_url=pr.url,
+        head_sha=head_sha,
+        meta={**meta, "last_notified_sha": head_sha},
+        github=github,
+        lark=lark,
+        assignee_open_id=assignee_open_id,
+    )
+    return "build_notified"
+
+
+def _render_ci_fix_start_message(
+    *, issue_number: int, issue_url: str, attempt: int, cap: int
+) -> str:
+    text = (
+        f"CI 构建失败，开始自动修复（第 {attempt}/{cap} 次），"
+        f"GitHub issue [#{issue_number}]({issue_url})"
+    )
+    runner = triage_runner_name()
+    if runner:
+        text += f"\n修复执行机：{runner}"
+    return text
 
 
 def _run_fix_agent(plan: FixRunPlan) -> TriageRunStats:

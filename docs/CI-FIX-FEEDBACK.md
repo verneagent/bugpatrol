@@ -1,9 +1,12 @@
 # PR CI feedback loop (design)
 
 Status: design approved 2026-07-12 (cap=3, escalate→PR reviewer, re-run all
-builds); build-ready notification added 2026-07-13. Implementation pending.
-**Prerequisite (fix + revise deployed on the target repo) is DONE on fived as of
-2026-07-13** (see "Prerequisite" below) — the loop rides on
+builds); build-ready notification added 2026-07-13. **Implemented 2026-07-13**
+(`run-ci-fix` / `run-build-ready`, `examples/github-actions/bugpatrol-ci-fix.yml`,
+`[fix.gate].max_ci_fix_attempts`; see [FIX-RUNNER.md](./FIX-RUNNER.md) → "PR CI
+feedback"). Not yet deployed on fived (needs the placeholder build-workflow names
+filled in). **Prerequisite (fix + revise deployed on the target repo) is DONE on
+fived as of 2026-07-13** (see "Prerequisite" below) — the loop rides on
 `bugpatrol/fix-issue-N` PRs, which now exist.
 
 One `workflow_run [completed]` listener, **two branches** off the run's

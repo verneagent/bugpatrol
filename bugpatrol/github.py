@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from bugpatrol.clients import (
+    FailedRun,
     GitHubIssue,
     GitHubIssueComment,
     GitHubPullRequest,
@@ -596,6 +597,87 @@ class GitHubCliIssuesClient:
             ]
         )
 
+    def list_pull_request_comments(
+        self, *, repo: str, pr_number: int
+    ) -> tuple[GitHubIssueComment, ...]:
+        """Conversation comments on a PR (PRs share the issues comments API).
+
+        Used by the CI-fix loop to read the ``BUGPATROL_CI_FIX_META`` marker and,
+        for tier-2 build-ready links, the CI bot's install-link comments.
+        """
+        result = self._run(
+            [
+                "api",
+                "-H",
+                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                f"/repos/{repo}/issues/{pr_number}/comments",
+            ]
+        )
+        data = json.loads(result.stdout)
+        return tuple(
+            GitHubIssueComment(id=str(item["id"]), body=str(item.get("body") or ""))
+            for item in data
+        )
+
+    def list_failed_runs_for_sha(
+        self, *, repo: str, head_sha: str
+    ) -> tuple[FailedRun, ...]:
+        """All CI workflow runs that concluded ``failure`` for a commit.
+
+        One revise push can trigger several build workflows; gathering every
+        failed run for the sha lets the CI-fix agent see the full failure context
+        in a single turn (and de-dupe on the sha, not per-run).
+        """
+        result = self._run(
+            [
+                "run",
+                "list",
+                "--repo",
+                repo,
+                "--commit",
+                head_sha,
+                "--json",
+                "databaseId,name,workflowName,conclusion",
+                "--limit",
+                "50",
+            ]
+        )
+        data = json.loads(result.stdout)
+        runs: list[FailedRun] = []
+        for item in data:
+            if not isinstance(item, dict) or item.get("conclusion") != "failure":
+                continue
+            run_id = item.get("databaseId")
+            if not isinstance(run_id, int):
+                continue
+            runs.append(
+                FailedRun(
+                    run_id=run_id,
+                    name=str(item.get("name") or ""),
+                    workflow_name=str(item.get("workflowName") or ""),
+                )
+            )
+        return tuple(runs)
+
+    def get_run_failed_logs(self, *, repo: str, run_id: int) -> str:
+        """The failed-step logs of a workflow run, truncated to the tail.
+
+        BugPatrol only reads the CI *result surface* (like ``[fix.verify]`` exit
+        codes), never the project's build definition. The tail keeps the actual
+        error region without flooding the agent's context.
+        """
+        result = self._run(
+            [
+                "run",
+                "view",
+                str(run_id),
+                "--repo",
+                repo,
+                "--log-failed",
+            ]
+        )
+        return _truncate_log_tail(result.stdout)
+
     def add_assignee(self, *, repo: str, issue_number: int, assignee: str) -> None:
         self._run(
             [
@@ -622,6 +704,17 @@ class GitHubCliIssuesClient:
                 f"gh {' '.join(args)} failed with exit {completed.returncode}: {completed.stderr.strip()}"
             )
         return CommandResult(stdout=completed.stdout, stderr=completed.stderr)
+
+
+def _truncate_log_tail(text: str, *, max_lines: int = 200, max_chars: int = 8000) -> str:
+    """Keep the tail of a CI log (where the error surfaces) within bounds."""
+    lines = text.splitlines()
+    if len(lines) > max_lines:
+        lines = lines[-max_lines:]
+    tail = "\n".join(lines)
+    if len(tail) > max_chars:
+        tail = tail[-max_chars:]
+    return tail
 
 
 def _issue_number_from_url(url: str) -> int:

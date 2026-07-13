@@ -6,9 +6,9 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
-from bugpatrol.clients import LarkMessengerClient, ReviewThread
+from bugpatrol.clients import GitHubIssueComment, LarkMessengerClient, ReviewThread
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fix_gate import VerifyOutcome
 from bugpatrol.github import GitHubCliIssuesClient
@@ -516,6 +516,328 @@ def notify_conflict_escalation(
         repo=repo,
         pr=pr_url,
         body=render_conflict_escalation_pr_comment(base_branch=base_branch, files=files),
+    )
+
+
+# --- CI feedback loop (PR CI failure → CI-fix, success → build-ready) ---------
+
+CI_FIX_META_START = "<!-- BUGPATROL_CI_FIX_META"
+CI_FIX_META_END = "BUGPATROL_CI_FIX_META -->"
+CI_FIX_META_RE = re.compile(
+    rf"{re.escape(CI_FIX_META_START)}\s*(.*?)\s*{re.escape(CI_FIX_META_END)}",
+    re.DOTALL,
+)
+
+
+def parse_ci_fix_metadata(comment_body: str) -> dict[str, Any] | None:
+    match = CI_FIX_META_RE.search(comment_body)
+    if not match:
+        return None
+    data = json.loads(match.group(1))
+    if not isinstance(data, dict):
+        raise ValueError("CI-fix metadata must be a JSON object")
+    return data
+
+
+def append_ci_fix_metadata(comment_markdown: str, metadata: dict[str, Any]) -> str:
+    return (
+        f"{comment_markdown.rstrip()}\n\n"
+        f"{CI_FIX_META_START}\n"
+        f"{json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2)}\n"
+        f"{CI_FIX_META_END}"
+    )
+
+
+def latest_ci_fix_meta(comments: Sequence[GitHubIssueComment]) -> dict[str, Any]:
+    """The most recent BUGPATROL_CI_FIX_META across a PR's comments ({} if none).
+
+    De-dupe keys on the fix PR live here: ``attempts`` / ``last_fixed_sha`` for
+    the failure branch, ``last_notified_sha`` for the build-ready branch. Reading
+    the latest comment lets any runner reconstruct the same state.
+    """
+    latest: dict[str, Any] = {}
+    for comment in comments:
+        meta = parse_ci_fix_metadata(comment.body)
+        if meta is not None:
+            latest = meta
+    return latest
+
+
+def render_ci_fix_feedback_markdown(failed_logs: Sequence[tuple[str, str]]) -> str:
+    """Render failed CI runs (name + log tail) as instructions for the agent."""
+    lines = [
+        "## CI 构建失败反馈（需要修复）",
+        "",
+        "这个 PR 最新提交触发的项目 CI 里，以下构建失败了。请**只针对这些失败**做最小修复，"
+        "不要重开根因分析、不要扩大范围。日志只保留了尾部错误区域：",
+        "",
+    ]
+    for index, (name, log_tail) in enumerate(failed_logs, start=1):
+        lines.append(f"### 失败 {index}：{name}")
+        lines.append("")
+        lines.append("```")
+        lines.append((log_tail or "").strip() or "（无日志）")
+        lines.append("```")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def render_ci_fix_pr_comment(*, result: FixResult, attempt: int, cap: int) -> str:
+    return "\n".join(
+        [
+            "## BugPatrol 已修复 CI 构建失败",
+            "",
+            f"已根据 CI 失败日志修复并推送更新到本 PR（第 {attempt}/{cap} 次自动修复）。",
+            "",
+            f"改动：{result.summary.strip()}",
+            f"测试：{'已添加/调整' if result.tests_added else '未新增'}",
+            "",
+            "CI 会在新提交上重跑；仍失败会继续自动修复，达到上限后转人工。",
+        ]
+    )
+
+
+def render_ci_fix_lark_message(
+    *,
+    issue_number: int,
+    issue_url: str,
+    pr_url: str,
+    result: FixResult,
+    attempt: int,
+    cap: int,
+    reviewer_open_id: str = "",
+    run_stats: TriageRunStats | None = None,
+) -> str:
+    reviewer = f'<at user_id="{reviewer_open_id}"></at> ' if reviewer_open_id else ""
+    lines = [
+        f"{reviewer}已根据 CI 失败日志修复并更新 PR（第 {attempt}/{cap} 次），"
+        f"GitHub issue [#{issue_number}]({issue_url})",
+        f"PR：{_pr_link(pr_url)}",
+        f"改动：{result.summary.strip()}",
+        "CI 会重跑；仍失败会继续自动修复，达到上限转人工。",
+    ]
+    runner = triage_runner_name()
+    if runner:
+        lines.append(f"修复执行机：{runner}")
+    stats_line = format_run_stats(run_stats)
+    if stats_line:
+        lines.append(stats_line)
+    return "\n".join(lines)
+
+
+def notify_ci_fix(
+    *,
+    repo: str,
+    issue_number: int,
+    issue_url: str,
+    pr_url: str,
+    result: FixResult,
+    attempt: int,
+    cap: int,
+    meta: dict[str, Any],
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient | None,
+    reviewer_open_id: str = "",
+    run_stats: TriageRunStats | None = None,
+) -> None:
+    """Notify that the CI-fix loop updated the PR (Lark-first, then PR comment).
+
+    The PR comment carries the BUGPATROL_CI_FIX_META marker (attempts +
+    last_fixed_sha), so it is written last: a Lark failure must not silently drop
+    the ping before the durable de-dupe marker lands (at-least-once).
+    """
+    if lark is not None:
+        send_intake_topic_message(
+            repo=repo,
+            issue_number=issue_number,
+            github=github,
+            lark=lark,
+            text=render_ci_fix_lark_message(
+                issue_number=issue_number,
+                issue_url=issue_url,
+                pr_url=pr_url,
+                result=result,
+                attempt=attempt,
+                cap=cap,
+                reviewer_open_id=reviewer_open_id,
+                run_stats=run_stats,
+            ),
+        )
+    github.add_pull_request_comment(
+        repo=repo,
+        pr=pr_url,
+        body=append_ci_fix_metadata(
+            render_ci_fix_pr_comment(result=result, attempt=attempt, cap=cap), meta
+        ),
+    )
+
+
+def render_ci_escalation_pr_comment(*, failed_names: tuple[str, ...], cap: int) -> str:
+    lines = [
+        "## BugPatrol CI 自动修复达到上限，需人工处理",
+        "",
+        f"已连续自动修复 {cap} 次，CI 构建仍失败，继续自动修复不安全，已停止：",
+        "",
+    ]
+    lines.extend(f"- `{name}`" for name in failed_names)
+    lines.append("")
+    lines.append("请人工查看 CI 失败原因后修复（BugPatrol 不会自动合并）。")
+    return "\n".join(lines)
+
+
+def render_ci_escalation_lark_message(
+    *,
+    issue_number: int,
+    issue_url: str,
+    pr_url: str,
+    failed_names: tuple[str, ...],
+    cap: int,
+    reviewer_open_id: str = "",
+) -> str:
+    reviewer = f'<at user_id="{reviewer_open_id}"></at> ' if reviewer_open_id else ""
+    lines = [
+        f"{reviewer}修复 PR 的 CI 已连续自动修复 {cap} 次仍失败，需人工处理，"
+        f"GitHub issue [#{issue_number}]({issue_url})",
+        f"PR：{_pr_link(pr_url)}",
+        f"失败构建：{len(failed_names)} 个",
+        "请人工查看 CI 失败原因后修复（不会自动合并）。",
+    ]
+    runner = triage_runner_name()
+    if runner:
+        lines.append(f"修复执行机：{runner}")
+    return "\n".join(lines)
+
+
+def notify_ci_escalation(
+    *,
+    repo: str,
+    issue_number: int,
+    issue_url: str,
+    pr_url: str,
+    failed_names: tuple[str, ...],
+    cap: int,
+    meta: dict[str, Any],
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient | None,
+    reviewer_open_id: str = "",
+) -> None:
+    """Escalate a CI failure that hit the retry cap (Lark-first, then PR comment).
+
+    The PR comment carries the meta marker (last_fixed_sha) so repeated failure
+    events for the same commit are de-duped; it is written last.
+    """
+    if lark is not None:
+        send_intake_topic_message(
+            repo=repo,
+            issue_number=issue_number,
+            github=github,
+            lark=lark,
+            text=render_ci_escalation_lark_message(
+                issue_number=issue_number,
+                issue_url=issue_url,
+                pr_url=pr_url,
+                failed_names=failed_names,
+                cap=cap,
+                reviewer_open_id=reviewer_open_id,
+            ),
+        )
+    github.add_pull_request_comment(
+        repo=repo,
+        pr=pr_url,
+        body=append_ci_fix_metadata(
+            render_ci_escalation_pr_comment(failed_names=failed_names, cap=cap), meta
+        ),
+    )
+
+
+def render_build_ready_lark_message(
+    *,
+    issue_number: int,
+    issue_url: str,
+    pr_url: str,
+    assignee_open_id: str = "",
+    links: Sequence[tuple[str, str]] = (),
+) -> str:
+    assignee = f'<at user_id="{assignee_open_id}"></at> ' if assignee_open_id else ""
+    lines = [
+        f"{assignee}✅ 修复构建通过，可测试，GitHub issue [#{issue_number}]({issue_url})",
+        f"PR：{_pr_link(pr_url)}",
+    ]
+    if links:
+        lines.extend(f"{label}：[{label}]({url})" for label, url in links)
+    else:
+        lines.append("安装 / 预览链接见 PR 评论。")
+    runner = triage_runner_name()
+    if runner:
+        lines.append(f"执行机：{runner}")
+    return "\n".join(lines)
+
+
+def render_build_ready_issue_comment(
+    *, pr_url: str, links: Sequence[tuple[str, str]] = ()
+) -> str:
+    lines = [
+        "## BugPatrol 修复构建通过，可测试",
+        "",
+        f"修复 PR 的 CI 构建已通过，可以测试：{pr_url}",
+    ]
+    if links:
+        lines.append("")
+        lines.extend(f"- {label}：{url}" for label, url in links)
+    else:
+        lines.append("")
+        lines.append("安装 / 预览链接见 PR 评论。")
+    return "\n".join(lines)
+
+
+def render_build_ready_marker_comment(*, head_sha: str) -> str:
+    return f"BugPatrol：构建 `{head_sha[:12]}` 已通知可测试。"
+
+
+def notify_build_ready(
+    *,
+    repo: str,
+    issue_number: int,
+    issue_url: str,
+    pr_url: str,
+    head_sha: str,
+    meta: dict[str, Any],
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient | None,
+    assignee_open_id: str = "",
+    links: Sequence[tuple[str, str]] = (),
+) -> None:
+    """Surface a passing fix-PR build to the issue + Lark topic (Lark-first).
+
+    Order is Lark → issue comment (human) → PR meta comment (the durable
+    last_notified_sha marker, written last) so a Lark failure never silently
+    drops the ping before the de-dupe marker lands (at-least-once).
+    """
+    if lark is not None:
+        send_intake_topic_message(
+            repo=repo,
+            issue_number=issue_number,
+            github=github,
+            lark=lark,
+            text=render_build_ready_lark_message(
+                issue_number=issue_number,
+                issue_url=issue_url,
+                pr_url=pr_url,
+                assignee_open_id=assignee_open_id,
+                links=links,
+            ),
+        )
+    github.add_issue_comment(
+        repo=repo,
+        issue_number=issue_number,
+        body=render_build_ready_issue_comment(pr_url=pr_url, links=links),
+    )
+    github.add_pull_request_comment(
+        repo=repo,
+        pr=pr_url,
+        body=append_ci_fix_metadata(
+            render_build_ready_marker_comment(head_sha=head_sha), meta
+        ),
     )
 
 

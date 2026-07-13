@@ -60,6 +60,19 @@ class ReviewThread:
 
 
 @dataclass(frozen=True)
+class FailedRun:
+    """A failed CI workflow run for a fix PR's head commit.
+
+    ``run_id`` is the database id used to fetch the failed-step logs; the names
+    identify which build broke so the CI-fix agent gets full context.
+    """
+
+    run_id: int
+    name: str
+    workflow_name: str = ""
+
+
+@dataclass(frozen=True)
 class GitHubPullRequest:
     number: int
     url: str

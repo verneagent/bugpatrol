@@ -273,6 +273,45 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
         self.assertIn("graphql", args)
         self.assertTrue(any("resolveReviewThread" in a for a in args))
 
+    def test_list_failed_runs_keeps_only_failures(self) -> None:
+        client = GitHubCliIssuesClient()
+        stdout = json.dumps(
+            [
+                {"databaseId": 1, "name": "iOS Build", "workflowName": "iOS Build", "conclusion": "failure"},
+                {"databaseId": 2, "name": "Web Build", "workflowName": "Web Build", "conclusion": "success"},
+                {"databaseId": 3, "name": "API Tests", "workflowName": "API Tests", "conclusion": "failure"},
+            ]
+        )
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 0, stdout, "")
+            runs = client.list_failed_runs_for_sha(repo="o/r", head_sha="abc")
+        self.assertEqual([r.run_id for r in runs], [1, 3])
+        args = run.call_args.args[0]
+        self.assertIn("--commit", args)
+        self.assertIn("abc", args)
+
+    def test_get_run_failed_logs_truncates_tail(self) -> None:
+        client = GitHubCliIssuesClient()
+        big = "\n".join(f"line {i}" for i in range(500))
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 0, big, "")
+            tail = client.get_run_failed_logs(repo="o/r", run_id=1)
+        # Only the tail (last 200 lines) is kept; the head is dropped.
+        self.assertNotIn("line 0\n", tail)
+        self.assertIn("line 499", tail)
+        self.assertLessEqual(len(tail.splitlines()), 200)
+        self.assertIn("--log-failed", run.call_args.args[0])
+
+    def test_list_pull_request_comments_parses_bodies(self) -> None:
+        client = GitHubCliIssuesClient()
+        stdout = json.dumps([{"id": 11, "body": "hello"}, {"id": 12, "body": None}])
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 0, stdout, "")
+            comments = client.list_pull_request_comments(repo="o/r", pr_number=9)
+        self.assertEqual([c.id for c in comments], ["11", "12"])
+        self.assertEqual(comments[1].body, "")
+        self.assertIn("/repos/o/r/issues/9/comments", run.call_args.args[0])
+
     def test_raises_on_gh_failure(self) -> None:
         client = GitHubCliIssuesClient()
 

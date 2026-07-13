@@ -148,6 +148,22 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"max_diff_lines must be positive"):
             parse_project_config(data)
 
+    def test_fix_gate_max_ci_fix_attempts_defaults_and_overrides(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["fix"] = {"verify": {"test": "make test"}}
+        self.assertEqual(parse_project_config(data).fix.max_ci_fix_attempts, 3)
+
+        data["fix"] = {"verify": {"test": "make test"}, "gate": {"max_ci_fix_attempts": 5}}
+        self.assertEqual(parse_project_config(data).fix.max_ci_fix_attempts, 5)
+
+    def test_fix_gate_rejects_non_positive_max_ci_fix_attempts(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["fix"] = {"verify": {"test": "make test"}, "gate": {"max_ci_fix_attempts": 0}}
+        with self.assertRaisesRegex(ValueError, r"max_ci_fix_attempts must be positive"):
+            parse_project_config(data)
+
     def test_fix_progress_heartbeat_defaults_and_overrides(self) -> None:
         config = load_project_config(Path("projects/example.toml"))
         data = self._minimal_data(config)

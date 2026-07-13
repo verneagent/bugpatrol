@@ -1,0 +1,127 @@
+name: BugPatrol CI feedback
+
+# React to the project's own PR CI finishing on a BugPatrol auto-fix PR
+# (bugpatrol/fix-issue-N). One workflow_run [completed] listener, two branches
+# off the run's conclusion:
+#   - failure -> CI-fix: feed the failing logs to the revise agent, edit, push a
+#     fast-forward update, bounded by [fix.gate].max_ci_fix_attempts; at the cap
+#     it escalates to the PR reviewer. De-dupes on head_sha (one push -> many
+#     failed workflows -> many events) via a BUGPATROL_CI_FIX_META PR comment.
+#   - success -> build-ready: the fix built cleanly and is testable, so surface
+#     the PR to the issue + the reporter's Lark topic, @ the assignee.
+#
+# BugPatrol only reads the CI *result surface* (a workflow's conclusion + its
+# failed-step logs), never the project's build definition.
+#
+# NOTE: workflow_run only fires from the copy of this file on the DEFAULT branch,
+# and `workflows:` must be STATIC strings. Replace the placeholder names below
+# with this project's real build-workflow names before deploying.
+
+on:
+  workflow_run:
+    workflows:
+      # >>> REPLACE with this project's real build-workflow names <<<
+      - "REPLACE ME iOS Build"
+      - "REPLACE ME Android Build"
+      - "REPLACE ME Web Build"
+      - "REPLACE ME API Tests"
+      - "REPLACE ME E2E Tests"
+    types: [completed]
+
+# Share the fix concurrency group so fix / revise / ci-fix for the SAME issue
+# never run at once, even across runners. Serialization + sha-keyed meta => at
+# most one reaction per commit. Do NOT cancel-in-progress: a cancelled half-run
+# could push without recording its de-dupe marker.
+concurrency:
+  group: bugpatrol-fix-${{ github.repository }}-ci-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  ci-feedback:
+    # Only act on a build that ran on a real bugpatrol fix PR that concluded
+    # success or failure (neutral/cancelled/skipped are no-ops).
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      startsWith(github.event.workflow_run.head_branch, 'bugpatrol/fix-issue-') &&
+      (github.event.workflow_run.conclusion == 'failure' ||
+       github.event.workflow_run.conclusion == 'success')
+    runs-on: ${{ vars.BUGPATROL_FIX_RUNNER_LABEL || 'self-hosted' }}
+    env:
+      NODE_USE_ENV_PROXY: "1"
+    steps:
+      # Parse the issue number from the fix branch bugpatrol/fix-issue-<N>.
+      - name: Resolve issue number
+        id: issue
+        shell: bash
+        run: |
+          ref="${{ github.event.workflow_run.head_branch }}"
+          n="${ref#bugpatrol/fix-issue-}"
+          case "$n" in
+            ''|*[!0-9]*) echo "cannot resolve a numeric issue number (got '$n')" >&2; exit 1 ;;
+          esac
+          echo "number=$n" >> "$GITHUB_OUTPUT"
+
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.BUGPATROL_APP_ID }}
+          private-key: ${{ secrets.BUGPATROL_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Checkout BugPatrol tool
+        uses: actions/checkout@v5
+        with:
+          repository: verneagent/bugpatrol
+          path: .bugpatrol/tool
+
+      - name: Bootstrap app repo cache
+        id: app-cache
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          repo_path="$(bash "$GITHUB_WORKSPACE/.bugpatrol/tool/examples/github-actions/bugpatrol-cache-bootstrap.sh" "${{ github.repository }}")"
+          echo "repo_path=$repo_path" >> "$GITHUB_OUTPUT"
+
+      - name: Configure git identity
+        shell: bash
+        run: |
+          git -C "${{ steps.app-cache.outputs.repo_path }}" config user.name "bugpatrol[bot]"
+          git -C "${{ steps.app-cache.outputs.repo_path }}" config user.email "bugpatrol[bot]@users.noreply.github.com"
+
+      - name: React to CI result
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BUGPATROL_PROJECT_CONFIG: ${{ vars.BUGPATROL_PROJECT_CONFIG }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          ISSUE: ${{ steps.issue.outputs.number }}
+          REPO_PATH: ${{ steps.app-cache.outputs.repo_path }}
+        run: |
+          PY=""
+          for c in python3.13 python3.12 python3.11 python3; do
+            if command -v "$c" >/dev/null 2>&1 \
+              && "$c" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+              PY="$c"; break
+            fi
+          done
+          [ -n "$PY" ] || { echo "no Python >= 3.11 on this runner" >&2; exit 1; }
+          if [ "$CONCLUSION" = "failure" ]; then
+            PYTHONPATH="$GITHUB_WORKSPACE/.bugpatrol/tool" \
+            "$PY" -m bugpatrol run-ci-fix "$BUGPATROL_PROJECT_CONFIG" \
+              --issue "$ISSUE" \
+              --head-sha "$HEAD_SHA" \
+              --repo-path "$REPO_PATH" \
+              --output-dir "$GITHUB_WORKSPACE/.bugpatrol/ci-fix/issue-$ISSUE" \
+              --execute
+          else
+            PYTHONPATH="$GITHUB_WORKSPACE/.bugpatrol/tool" \
+            "$PY" -m bugpatrol run-build-ready "$BUGPATROL_PROJECT_CONFIG" \
+              --issue "$ISSUE" \
+              --head-sha "$HEAD_SHA" \
+              --execute
+          fi

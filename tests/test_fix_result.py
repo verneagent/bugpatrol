@@ -25,6 +25,17 @@ from bugpatrol.fix_result import (
     render_verify_failed_comment,
     render_verify_failed_lark_message,
     notify_fix_revise,
+    append_ci_fix_metadata,
+    latest_ci_fix_meta,
+    notify_build_ready,
+    notify_ci_escalation,
+    notify_ci_fix,
+    parse_ci_fix_metadata,
+    render_build_ready_issue_comment,
+    render_build_ready_lark_message,
+    render_ci_escalation_lark_message,
+    render_ci_fix_feedback_markdown,
+    render_ci_fix_lark_message,
 )
 
 
@@ -322,6 +333,165 @@ class NotifyConflictEscalationOrderingTest(unittest.TestCase):
             lark=Lark(),  # type: ignore[arg-type]
         )
         self.assertEqual(order, ["lark", "pr_comment"])
+
+
+class CiFixMetadataTest(unittest.TestCase):
+    def test_append_parse_roundtrip(self) -> None:
+        text = append_ci_fix_metadata(
+            "body", {"attempts": 2, "last_fixed_sha": "abc"}
+        )
+        self.assertEqual(
+            parse_ci_fix_metadata(text), {"attempts": 2, "last_fixed_sha": "abc"}
+        )
+
+    def test_parse_returns_none_without_marker(self) -> None:
+        self.assertIsNone(parse_ci_fix_metadata("no marker here"))
+
+    def test_latest_meta_picks_most_recent(self) -> None:
+        from bugpatrol.clients import GitHubIssueComment
+
+        comments = [
+            GitHubIssueComment(id="1", body="chatter"),
+            GitHubIssueComment(
+                id="2", body=append_ci_fix_metadata("x", {"attempts": 1, "last_fixed_sha": "s1"})
+            ),
+            GitHubIssueComment(
+                id="3", body=append_ci_fix_metadata("y", {"attempts": 2, "last_fixed_sha": "s2"})
+            ),
+        ]
+        self.assertEqual(latest_ci_fix_meta(comments), {"attempts": 2, "last_fixed_sha": "s2"})
+
+    def test_latest_meta_empty_when_no_marker(self) -> None:
+        from bugpatrol.clients import GitHubIssueComment
+
+        self.assertEqual(latest_ci_fix_meta([GitHubIssueComment(id="1", body="hi")]), {})
+
+
+class CiFixRenderTest(unittest.TestCase):
+    def test_feedback_markdown_includes_run_name_and_log(self) -> None:
+        text = render_ci_fix_feedback_markdown((("iOS Build", "error: boom on line 5"),))
+        self.assertIn("iOS Build", text)
+        self.assertIn("error: boom on line 5", text)
+
+    def test_ci_fix_lark_uses_masked_link_and_real_mention(self) -> None:
+        text = render_ci_fix_lark_message(
+            issue_number=7,
+            issue_url="https://github.test/o/r/issues/7",
+            pr_url="https://github.test/o/r/pull/9",
+            result=_result(),
+            attempt=2,
+            cap=3,
+            reviewer_open_id="ou_dev",
+        )
+        self.assertIn("[#9](https://github.test/o/r/pull/9)", text)
+        self.assertNotIn("PR：https://", text)
+        self.assertIn('<at user_id="ou_dev">', text)
+        self.assertIn("2/3", text)
+
+    def test_ci_escalation_lark_uses_masked_link_and_real_mention(self) -> None:
+        text = render_ci_escalation_lark_message(
+            issue_number=7,
+            issue_url="https://github.test/o/r/issues/7",
+            pr_url="https://github.test/o/r/pull/9",
+            failed_names=("iOS Build", "Web Build"),
+            cap=3,
+            reviewer_open_id="ou_dev",
+        )
+        self.assertIn("[#9](https://github.test/o/r/pull/9)", text)
+        self.assertNotIn("PR：https://", text)
+        self.assertIn('<at user_id="ou_dev">', text)
+        self.assertIn("人工", text)
+
+    def test_build_ready_lark_uses_masked_link_and_real_mention(self) -> None:
+        text = render_build_ready_lark_message(
+            issue_number=7,
+            issue_url="https://github.test/o/r/issues/7",
+            pr_url="https://github.test/o/r/pull/9",
+            assignee_open_id="ou_dev",
+        )
+        self.assertIn("[#9](https://github.test/o/r/pull/9)", text)
+        self.assertNotIn("PR：https://", text)
+        self.assertIn('<at user_id="ou_dev">', text)
+        self.assertIn("可测试", text)
+
+    def test_build_ready_issue_comment_links_pr(self) -> None:
+        text = render_build_ready_issue_comment(pr_url="https://github.test/o/r/pull/9")
+        self.assertIn("https://github.test/o/r/pull/9", text)
+
+
+def _managed_github(order: list[str]):
+    class Github:
+        def get_issue(self, *, repo, issue_number):
+            from bugpatrol.clients import GitHubIssue
+
+            return GitHubIssue(
+                number=issue_number,
+                url="u",
+                title="t",
+                body='<!-- BUGPATROL_INTAKE_META:{"chat_id":"oc_1","message_id":"om_1"} -->',
+            )
+
+        def add_issue_comment(self, *, repo, issue_number, body):
+            order.append("issue_comment")
+
+        def add_pull_request_comment(self, *, repo, pr, body):
+            order.append("pr_comment")
+
+    class Lark:
+        def reply_to_message(self, *, chat_id, message_id, text):
+            order.append("lark")
+
+    return Github(), Lark()
+
+
+class NotifyCiFixOrderingTest(unittest.TestCase):
+    def test_lark_first_then_pr_comment_marker(self) -> None:
+        order: list[str] = []
+        github, lark = _managed_github(order)
+        notify_ci_fix(
+            repo="o/r",
+            issue_number=7,
+            issue_url="u",
+            pr_url="https://github.test/o/r/pull/9",
+            result=_result(),
+            attempt=1,
+            cap=3,
+            meta={"attempts": 1, "last_fixed_sha": "sha"},
+            github=github,  # type: ignore[arg-type]
+            lark=lark,  # type: ignore[arg-type]
+        )
+        self.assertEqual(order, ["lark", "pr_comment"])
+
+    def test_ci_escalation_lark_first_then_pr_comment(self) -> None:
+        order: list[str] = []
+        github, lark = _managed_github(order)
+        notify_ci_escalation(
+            repo="o/r",
+            issue_number=7,
+            issue_url="u",
+            pr_url="https://github.test/o/r/pull/9",
+            failed_names=("iOS Build",),
+            cap=3,
+            meta={"attempts": 3, "last_fixed_sha": "sha"},
+            github=github,  # type: ignore[arg-type]
+            lark=lark,  # type: ignore[arg-type]
+        )
+        self.assertEqual(order, ["lark", "pr_comment"])
+
+    def test_build_ready_lark_first_then_issue_then_pr_marker(self) -> None:
+        order: list[str] = []
+        github, lark = _managed_github(order)
+        notify_build_ready(
+            repo="o/r",
+            issue_number=7,
+            issue_url="u",
+            pr_url="https://github.test/o/r/pull/9",
+            head_sha="sha",
+            meta={"last_notified_sha": "sha"},
+            github=github,  # type: ignore[arg-type]
+            lark=lark,  # type: ignore[arg-type]
+        )
+        self.assertEqual(order, ["lark", "issue_comment", "pr_comment"])
 
 
 if __name__ == "__main__":
