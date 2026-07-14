@@ -386,6 +386,94 @@ class ExecuteFixRunTest(unittest.TestCase):
             self.assertIn("dev1", github.reviewers)
             push.assert_called_once()
 
+    @staticmethod
+    def _self_heal_command(worktree: Path, output_path: Path, counter_path: Path) -> list[str]:
+        # Attempt 1 drops a `FAIL` marker so the verify guard `test ! -f FAIL`
+        # fails (fix's fault; baseline is green). Attempt 2 omits it and passes.
+        # The counter lives OUTSIDE the worktree so it survives the attribution
+        # reset (reset --hard + clean -fd) between attempts.
+        payload = json.dumps(
+            {
+                "summary": "修复",
+                "root_cause": "根因",
+                "tests_added": True,
+                "pr_title": "fix: x",
+                "pr_body": "body",
+            }
+        )
+        script = (
+            f"import json,pathlib;"
+            f"c=pathlib.Path({str(counter_path)!r});"
+            f"n=(int(c.read_text())+1) if c.exists() else 1;"
+            f"c.write_text(str(n));"
+            f"wt=pathlib.Path({str(worktree)!r});"
+            f"(wt/'src'/'todo.ts').write_text('export const x = 2\\n');"
+            f"(wt/'FAIL').write_text('x') if n==1 else None;"
+            f"pathlib.Path({str(output_path)!r}).write_text({payload!r})"
+        )
+        return ["python3", "-c", script]
+
+    def test_verify_self_heal_retries_then_opens_pr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_git_repo(root)
+            worktree = _add_worktree(root)
+            output_dir = root / "out"
+            output_dir.mkdir()
+            counter = output_dir / "attempts.txt"
+            command = self._self_heal_command(worktree, output_dir / "fix-output.json", counter)
+            config, plan = self._plan(
+                worktree=worktree,
+                output_dir=output_dir,
+                verify={"guard": "test ! -f FAIL"},
+                command=command,
+            )
+            github = FakeGithub(assignees=("dev1",))
+            with patch("bugpatrol.fix_runner.worktree_push_branch") as push:
+                status = execute_fix_run(
+                    config=config,
+                    issue=github.get_issue(repo=config.github_repo, issue_number=7),
+                    plan=plan,
+                    github=github,  # type: ignore[arg-type]
+                )
+            # First attempt failed verify; the second self-healed and opened a PR.
+            self.assertEqual(status, "opened_pr")
+            self.assertEqual(counter.read_text(), "2")
+            self.assertEqual(len(github.created_prs), 1)
+            push.assert_called_once()
+            # The failure was fed back to the agent before the retry.
+            self.assertIn("preflight", plan.context_path.read_text())
+            # No premature verify_failed comment on the issue.
+            self.assertFalse(any("未通过验证" in c for c in github.added_comments))
+
+    def test_no_self_heal_when_attempts_is_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_git_repo(root)
+            worktree = _add_worktree(root)
+            output_dir = root / "out"
+            output_dir.mkdir()
+            counter = output_dir / "attempts.txt"
+            command = self._self_heal_command(worktree, output_dir / "fix-output.json", counter)
+            config, plan = self._plan(
+                worktree=worktree,
+                output_dir=output_dir,
+                verify={"guard": "test ! -f FAIL"},
+                command=command,
+            )
+            config = replace(config, fix=replace(config.fix, max_verify_fix_attempts=1))
+            github = FakeGithub()
+            status = execute_fix_run(
+                config=config,
+                issue=github.get_issue(repo=config.github_repo, issue_number=7),
+                plan=plan,
+                github=github,  # type: ignore[arg-type]
+            )
+            # Single-shot: no retry, so it dead-ends on verify_failed with no PR.
+            self.assertEqual(status, "verify_failed")
+            self.assertEqual(counter.read_text(), "1")
+            self.assertFalse(github.created_prs)
+
 
 class RunFixReviseGuardsTest(unittest.TestCase):
     def test_no_open_pr(self) -> None:

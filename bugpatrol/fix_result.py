@@ -582,6 +582,32 @@ def render_ci_fix_feedback_markdown(failed_logs: Sequence[tuple[str, str]]) -> s
     return "\n".join(lines).rstrip()
 
 
+def render_verify_fix_feedback_markdown(failed: Sequence[tuple[str, str]]) -> str:
+    """Render failed pre-PR verify commands (label + log tail) for the agent.
+
+    Fed back INSIDE a single fix run when the agent's own edit fails the verify
+    gate (preflight) while the baseline is green. The worktree has been reset to
+    the pristine base, so the next attempt starts fresh — the agent must produce
+    a DIFFERENT fix that does not reintroduce these failures.
+    """
+    lines = [
+        "## 验证门（preflight）未通过——上一次修复被丢弃，请重做",
+        "",
+        "你上一次的改动没能通过项目的验证门（下列命令失败）。工作区已回滚到干净的基线，"
+        "请**重新**基于原始代码做最小修复，产出一个**不同**的、不会再触发这些错误的方案，"
+        "不要重复上一次的错误、不要扩大范围。日志只保留了尾部错误区域：",
+        "",
+    ]
+    for index, (label, log_tail) in enumerate(failed, start=1):
+        lines.append(f"### 失败 {index}：{label}")
+        lines.append("")
+        lines.append("```")
+        lines.append((log_tail or "").strip() or "（无日志）")
+        lines.append("```")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 def render_ci_fix_pr_comment(*, result: FixResult, attempt: int, cap: int) -> str:
     return "\n".join(
         [

@@ -35,6 +35,7 @@ from bugpatrol.fix_result import (
     render_build_ready_lark_message,
     render_ci_escalation_lark_message,
     render_ci_fix_feedback_markdown,
+    render_verify_fix_feedback_markdown,
     render_ci_fix_lark_message,
 )
 
@@ -372,6 +373,11 @@ class CiFixRenderTest(unittest.TestCase):
         text = render_ci_fix_feedback_markdown((("iOS Build", "error: boom on line 5"),))
         self.assertIn("iOS Build", text)
         self.assertIn("error: boom on line 5", text)
+
+    def test_verify_fix_feedback_names_preflight_and_carries_log(self) -> None:
+        text = render_verify_fix_feedback_markdown((("preflight", "TS2322: type error at foo.ts:5"),))
+        self.assertIn("preflight", text)
+        self.assertIn("TS2322: type error at foo.ts:5", text)
 
     def test_ci_fix_lark_uses_masked_link_and_real_mention(self) -> None:
         text = render_ci_fix_lark_message(

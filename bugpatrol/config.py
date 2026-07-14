@@ -209,6 +209,12 @@ class FixConfig:
     # to the revise agent and retries, but only up to this many attempts per PR
     # before escalating to a human. See docs/CI-FIX-FEEDBACK.md.
     max_ci_fix_attempts: int = 3
+    # Pre-PR sibling of max_ci_fix_attempts: total agent attempts inside a single
+    # fix run. When the fix's own edit fails the verify gate (preflight) — but the
+    # baseline is green, so it's the fix's fault — feed the failure back and let
+    # the agent try again, up to this many attempts, before giving up with
+    # verify_failed and NO PR. 1 = no self-heal (the original single-shot).
+    max_verify_fix_attempts: int = 2
     # Optional [fix.agent] override. When set it decides the fix agent's
     # provider/model independently of triage (e.g. triage on deepseek, fix on
     # claude). When None the fix runner inherits triage_agent. runner_labels are
@@ -456,6 +462,9 @@ def _parse_fix(data: dict[str, Any]) -> FixConfig | None:
     max_ci_fix_attempts = _num(gate, "max_ci_fix_attempts", 3)
     if max_ci_fix_attempts <= 0:
         raise ValueError("fix.gate.max_ci_fix_attempts must be positive")
+    max_verify_fix_attempts = _num(gate, "max_verify_fix_attempts", 2)
+    if max_verify_fix_attempts <= 0:
+        raise ValueError("fix.gate.max_verify_fix_attempts must be positive")
     protected_globs = gate.get("protected_globs")
     if protected_globs is None:
         protected = DEFAULT_FIX_PROTECTED_GLOBS
@@ -509,6 +518,7 @@ def _parse_fix(data: dict[str, Any]) -> FixConfig | None:
         max_concurrent_per_device=max_concurrent,
         progress_heartbeat_seconds=progress_heartbeat,
         max_ci_fix_attempts=max_ci_fix_attempts,
+        max_verify_fix_attempts=max_verify_fix_attempts,
         agent=agent,
     )
 

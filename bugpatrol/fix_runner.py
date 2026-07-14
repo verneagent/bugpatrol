@@ -64,6 +64,7 @@ from bugpatrol.fix_result import (
     render_review_feedback_markdown,
     render_verify_failed_comment,
     render_verify_failed_lark_message,
+    render_verify_fix_feedback_markdown,
 )
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
@@ -915,53 +916,81 @@ def execute_fix_run(
             lark=lark,
             text=_render_fix_start_message(issue_number=issue.number, issue_url=issue.url, branch_note=plan.branch_note),
         )
-    reporter.set_phase("agent 正在编辑代码")
     reporter.start()
     try:
-        run_stats = _run_fix_agent(plan)
-
-        # The gate trusts the real working-tree diff, never the agent's self-report.
-        changed_files = worktree_changed_files(plan.agent_cwd)
-        diff_line_count = worktree_diff_line_count(plan.agent_cwd)
-        gate = evaluate_post_edit(changed_files=changed_files, diff_line_count=diff_line_count, fix=fix)
-        if not gate.allowed:
-            _post_blocked(config=config, issue=issue, reason=gate.reason, github=github, lark=lark)
-            return "no_changes" if not changed_files else "blocked"
-
-        if not plan.output_path.exists():
-            # The agent edited code but never wrote its JSON summary; without it we
-            # can't build a trustworthy PR body, so treat like a blocked run.
-            _post_blocked(
-                config=config,
-                issue=issue,
-                reason="fix agent edited code but wrote no output JSON summary",
-                github=github,
-                lark=lark,
+        # Pre-PR self-heal loop: if the agent's own edit fails the verify gate
+        # (preflight) while the baseline is green, feed the failure back and let
+        # the agent try again, up to max_verify_fix_attempts — mirroring the
+        # post-PR CI-fix loop so a fix-introduced error self-heals BEFORE a PR
+        # rather than dead-ending on verify_failed. The gate/no_output paths are
+        # still terminal (they don't get more attempts).
+        max_attempts = fix.max_verify_fix_attempts
+        for attempt in range(1, max_attempts + 1):
+            reporter.set_phase(
+                "agent 正在编辑代码"
+                if attempt == 1
+                else f"验证未过，第 {attempt}/{max_attempts} 次自纠"
             )
-            return "no_output"
-        result = parse_fix_result(json.loads(plan.output_path.read_text()))
+            # Retries reuse the same worktree/plan; drop any prior summary so a
+            # retry that writes nothing is caught by the no_output check below
+            # instead of parsing a stale result from an earlier attempt.
+            plan.output_path.unlink(missing_ok=True)
+            run_stats = _run_fix_agent(plan)
 
-        reporter.set_phase("跑验证门（安装依赖 + preflight）")
-        status, verify_outcomes = _verify_with_baseline_attribution(fix=fix, worktree=plan.agent_cwd)
-        if status == "baseline_broken":
-            _post_baseline_broken(
-                config=config,
-                issue=issue,
-                base_branch=plan.base_branch,
-                verify_outcomes=verify_outcomes,
-                github=github,
-                lark=lark,
+            # The gate trusts the real working-tree diff, never the agent's self-report.
+            changed_files = worktree_changed_files(plan.agent_cwd)
+            diff_line_count = worktree_diff_line_count(plan.agent_cwd)
+            gate = evaluate_post_edit(changed_files=changed_files, diff_line_count=diff_line_count, fix=fix)
+            if not gate.allowed:
+                _post_blocked(config=config, issue=issue, reason=gate.reason, github=github, lark=lark)
+                return "no_changes" if not changed_files else "blocked"
+
+            if not plan.output_path.exists():
+                # The agent edited code but never wrote its JSON summary; without it
+                # we can't build a trustworthy PR body, so treat like a blocked run.
+                _post_blocked(
+                    config=config,
+                    issue=issue,
+                    reason="fix agent edited code but wrote no output JSON summary",
+                    github=github,
+                    lark=lark,
+                )
+                return "no_output"
+            result = parse_fix_result(json.loads(plan.output_path.read_text()))
+
+            reporter.set_phase("跑验证门（安装依赖 + preflight）")
+            status, verify_outcomes = _verify_with_baseline_attribution(fix=fix, worktree=plan.agent_cwd)
+            if status == "baseline_broken":
+                _post_baseline_broken(
+                    config=config,
+                    issue=issue,
+                    base_branch=plan.base_branch,
+                    verify_outcomes=verify_outcomes,
+                    github=github,
+                    lark=lark,
+                )
+                return "baseline_broken"
+            if status == "passed":
+                break
+            # status == "fix_failed": the fix introduced the failure (baseline is
+            # green). The attribution check already reset the worktree to the
+            # pristine base, so a retry is a fresh attempt informed by the failure.
+            if attempt >= max_attempts:
+                _post_verify_failed(
+                    config=config,
+                    issue=issue,
+                    verify_outcomes=verify_outcomes,
+                    github=github,
+                    lark=lark,
+                )
+                return "verify_failed"
+            failed = tuple(
+                (outcome.label, outcome.stderr_tail or outcome.stdout_tail)
+                for outcome in verify_outcomes
+                if not outcome.ok
             )
-            return "baseline_broken"
-        if status == "fix_failed":
-            _post_verify_failed(
-                config=config,
-                issue=issue,
-                verify_outcomes=verify_outcomes,
-                github=github,
-                lark=lark,
-            )
-            return "verify_failed"
+            with plan.context_path.open("a") as handle:
+                handle.write("\n\n" + render_verify_fix_feedback_markdown(failed) + "\n")
 
         reporter.set_phase("提交并开 PR")
         commit_message = f"fix: {result.pr_title} (#{issue.number})"
