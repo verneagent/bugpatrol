@@ -39,6 +39,7 @@ from bugpatrol.fields import fix_output_schema
 from bugpatrol.fix_gate import (
     evaluate_post_edit,
     evaluate_triage_readiness,
+    run_setup_commands,
     run_verify_commands,
     verify_all_passed,
 )
@@ -141,6 +142,7 @@ def render_fix_context_markdown(
     verdict: str,
     triage_analysis: str,
     branch_note: str,
+    self_check_commands: dict[str, str] | None = None,
 ) -> str:
     lines = [
         f"# Fix context — issue #{issue.number}",
@@ -151,6 +153,21 @@ def render_fix_context_markdown(
     ]
     if branch_note:
         lines.append(f"分支范围：{branch_note}")
+    if self_check_commands:
+        lines.extend(
+            [
+                "",
+                "## 自检命令（改完必须自己跑到全绿再收工）",
+                "",
+                "工作区已装好依赖。改完代码后，你**必须**在当前目录亲自运行下面的验证命令，"
+                "看到类型/编译/测试报错就继续改，迭代到全部通过再收工——不要交出编译不过的代码。"
+                "迭代时可以先跑更快的子集（例如 `npm run typecheck` 之类项目文档里记录的轻量检查）"
+                "定位问题，最后至少确保这些命令全绿：",
+                "",
+            ]
+        )
+        for label, command in self_check_commands.items():
+            lines.append(f"- {label}：`{command}`")
     lines.extend(
         [
             "",
@@ -199,6 +216,8 @@ def prepare_fix_run(
             verdict=verdict,
             triage_analysis=triage_analysis,
             branch_note=branch_note,
+            # Tell the agent the exact bar it must clear itself before finishing.
+            self_check_commands=dict(config.fix.verify) if config.fix else None,
         )
     )
     schema_path.write_text(json.dumps(fix_output_schema(), ensure_ascii=False, indent=2))
@@ -244,7 +263,7 @@ def run_fix(
     """Full auto-fix lifecycle for one issue; returns a terminal status string.
 
     Statuses: not_fixable, already_open_pr, blocked, verify_failed,
-    baseline_broken, no_changes, no_output, opened_pr.
+    setup_failed, baseline_broken, no_changes, no_output, opened_pr.
     """
     if config.fix is None:
         raise ValueError("project config has no [fix] table; auto-fix is not enabled")
@@ -367,7 +386,7 @@ def run_fix_revise(
     the agent resolve the markers, escalating to a human if too many files
     conflict. Statuses: no_open_pr, no_feedback, conflict_escalated,
     conflict_unresolved, conflict_resolved, blocked, no_changes, no_output,
-    verify_failed, revised.
+    setup_failed, verify_failed, revised.
     """
     if config.fix is None:
         raise ValueError("project config has no [fix] table; auto-fix is not enabled")
@@ -487,6 +506,21 @@ def execute_fix_revise(
                 base_branch=pr.base_ref if has_conflict else "",
             ),
         )
+    # Install deps once (fresh worktree) so the agent self-verifies and the
+    # verify gate below runs against a prepared tree. A failing setup is an
+    # environment/baseline problem, not the revise's fault.
+    if fix.setup:
+        setup_outcomes = run_setup_commands(fix=fix, cwd=plan.agent_cwd)
+        if not verify_all_passed(setup_outcomes):
+            _post_baseline_broken(
+                config=config,
+                issue=issue,
+                base_branch=pr.base_ref,
+                verify_outcomes=setup_outcomes,
+                github=github,
+                lark=lark,
+            )
+            return "setup_failed"
     run_stats = _run_fix_agent(plan) if needs_agent else None
 
     # Deterministic guard: the agent must have removed every conflict marker it
@@ -600,7 +634,7 @@ def run_ci_fix(
     run_id. Bounded by ``[fix.gate].max_ci_fix_attempts``; at the cap it escalates
     to the PR reviewer instead of editing. Statuses: no_pr, ci_already_handled,
     no_ci_failure, ci_fix_escalated, ci_fixed, blocked, no_changes, no_output,
-    verify_failed.
+    setup_failed, verify_failed.
     """
     if config.fix is None:
         raise ValueError("project config has no [fix] table; auto-fix is not enabled")
@@ -713,6 +747,25 @@ def execute_ci_fix(
                 cap=fix.max_ci_fix_attempts,
             ),
         )
+    # Install deps once (fresh worktree) so the CI-fix agent self-verifies and
+    # the verify gate runs against a prepared tree. A failing setup is an
+    # environment problem; record the sha so sibling events don't re-attempt.
+    if fix.setup:
+        setup_outcomes = run_setup_commands(fix=fix, cwd=plan.agent_cwd)
+        if not verify_all_passed(setup_outcomes):
+            _post_baseline_broken(
+                config=config,
+                issue=issue,
+                base_branch=pr.base_ref,
+                verify_outcomes=setup_outcomes,
+                github=github,
+                lark=lark,
+            )
+            _mark_ci_handled(
+                github=github, repo=config.github_repo, pr_url=pr.url,
+                prior_meta=prior_meta, attempt=attempt, head_sha=head_sha,
+            )
+            return "setup_failed"
     run_stats = _run_fix_agent(plan)
 
     changed_files = worktree_changed_files(plan.agent_cwd)
@@ -918,12 +971,34 @@ def execute_fix_run(
         )
     reporter.start()
     try:
-        # Pre-PR self-heal loop: if the agent's own edit fails the verify gate
-        # (preflight) while the baseline is green, feed the failure back and let
-        # the agent try again, up to max_verify_fix_attempts — mirroring the
-        # post-PR CI-fix loop so a fix-introduced error self-heals BEFORE a PR
-        # rather than dead-ending on verify_failed. The gate/no_output paths are
-        # still terminal (they don't get more attempts).
+        # Prepare the worktree ONCE (e.g. npm ci) so the agent can self-verify
+        # (typecheck/test) with deps present and every verify run below is fast.
+        # These files persist across the baseline-attribution reset, so setup
+        # never re-runs. A failing setup means the base checkout can't even be
+        # built — an environment/baseline problem, not the fix's fault — so it is
+        # reported as a broken baseline and no PR is opened.
+        if fix.setup:
+            reporter.set_phase("准备工作区（安装依赖）")
+            setup_outcomes = run_setup_commands(fix=fix, cwd=plan.agent_cwd)
+            if not verify_all_passed(setup_outcomes):
+                _post_baseline_broken(
+                    config=config,
+                    issue=issue,
+                    base_branch=plan.base_branch,
+                    verify_outcomes=setup_outcomes,
+                    github=github,
+                    lark=lark,
+                )
+                return "setup_failed"
+
+        # Pre-PR self-heal loop: the agent self-verifies in its own turn (it is
+        # told the verify commands and iterates to green). This outer loop is the
+        # trust boundary and backstop: it independently re-runs the verify gate,
+        # and if the agent's edit still fails it (while the baseline is green) it
+        # feeds the failure back and lets the agent try again, up to
+        # max_verify_fix_attempts — so a fix-introduced error self-heals BEFORE a
+        # PR rather than dead-ending on verify_failed. The gate/no_output paths
+        # are still terminal (they don't get more attempts).
         max_attempts = fix.max_verify_fix_attempts
         for attempt in range(1, max_attempts + 1):
             reporter.set_phase(
@@ -958,7 +1033,7 @@ def execute_fix_run(
                 return "no_output"
             result = parse_fix_result(json.loads(plan.output_path.read_text()))
 
-            reporter.set_phase("跑验证门（安装依赖 + preflight）")
+            reporter.set_phase("跑验证门（preflight）")
             status, verify_outcomes = _verify_with_baseline_attribution(fix=fix, worktree=plan.agent_cwd)
             if status == "baseline_broken":
                 _post_baseline_broken(

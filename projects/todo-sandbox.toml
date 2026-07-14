@@ -45,11 +45,15 @@ description_command = [
 ]
 description_timeout_seconds = 300
 
+[fix.setup]
+# One-time worktree prep, run before the agent turn (so it can self-verify with
+# deps present) and once per run — the fresh worktree has no node_modules.
+install = "npm install --no-audit --no-fund"
+
 [fix.verify]
 # Project-owned verification commands (BugPatrol only runs each and reads the
-# exit code). Every command must pass before a fix PR is opened. The fix runs in
-# a fresh worktree with no node_modules, so install deps before typecheck/test.
-install = "npm install --no-audit --no-fund"
+# exit code). The agent self-runs these to iterate to green, and every command
+# must pass the harness gate before a fix PR is opened.
 typecheck = "npm run typecheck"
 test = "npm test"
 

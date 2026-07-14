@@ -190,7 +190,11 @@ class PrepareFixRunTest(unittest.TestCase):
             self.assertEqual(plan.agent_cwd, worktree.resolve())
             self.assertEqual(plan.verdict, "代码 Bug")
             self.assertEqual(plan.reviewer, "dev1")
-            self.assertIn("根因", plan.context_path.read_text())
+            context = plan.context_path.read_text()
+            self.assertIn("根因", context)
+            # The agent is told the exact self-check commands (from [fix.verify]).
+            self.assertIn("自检命令", context)
+            self.assertIn("npm run typecheck", context)
 
 
 class RunFixGuardsTest(unittest.TestCase):
@@ -247,11 +251,12 @@ def _add_worktree(root: Path) -> Path:
 
 
 class ExecuteFixRunTest(unittest.TestCase):
-    def _plan(self, *, worktree: Path, output_dir: Path, verify: dict[str, str], command):
+    def _plan(self, *, worktree: Path, output_dir: Path, verify: dict[str, str], command, setup=None):
         # A real agent command (never a subprocess.run patch): globally patching
         # subprocess.run would also stub the real git calls this test needs.
+        # setup defaults to {} so tests don't shell out to a real `npm install`.
         config = _sandbox_config()
-        config = replace(config, fix=replace(config.fix, verify=verify))
+        config = replace(config, fix=replace(config.fix, verify=verify, setup=setup or {}))
         plan = FixRunPlan(
             context_path=output_dir / "fix-context.md",
             schema_path=output_dir / "fix.schema.json",
@@ -474,6 +479,67 @@ class ExecuteFixRunTest(unittest.TestCase):
             self.assertEqual(counter.read_text(), "1")
             self.assertFalse(github.created_prs)
 
+    def test_setup_failure_reports_baseline_broken_and_skips_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_git_repo(root)
+            worktree = _add_worktree(root)
+            output_dir = root / "out"
+            output_dir.mkdir()
+            counter = output_dir / "attempts.txt"
+            command = self._self_heal_command(worktree, output_dir / "fix-output.json", counter)
+            # Setup (deps install) fails -> the base checkout can't be built, so
+            # it's an environment/baseline problem: no PR, no agent turn.
+            config, plan = self._plan(
+                worktree=worktree,
+                output_dir=output_dir,
+                verify={"ok": "true"},
+                command=command,
+                setup={"install": "false"},
+            )
+            github = FakeGithub()
+            status = execute_fix_run(
+                config=config,
+                issue=github.get_issue(repo=config.github_repo, issue_number=7),
+                plan=plan,
+                github=github,  # type: ignore[arg-type]
+            )
+            self.assertEqual(status, "setup_failed")
+            self.assertFalse(github.created_prs)
+            self.assertTrue(any("baseline 本就红" in c for c in github.added_comments))
+            # The agent never ran (no counter written, no edit).
+            self.assertFalse(counter.exists())
+            self.assertEqual((worktree / "src" / "todo.ts").read_text(), "export const x = 1\n")
+
+    def test_setup_runs_before_agent_then_opens_pr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_git_repo(root)
+            worktree = _add_worktree(root)
+            output_dir = root / "out"
+            output_dir.mkdir()
+            command = self._edit_and_write_output(worktree, output_dir / "fix-output.json")
+            # Setup writes a marker the verify gate depends on: the gate only
+            # passes because setup ran first, proving setup precedes verify.
+            config, plan = self._plan(
+                worktree=worktree,
+                output_dir=output_dir,
+                verify={"needs_setup": "test -f DEPS_READY"},
+                command=command,
+                setup={"install": "touch DEPS_READY"},
+            )
+            github = FakeGithub(assignees=("dev1",))
+            with patch("bugpatrol.fix_runner.worktree_push_branch") as push:
+                status = execute_fix_run(
+                    config=config,
+                    issue=github.get_issue(repo=config.github_repo, issue_number=7),
+                    plan=plan,
+                    github=github,  # type: ignore[arg-type]
+                )
+            self.assertEqual(status, "opened_pr")
+            self.assertEqual(len(github.created_prs), 1)
+            push.assert_called_once()
+
 
 class RunFixReviseGuardsTest(unittest.TestCase):
     def test_no_open_pr(self) -> None:
@@ -510,9 +576,9 @@ class RunFixReviseGuardsTest(unittest.TestCase):
 
 
 class ExecuteFixReviseTest(unittest.TestCase):
-    def _plan(self, *, worktree: Path, output_dir: Path, verify: dict[str, str], command):
+    def _plan(self, *, worktree: Path, output_dir: Path, verify: dict[str, str], command, setup=None):
         config = _sandbox_config()
-        config = replace(config, fix=replace(config.fix, verify=verify))
+        config = replace(config, fix=replace(config.fix, verify=verify, setup=setup or {}))
         plan = FixRunPlan(
             context_path=output_dir / "fix-context.md",
             schema_path=output_dir / "fix.schema.json",
@@ -858,7 +924,7 @@ class RunCiFixEndToEndTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             base_repo = _make_fix_remote(root)
-            config = replace(_sandbox_config(), fix=replace(_sandbox_config().fix, verify={"ok": "true"}))
+            config = replace(_sandbox_config(), fix=replace(_sandbox_config().fix, verify={"ok": "true"}, setup={}))
             pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
             github = FakeGithub(
                 open_pull_request=pr,

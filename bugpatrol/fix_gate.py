@@ -118,8 +118,8 @@ def _glob_to_regex(pattern: str) -> re.Pattern[str]:
     return re.compile("^" + "".join(out) + "$")
 
 
-def run_verify_commands(*, fix: FixConfig, cwd: Path) -> tuple[VerifyOutcome, ...]:
-    """Run each configured verify command in `cwd`; report every outcome.
+def _run_commands(commands: dict[str, str], *, cwd: Path) -> tuple[VerifyOutcome, ...]:
+    """Run each label->command in `cwd`, recording every outcome.
 
     BugPatrol owns none of these commands — they come from the project config —
     so this only shells out and records the exit code and a tail of output for
@@ -127,7 +127,7 @@ def run_verify_commands(*, fix: FixConfig, cwd: Path) -> tuple[VerifyOutcome, ..
     report shows every gate at once.
     """
     outcomes: list[VerifyOutcome] = []
-    for label, command in fix.verify.items():
+    for label, command in commands.items():
         completed = subprocess.run(
             command,
             shell=True,
@@ -146,6 +146,20 @@ def run_verify_commands(*, fix: FixConfig, cwd: Path) -> tuple[VerifyOutcome, ..
             )
         )
     return tuple(outcomes)
+
+
+def run_setup_commands(*, fix: FixConfig, cwd: Path) -> tuple[VerifyOutcome, ...]:
+    """Run the one-time setup commands (e.g. ``npm ci``) that prep the worktree.
+
+    Run before the agent turn so it can self-verify with deps present, and only
+    once per fix run (the results persist across the baseline-attribution reset).
+    """
+    return _run_commands(fix.setup, cwd=cwd)
+
+
+def run_verify_commands(*, fix: FixConfig, cwd: Path) -> tuple[VerifyOutcome, ...]:
+    """Run each configured verify command in `cwd`; report every outcome."""
+    return _run_commands(fix.verify, cwd=cwd)
 
 
 def verify_all_passed(outcomes: tuple[VerifyOutcome, ...]) -> bool:

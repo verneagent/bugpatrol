@@ -55,9 +55,14 @@ purpose = "Go backend for the fived frontend (proto routes, comment/chat permiss
 # tests — the same bar a human must clear before opening a fived PR, so the bot
 # holds itself to the same rule.
 # A fresh worktree has no node_modules and preflight requires it, so `npm ci`
-# first (unavoidable — preflight itself refuses to run without node_modules).
-[fix.verify]
+# runs first as one-time setup — before the agent turn, so the agent can
+# self-verify (typecheck/test) with deps present and iterate to green — and it
+# is NOT re-run on every verify (it persists across the baseline-attribution
+# reset). `[fix.verify]` is then just the pass/fail gate the agent must clear.
+[fix.setup]
 install = "npm ci --no-audit --no-fund"
+
+[fix.verify]
 preflight = "./scripts/preflight.sh"
 
 [fix.gate]

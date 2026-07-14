@@ -180,6 +180,27 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"max_verify_fix_attempts must be positive"):
             parse_project_config(data)
 
+    def test_fix_setup_defaults_empty_and_parses_commands(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        # No [fix.setup] -> empty (projects that need no prep).
+        data["fix"] = {"verify": {"test": "make test"}}
+        self.assertEqual(parse_project_config(data).fix.setup, {})
+
+        # [fix.setup] parses like verify and drops blank commands.
+        data["fix"] = {
+            "verify": {"test": "make test"},
+            "setup": {"install": "npm ci", "noop": "  "},
+        }
+        self.assertEqual(parse_project_config(data).fix.setup, {"install": "npm ci"})
+
+    def test_fix_setup_rejects_non_table(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["fix"] = {"verify": {"test": "make test"}, "setup": "npm ci"}
+        with self.assertRaisesRegex(ValueError, r"\[fix.setup\] must be a table"):
+            parse_project_config(data)
+
     def test_fix_progress_heartbeat_defaults_and_overrides(self) -> None:
         config = load_project_config(Path("projects/example.toml"))
         data = self._minimal_data(config)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 from typing import Any
@@ -186,9 +186,18 @@ class FixConfig:
     code, so the toolchain stays fully decoupled from BugPatrol. The gate keeps
     fixes small and out of high-blast-radius paths; ``allowed_verdicts`` limits
     auto-fix to triage conclusions that are actually code fixes.
+
+    ``setup`` maps a label to a side-effecting command run ONCE up front to
+    prepare the worktree (e.g. ``npm ci``), before the agent turn and before the
+    verify gate. Splitting it out lets the agent self-verify (typecheck/test) and
+    iterate to green in its own turn with deps already present, and it persists
+    across the baseline-attribution reset (which keeps gitignored files like
+    node_modules), so we install once instead of on every verify. Empty for
+    projects that need no setup.
     """
 
     verify: dict[str, str]
+    setup: dict[str, str] = field(default_factory=dict)
     max_diff_lines: int = 800
     protected_globs: tuple[str, ...] = DEFAULT_FIX_PROTECTED_GLOBS
     allowed_verdicts: tuple[str, ...] = ("代码 Bug",)
@@ -450,6 +459,12 @@ def _parse_fix(data: dict[str, Any]) -> FixConfig | None:
             "[fix.verify] must define at least one non-empty command; "
             "an auto-fix with no verification is not shippable"
         )
+    setup_raw = fix.get("setup") or {}
+    if not isinstance(setup_raw, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in setup_raw.items()
+    ):
+        raise ValueError("[fix.setup] must be a table of string commands")
+    setup = {key: value for key, value in setup_raw.items() if value.strip()}
     gate = fix.get("gate") or {}
     if not isinstance(gate, dict):
         raise ValueError("[fix.gate] must be a table")
@@ -510,6 +525,7 @@ def _parse_fix(data: dict[str, Any]) -> FixConfig | None:
         )
     return FixConfig(
         verify=verify,
+        setup=setup,
         max_diff_lines=max_diff_lines,
         protected_globs=protected,
         allowed_verdicts=verdicts,
