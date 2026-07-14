@@ -63,7 +63,7 @@ from bugpatrol.worktree import (
     resolve_reference_branch,
     triage_worktree,
 )
-from bugpatrol.slash_commands import SlashCommandHandler, make_fix_dispatch
+from bugpatrol.slash_commands import SlashCommandHandler, make_dispatch
 from bugpatrol.watcher import GitHubTriageStatusReader, run_polling_watcher
 
 
@@ -278,6 +278,14 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "command run when a reporter posts `/fix` in a bug topic; supports "
             "{issue_number}. Without it, `/fix` replies that it is unconfigured."
+        ),
+    )
+    watch.add_argument(
+        "--retriage-dispatch-command",
+        nargs="+",
+        help=(
+            "command run when a reporter posts `/retriage` in a bug topic; supports "
+            "{issue_number}. Without it, `/retriage` replies that it is unconfigured."
         ),
     )
     watch.add_argument(
@@ -620,7 +628,12 @@ def main(argv: list[str] | None = None) -> int:
             github=github,
             lark=lark,
             fix_dispatch=(
-                make_fix_dispatch(args.fix_dispatch_command) if args.fix_dispatch_command else None
+                make_dispatch(args.fix_dispatch_command) if args.fix_dispatch_command else None
+            ),
+            retriage_dispatch=(
+                make_dispatch(args.retriage_dispatch_command)
+                if args.retriage_dispatch_command
+                else None
             ),
         )
         result = run_polling_watcher(

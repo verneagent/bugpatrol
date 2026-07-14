@@ -10,7 +10,7 @@ from bugpatrol.lark import LarkMessage, parse_lark_message
 from bugpatrol.slash_commands import (
     SlashCommand,
     SlashCommandHandler,
-    make_fix_dispatch,
+    make_dispatch,
     parse_slash_command,
     resolve_assignee_login,
 )
@@ -84,6 +84,15 @@ class ParseSlashCommandTest(unittest.TestCase):
     def test_fix_mentioned_in_sentence_is_not_a_command(self) -> None:
         self.assertIsNone(parse_slash_command("please run /fix on this"))
 
+    def test_retriage_exact(self) -> None:
+        self.assertEqual(parse_slash_command("/retriage"), SlashCommand(kind="retriage"))
+
+    def test_retriage_case_insensitive(self) -> None:
+        self.assertEqual(parse_slash_command("  /RETRIAGE  "), SlashCommand(kind="retriage"))
+
+    def test_retriage_with_arg_is_not_a_command(self) -> None:
+        self.assertIsNone(parse_slash_command("/retriage now"))
+
     def test_assign_with_target(self) -> None:
         self.assertEqual(
             parse_slash_command("/assign @Naohn"),
@@ -130,19 +139,19 @@ class ResolveAssigneeLoginTest(unittest.TestCase):
         )
 
 
-class MakeFixDispatchTest(unittest.TestCase):
+class MakeDispatchTest(unittest.TestCase):
     def test_formats_issue_number(self) -> None:
-        dispatch = make_fix_dispatch(["python3", "-c", "import sys; sys.exit(0)", "{issue_number}"])
+        dispatch = make_dispatch(["python3", "-c", "import sys; sys.exit(0)", "{issue_number}"])
         dispatch(7)  # should not raise
 
     def test_raises_on_nonzero_exit(self) -> None:
-        dispatch = make_fix_dispatch(["python3", "-c", "import sys; sys.exit(3)"])
+        dispatch = make_dispatch(["python3", "-c", "import sys; sys.exit(3)"])
         with self.assertRaises(RuntimeError):
             dispatch(1)
 
     def test_empty_template_rejected(self) -> None:
         with self.assertRaises(ValueError):
-            make_fix_dispatch([])
+            make_dispatch([])
 
 
 class SlashCommandHandlerTest(unittest.TestCase):
@@ -177,6 +186,32 @@ class SlashCommandHandlerTest(unittest.TestCase):
         result = handler.handle(_message(text="/fix"))
         assert result is not None
         self.assertEqual(result.reason, "slash_fix_unconfigured")
+        self.assertIn("未配置", lark.replies[0])
+
+    def test_retriage_dispatches_and_replies(self) -> None:
+        calls: list[int] = []
+        github = _StubIssueClient(_issue(42))
+        lark = _StubReplyClient()
+        handler = SlashCommandHandler(
+            config=_config(), github=github, lark=lark, retriage_dispatch=calls.append
+        )
+        result = handler.handle(_message(text="/retriage"))
+        assert result is not None
+        self.assertEqual(result.reason, "slash_retriage")
+        self.assertEqual(result.issue_number, 42)
+        self.assertEqual(calls, [42])
+        self.assertEqual(len(lark.replies), 1)
+        self.assertIn("重新触发分诊", lark.replies[0])
+
+    def test_retriage_unconfigured_reports(self) -> None:
+        github = _StubIssueClient(_issue(42))
+        lark = _StubReplyClient()
+        handler = SlashCommandHandler(
+            config=_config(), github=github, lark=lark, retriage_dispatch=None
+        )
+        result = handler.handle(_message(text="/retriage"))
+        assert result is not None
+        self.assertEqual(result.reason, "slash_retriage_unconfigured")
         self.assertIn("未配置", lark.replies[0])
 
     def test_no_issue_reports(self) -> None:

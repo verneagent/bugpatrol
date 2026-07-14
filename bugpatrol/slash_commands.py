@@ -1,10 +1,11 @@
-"""Deterministic Lark slash commands (`/fix`, `/assign`).
+"""Deterministic Lark slash commands (`/fix`, `/retriage`, `/assign`).
 
 These bypass the LLM triage path entirely: a reply in an existing bug topic
 that starts with a known slash command is executed literally. `/fix` dispatches
-the fix workflow for the topic's issue; `/assign <who>` sets the GitHub issue
-assignee. Anything that is not an exact slash command is left untouched so it
-flows into normal intake/triage.
+the fix workflow for the topic's issue; `/retriage` re-dispatches the triage
+workflow for it; `/assign <who>` sets the GitHub issue assignee. Anything that
+is not an exact slash command is left untouched so it flows into normal
+intake/triage.
 """
 
 from __future__ import annotations
@@ -20,17 +21,20 @@ from bugpatrol.config import ProjectConfig
 from bugpatrol.lark import LarkMessage, is_message_withdrawn_error
 
 FIX_COMMAND = "/fix"
+RETRIAGE_COMMAND = "/retriage"
 ASSIGN_COMMAND = "/assign"
 
 
 @dataclass(frozen=True)
 class SlashCommand:
-    kind: str  # "fix" | "assign"
+    kind: str  # "fix" | "retriage" | "assign"
     target: str = ""  # raw assignee text for /assign
 
     def render(self) -> str:
         if self.kind == "assign":
             return f"{ASSIGN_COMMAND} {self.target}".strip()
+        if self.kind == "retriage":
+            return RETRIAGE_COMMAND
         return FIX_COMMAND
 
 
@@ -60,6 +64,10 @@ def parse_slash_command(text: str | None) -> SlashCommand | None:
         if len(tokens) != 1:
             return None
         return SlashCommand(kind="fix")
+    if head == RETRIAGE_COMMAND:
+        if len(tokens) != 1:
+            return None
+        return SlashCommand(kind="retriage")
     if head == ASSIGN_COMMAND:
         target = stripped[len(tokens[0]):].strip()
         if not target:
@@ -107,12 +115,12 @@ class _ReplyClient(Protocol):
     def reply_to_message(self, *, chat_id: str, message_id: str, text: str) -> None: ...
 
 
-def make_fix_dispatch(command_template: str | Sequence[str]) -> Callable[[int], None]:
-    """Build a callable that runs the fix workflow for an issue number.
+def make_dispatch(command_template: str | Sequence[str]) -> Callable[[int], None]:
+    """Build a callable that runs a workflow-dispatch command for an issue number.
 
     Mirrors CommandTriageDispatcher: the template supports `{issue_number}` and
     is run via subprocess (e.g. `gh workflow run bugpatrol-fix.yml ... -f
-    issue_number={issue_number}`).
+    issue_number={issue_number}`). Used for both `/fix` and `/retriage`.
     """
     if isinstance(command_template, str):
         template = tuple(shlex.split(command_template))
@@ -121,13 +129,13 @@ def make_fix_dispatch(command_template: str | Sequence[str]) -> Callable[[int], 
     else:
         template = tuple(command_template)
     if not template:
-        raise ValueError("fix dispatch command must not be empty")
+        raise ValueError("dispatch command must not be empty")
 
     def dispatch(issue_number: int) -> None:
         command = [part.format(issue_number=issue_number) for part in template]
         completed = subprocess.run(command, check=False)
         if completed.returncode != 0:
-            raise RuntimeError(f"fix dispatch command failed with exit {completed.returncode}")
+            raise RuntimeError(f"dispatch command failed with exit {completed.returncode}")
 
     return dispatch
 
@@ -142,11 +150,13 @@ class SlashCommandHandler:
         github: _IssueLookupClient,
         lark: _ReplyClient,
         fix_dispatch: Callable[[int], None] | None = None,
+        retriage_dispatch: Callable[[int], None] | None = None,
     ) -> None:
         self._config = config
         self._github = github
         self._lark = lark
         self._fix_dispatch = fix_dispatch
+        self._retriage_dispatch = retriage_dispatch
 
     def handle(self, message: LarkMessage) -> SlashResult | None:
         """Handle one message. Return None if it is not a slash command.
@@ -180,6 +190,8 @@ class SlashCommandHandler:
             return SlashResult(command=command.kind, issue_number=None, reason="slash_no_issue")
         if command.kind == "fix":
             return self._handle_fix(message, issue)
+        if command.kind == "retriage":
+            return self._handle_retriage(message, issue)
         return self._handle_assign(message, issue, command)
 
     def _handle_fix(self, message: LarkMessage, issue: GitHubIssue) -> SlashResult:
@@ -192,6 +204,16 @@ class SlashCommandHandler:
             f"🛠️ 已触发修复 [#{issue.number}]({issue.url})（若已有进行中的修复会自动跳过）",
         )
         return SlashResult(command="fix", issue_number=issue.number, reason="slash_fix")
+
+    def _handle_retriage(self, message: LarkMessage, issue: GitHubIssue) -> SlashResult:
+        if self._retriage_dispatch is None:
+            self._reply(message, "⚠️ 未配置分诊触发命令，无法从 Lark 重新分诊")
+            return SlashResult(
+                command="retriage", issue_number=issue.number, reason="slash_retriage_unconfigured"
+            )
+        self._retriage_dispatch(issue.number)
+        self._reply(message, f"🔁 已重新触发分诊 [#{issue.number}]({issue.url})")
+        return SlashResult(command="retriage", issue_number=issue.number, reason="slash_retriage")
 
     def _handle_assign(
         self, message: LarkMessage, issue: GitHubIssue, command: SlashCommand
