@@ -44,9 +44,18 @@ def build_post_content(text: str) -> dict[str, object]:
 # Lark error code returned when acting on a withdrawn/recalled message.
 MESSAGE_WITHDRAWN_CODE = 230011
 
+# Lark error code for an expired/invalid tenant access token. A long-running
+# process (the watcher) can be holding a token that Lark has since invalidated;
+# on this code we force a re-mint and retry once so it self-heals in place.
+INVALID_ACCESS_TOKEN_CODE = 99991663
+
 
 def is_message_withdrawn_error(error: Exception) -> bool:
     return isinstance(error, LarkOpenApiError) and f'"code":{MESSAGE_WITHDRAWN_CODE}' in str(error)
+
+
+def is_invalid_access_token_error(error: Exception) -> bool:
+    return isinstance(error, LarkOpenApiError) and f'"code":{INVALID_ACCESS_TOKEN_CODE}' in str(error)
 
 
 @dataclass(frozen=True)
@@ -267,12 +276,23 @@ class LarkOpenApiMessengerClient:
         path: str,
         payload: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        return self._request_without_auth(
-            method,
-            path,
-            payload or {},
-            headers={"Authorization": f"Bearer {self._tenant_token()}"},
-        )
+        def call() -> dict[str, object]:
+            return self._request_without_auth(
+                method,
+                path,
+                payload or {},
+                headers={"Authorization": f"Bearer {self._tenant_token()}"},
+            )
+
+        try:
+            return call()
+        except LarkOpenApiError as error:
+            if not is_invalid_access_token_error(error):
+                raise
+            # Cached token was invalidated (e.g. a watcher running for hours):
+            # drop it, re-mint on the next call, and retry exactly once.
+            self._tenant_access_token = None
+            return call()
 
     def _request_without_auth(
         self,

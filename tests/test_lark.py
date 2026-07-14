@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import io
 import json
 import unittest
+import urllib.error
 from unittest.mock import MagicMock, patch
 
-from bugpatrol.lark import LarkOpenApiMessengerClient, build_post_content, parse_lark_message
+from bugpatrol.lark import (
+    INVALID_ACCESS_TOKEN_CODE,
+    LarkOpenApiError,
+    LarkOpenApiMessengerClient,
+    build_post_content,
+    parse_lark_message,
+)
 
 
 class BuildPostContentTest(unittest.TestCase):
@@ -431,6 +439,78 @@ class LarkOpenApiMessengerClientTest(unittest.TestCase):
 
         resource_request = urlopen.call_args_list[1].args[0]
         self.assertIn("/im/v1/messages/om_1/resources/img_v2_abc?type=image", resource_request.full_url)
+
+
+class LarkTokenSelfHealTest(unittest.TestCase):
+    @staticmethod
+    def _token_response(token: str) -> MagicMock:
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(
+            {"code": 0, "tenant_access_token": token}
+        ).encode()
+        return response
+
+    @staticmethod
+    def _invalid_token_http_error() -> urllib.error.HTTPError:
+        # Lark serializes error bodies compactly (`"code":99991663`, no space).
+        body = json.dumps(
+            {
+                "code": INVALID_ACCESS_TOKEN_CODE,
+                "msg": "Invalid access token for authorization.",
+            },
+            separators=(",", ":"),
+        ).encode()
+        return urllib.error.HTTPError(
+            url="https://open.larksuite.com/open-apis/im/v1/messages",
+            code=400,
+            msg="Bad Request",
+            hdrs=None,  # type: ignore[arg-type]
+            fp=io.BytesIO(body),
+        )
+
+    def test_remints_and_retries_once_on_invalid_token(self) -> None:
+        client = LarkOpenApiMessengerClient(app_id="app", app_secret="secret")
+
+        send_response = MagicMock()
+        send_response.__enter__.return_value.read.return_value = json.dumps(
+            {"code": 0, "data": {"message_id": "om_ok"}}
+        ).encode()
+
+        with patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = [
+                self._token_response("stale"),  # first mint
+                self._invalid_token_http_error(),  # send with stale token -> 99991663
+                self._token_response("fresh"),  # forced re-mint
+                send_response,  # retry succeeds
+            ]
+
+            sent = client.send_chat_message(chat_id="oc_1", text="hello")
+
+        self.assertEqual(sent.message_id, "om_ok")
+        self.assertEqual(urlopen.call_count, 4)
+        # The retried send must carry the freshly minted token, not the stale one.
+        retried_send = urlopen.call_args_list[3].args[0]
+        self.assertEqual(retried_send.get_header("Authorization"), "Bearer fresh")
+
+    def test_does_not_retry_other_errors(self) -> None:
+        client = LarkOpenApiMessengerClient(app_id="app", app_secret="secret")
+
+        other_error = urllib.error.HTTPError(
+            url="https://open.larksuite.com/open-apis/im/v1/messages",
+            code=500,
+            msg="Server Error",
+            hdrs=None,  # type: ignore[arg-type]
+            fp=io.BytesIO(json.dumps({"code": 9999, "msg": "boom"}).encode()),
+        )
+
+        with patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = [self._token_response("token"), other_error]
+
+            with self.assertRaises(LarkOpenApiError):
+                client.send_chat_message(chat_id="oc_1", text="hello")
+
+        # One mint + one failed send, no re-mint / retry.
+        self.assertEqual(urlopen.call_count, 2)
 
 
 if __name__ == "__main__":
