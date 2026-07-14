@@ -14,6 +14,7 @@ from bugpatrol.intake import (
     Attachment,
     IntakeRecord,
     format_created_at,
+    parse_intake_metadata,
     render_attachments_markdown,
     render_batched_issue_body,
     render_issue_body,
@@ -22,6 +23,31 @@ from bugpatrol.lark import is_message_withdrawn_error
 from bugpatrol.triage_queue import TriageSignal, classify_triage_signal
 
 INTAKE_REPLY_META_MARKER = "BUGPATROL_INTAKE_REPLY_META"
+
+
+def parse_intake_reply_metadata(body: str) -> dict[str, object] | None:
+    """Parse the meta footer of an intake follow-up comment, if present."""
+    marker = f"<!-- {INTAKE_REPLY_META_MARKER}:"
+    start = body.find(marker)
+    if start == -1:
+        return None
+    json_start = start + len(marker)
+    end = body.find(" -->", json_start)
+    if end == -1:
+        return None
+    data = json.loads(body[json_start:end])
+    if not isinstance(data, dict):
+        raise ValueError("intake reply metadata must be a JSON object")
+    return data
+
+
+def _collect_message_ids(meta: dict[str, object], into: set[str]) -> None:
+    single = meta.get("message_id")
+    if isinstance(single, str) and single:
+        into.add(single)
+    many = meta.get("message_ids")
+    if isinstance(many, list):
+        into.update(item for item in many if isinstance(item, str) and item)
 
 
 @dataclass(frozen=True)
@@ -92,29 +118,41 @@ class IntakeWorkflow:
         )
         if existing is not None:
             healed = self._heal_missing_intake_fields(record=first, issue_number=existing.number)
+            recorded = self._recorded_message_ids(existing)
+            new_records = [record for record in records if record.message_id not in recorded]
+            if not new_records:
+                # Every message in this batch was already captured — skip the
+                # duplicate follow-up entirely (heal still applies above).
+                return self._duplicate_outcome(record=records[-1], issue=existing, healed=healed)
+            if len(new_records) == 1:
+                comment = render_followup_comment(new_records[0], language=self._config.intake.language)
+            else:
+                comment = render_batched_followup_comment(
+                    new_records, language=self._config.intake.language
+                )
             self._github.add_issue_comment(
                 repo=self._config.github_repo,
                 issue_number=existing.number,
-                body=render_batched_followup_comment(records, language=self._config.intake.language),
+                body=comment,
             )
             triage_signal = _merge_triage_signals(
                 classify_triage_signal("updated", record, self._config.followup_classifier)
-                for record in records
+                for record in new_records
             )
             if healed and not triage_signal.should_enqueue:
                 triage_signal = TriageSignal(
                     should_enqueue=True,
                     reason="healed_missing_fields",
-                    material_message_ids=tuple(record.message_id for record in records),
-                    asset_urls=_all_asset_urls(records),
+                    material_message_ids=tuple(record.message_id for record in new_records),
+                    asset_urls=_all_asset_urls(new_records),
                 )
             self._mark_pending_after_final_status(
                 issue_number=existing.number,
                 triage_signal=triage_signal,
             )
             reply = self._reply_best_effort(
-                record=records[-1],
-                text=f"已追加 {len(records)} 条到 GitHub issue [#{existing.number}]({existing.url})",
+                record=new_records[-1],
+                text=f"已追加 {len(new_records)} 条到 GitHub issue [#{existing.number}]({existing.url})",
             )
             return IntakeOutcome(
                 action="updated",
@@ -181,6 +219,11 @@ class IntakeWorkflow:
         )
         if existing is not None:
             healed = self._heal_missing_intake_fields(record=record, issue_number=existing.number)
+            if record.message_id in self._recorded_message_ids(existing):
+                # This message was already captured (a watcher replay or a
+                # backfill re-scan): never append a second follow-up comment for
+                # the same message.
+                return self._duplicate_outcome(record=record, issue=existing, healed=healed)
             comment = render_followup_comment(record, language=self._config.intake.language)
             self._github.add_issue_comment(
                 repo=self._config.github_repo,
@@ -267,6 +310,56 @@ class IntakeWorkflow:
                 raise
             return f"{text}（原消息已撤回，未发送 Lark 回执）"
         return text
+
+    def _recorded_message_ids(self, issue: GitHubIssue) -> set[str]:
+        """Lark message ids already captured on an issue (body + follow-ups).
+
+        The issue body's intake meta and every follow-up comment's meta embed
+        the message ids they carry. Reading them back makes de-dup stateless:
+        any re-scan (watcher replay or backfill) can tell what is already here
+        without a local ledger.
+        """
+        recorded: set[str] = set()
+        body_meta = parse_intake_metadata(issue.body or "")
+        if body_meta is not None:
+            _collect_message_ids(body_meta, recorded)
+        for comment in self._github.list_issue_comments(
+            repo=self._config.github_repo,
+            issue_number=issue.number,
+        ):
+            reply_meta = parse_intake_reply_metadata(comment.body)
+            if reply_meta is not None:
+                _collect_message_ids(reply_meta, recorded)
+        return recorded
+
+    def _duplicate_outcome(
+        self, *, record: IntakeRecord, issue: GitHubIssue, healed: bool
+    ) -> IntakeOutcome:
+        """Outcome for a message already captured on the issue.
+
+        No second comment and no Lark receipt (the message was already
+        acknowledged when first captured). If the field-heal fired, triage still
+        needs to run once, so enqueue that.
+        """
+        if healed:
+            triage_signal = TriageSignal(
+                should_enqueue=True,
+                reason="healed_missing_fields",
+                material_message_ids=(record.message_id,),
+                asset_urls=tuple(item.url for item in record.attachments if item.url),
+            )
+            self._mark_pending_after_final_status(
+                issue_number=issue.number,
+                triage_signal=triage_signal,
+            )
+        else:
+            triage_signal = TriageSignal(should_enqueue=False, reason="duplicate_message")
+        return IntakeOutcome(
+            action="duplicate",
+            issue=issue,
+            lark_reply="（该消息之前已处理，跳过重复追加）",
+            triage_signal=triage_signal,
+        )
 
     def _heal_missing_intake_fields(self, *, record: IntakeRecord, issue_number: int) -> bool:
         """Backfill intake fields lost to a crash between issue create and field write.

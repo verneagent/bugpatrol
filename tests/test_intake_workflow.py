@@ -198,6 +198,68 @@ class IntakeWorkflowTest(unittest.TestCase):
 
         self.assertEqual(issue_fields.writes, [])
 
+    def test_process_skips_already_recorded_message(self) -> None:
+        # A watcher replay or a backfill re-scan feeds the same message again;
+        # it must not append a second follow-up comment or re-notify Lark.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        workflow.process(make_record(message_id="om_first", original_text="首次上报"))
+        workflow.process(make_record(message_id="om_second", original_text="补充"))
+        outcome = workflow.process(make_record(message_id="om_second", original_text="补充"))
+
+        self.assertEqual(outcome.action, "duplicate")
+        self.assertFalse(outcome.triage_signal.should_enqueue)
+        # Still exactly one follow-up comment and two Lark replies (create + first
+        # follow-up); the duplicate produced neither.
+        self.assertEqual(len(github.created[0].comments), 1)
+        self.assertEqual(len(lark.replies), 2)
+
+    def test_process_batch_appends_only_new_messages(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        workflow.process(make_record(message_id="om_a", original_text="首次"))
+        outcome = workflow.process_batch(
+            [
+                make_record(message_id="om_a", original_text="首次"),
+                make_record(message_id="om_b", original_text="补充1"),
+                make_record(message_id="om_c", original_text="补充2"),
+            ]
+        )
+
+        self.assertEqual(outcome.action, "updated")
+        self.assertEqual(len(github.created[0].comments), 1)
+        # Only the two new messages are in the follow-up; the recorded one is not.
+        self.assertIn("om_b", github.created[0].comments[0])
+        self.assertIn("om_c", github.created[0].comments[0])
+        self.assertNotIn("om_a", github.created[0].comments[0])
+        self.assertIn("已追加 2 条", lark.replies[-1].text)
+
+    def test_process_batch_all_recorded_is_a_duplicate(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        workflow.process(make_record(message_id="om_a", original_text="首次"))
+        workflow.process(make_record(message_id="om_b", original_text="补充"))
+        replies_before = len(lark.replies)
+        outcome = workflow.process_batch(
+            [
+                make_record(message_id="om_a", original_text="首次"),
+                make_record(message_id="om_b", original_text="补充"),
+            ]
+        )
+
+        self.assertEqual(outcome.action, "duplicate")
+        self.assertEqual(len(github.created[0].comments), 1)
+        self.assertEqual(len(lark.replies), replies_before)
+
     def test_process_deduplicates_create_race_without_commenting(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = RaceGitHubIssuesClient()

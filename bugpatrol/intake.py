@@ -132,6 +132,9 @@ def render_batched_issue_body(records: Sequence[IntakeRecord], *, language: str 
         "chat_id": first.chat_id,
         "root_id": first.root_id,
         "message_id": first.message_id,
+        # Every folded message's id, so a re-scan can tell the whole batch was
+        # already captured (not just the first message) and skip re-appending.
+        "message_ids": [record.message_id for record in records],
         "reporter_open_id": first.reporter_open_id,
         "attachment_urls": [item.url for record in records for item in record.attachments],
     }
