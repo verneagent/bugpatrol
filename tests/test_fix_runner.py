@@ -62,7 +62,9 @@ class FakeGithub:
         pr_comment_bodies=(),
         failed_runs=(),
         failed_logs=None,
+        state: str = "open",
     ) -> None:
+        self.state = state
         self.comments = list(comments or [])
         self.added_comments: list[str] = []
         self.open_pr = open_pr
@@ -84,6 +86,7 @@ class FakeGithub:
             title="Todo empty state missing",
             body=managed_issue_body(),
             assignees=self.assignees,
+            state=self.state,
         )
 
     def list_issue_comments(self, *, repo: str, issue_number: int):
@@ -228,6 +231,22 @@ class RunFixGuardsTest(unittest.TestCase):
             )
         self.assertEqual(status, "already_open_pr")
         self.assertFalse(github.created_prs)
+
+    def test_closed_issue_skips(self) -> None:
+        config = _sandbox_config()
+        github = FakeGithub(state="closed")
+        with tempfile.TemporaryDirectory() as tmp:
+            status = run_fix(
+                config=config,
+                issue_number=7,
+                base_repo=Path(tmp),
+                output_dir=Path(tmp) / "out",
+                github=github,  # type: ignore[arg-type]
+                issue_fields=FakeIssueFields("代码 Bug"),  # type: ignore[arg-type]
+            )
+        self.assertEqual(status, "issue_closed")
+        self.assertFalse(github.created_prs)
+        self.assertFalse(github.added_comments)
 
 
 def _init_git_repo(path: Path) -> None:
@@ -574,6 +593,25 @@ class RunFixReviseGuardsTest(unittest.TestCase):
         self.assertEqual(status, "no_feedback")
         self.assertFalse(github.resolved_threads)
 
+    def test_closed_issue_skips(self) -> None:
+        config = _sandbox_config()
+        github = FakeGithub(
+            state="closed",
+            open_pull_request=OpenPullRequest(number=9, url="https://github.test/o/r/pull/9"),
+            review_threads=(),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            status = run_fix_revise(
+                config=config,
+                issue_number=7,
+                base_repo=Path(tmp),
+                output_dir=Path(tmp) / "out",
+                github=github,  # type: ignore[arg-type]
+                issue_fields=FakeIssueFields("代码 Bug"),  # type: ignore[arg-type]
+            )
+        self.assertEqual(status, "issue_closed")
+        self.assertFalse(github.resolved_threads)
+
 
 class ExecuteFixReviseTest(unittest.TestCase):
     def _plan(self, *, worktree: Path, output_dir: Path, verify: dict[str, str], command, setup=None):
@@ -878,6 +916,17 @@ class RunCiFixGuardsTest(unittest.TestCase):
         github = FakeGithub(open_pull_request=None)
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(self._run(github, Path(tmp), tmp), "no_pr")
+
+    def test_closed_issue_skips(self) -> None:
+        pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
+        github = FakeGithub(
+            state="closed",
+            open_pull_request=pr,
+            failed_runs=(FailedRun(run_id=1, name="iOS Build", workflow_name="iOS Build"),),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._run(github, Path(tmp), tmp), "issue_closed")
+        self.assertFalse(github.pr_comments)
 
     def test_sha_already_handled_short_circuits(self) -> None:
         pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")

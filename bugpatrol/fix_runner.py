@@ -262,7 +262,7 @@ def run_fix(
 ) -> str:
     """Full auto-fix lifecycle for one issue; returns a terminal status string.
 
-    Statuses: not_fixable, already_open_pr, blocked, verify_failed,
+    Statuses: not_fixable, issue_closed, already_open_pr, blocked, verify_failed,
     setup_failed, baseline_broken, no_changes, no_output, opened_pr.
     """
     if config.fix is None:
@@ -270,6 +270,10 @@ def run_fix(
     fix = config.fix
     issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
     require_bugpatrol_managed_issue(issue)
+    if issue.state == "closed":
+        # A closed issue must not be auto-fixed. Reopen it to resume.
+        print(f"issue #{issue_number} is closed; skipping auto-fix", file=sys.stderr)
+        return "issue_closed"
 
     verdict = read_triage_verdict(config=config, issue_number=issue_number, issue_fields=issue_fields)
     readiness = evaluate_triage_readiness(verdict=verdict, fix=fix)
@@ -384,7 +388,7 @@ def run_fix_revise(
     on a different runner than the run that opened the PR. When the PR conflicts
     with its target branch it merges the target in (never force-push) and lets
     the agent resolve the markers, escalating to a human if too many files
-    conflict. Statuses: no_open_pr, no_feedback, conflict_escalated,
+    conflict. Statuses: no_open_pr, issue_closed, no_feedback, conflict_escalated,
     conflict_unresolved, conflict_resolved, blocked, no_changes, no_output,
     setup_failed, verify_failed, revised.
     """
@@ -393,6 +397,10 @@ def run_fix_revise(
     fix = config.fix
     issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
     require_bugpatrol_managed_issue(issue)
+    if issue.state == "closed":
+        # A closed issue must not be auto-revised. Reopen it to resume.
+        print(f"issue #{issue_number} is closed; skipping fix revise", file=sys.stderr)
+        return "issue_closed"
 
     head_branch = fix.branch_for_issue(issue_number)
     pr = github.get_open_pull_request_by_head(repo=config.github_repo, head=head_branch)
@@ -632,15 +640,22 @@ def run_ci_fix(
     the failed runs + de-dupe meta from GitHub, so any runner can react. De-dupe
     keys on ``head_sha`` (one push → many failed workflows → many events), not
     run_id. Bounded by ``[fix.gate].max_ci_fix_attempts``; at the cap it escalates
-    to the PR reviewer instead of editing. Statuses: no_pr, ci_already_handled,
-    no_ci_failure, ci_fix_escalated, ci_fixed, blocked, no_changes, no_output,
-    setup_failed, verify_failed.
+    to the PR reviewer instead of editing. Statuses: no_pr, issue_closed,
+    ci_already_handled, no_ci_failure, ci_fix_escalated, ci_fixed, blocked,
+    no_changes, no_output, setup_failed, verify_failed.
     """
     if config.fix is None:
         raise ValueError("project config has no [fix] table; auto-fix is not enabled")
     fix = config.fix
     issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
     require_bugpatrol_managed_issue(issue)
+    if issue.state == "closed":
+        # The issue was closed (won't-fix, or handled elsewhere): stop the CI-fix
+        # loop even though the fix PR is still open. Reopen the issue to resume.
+        # Silent skip -- CI failures fire this per-workflow (many events/push), so
+        # a Lark notice here would spam the topic.
+        print(f"issue #{issue_number} is closed; skipping CI fix", file=sys.stderr)
+        return "issue_closed"
 
     head_branch = fix.branch_for_issue(issue_number)
     pr = github.get_open_pull_request_by_head(repo=config.github_repo, head=head_branch)
