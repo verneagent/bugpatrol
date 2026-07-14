@@ -873,6 +873,12 @@ def main(argv: list[str] | None = None) -> int:
                         file=sys.stderr,
                     )
                     continue
+                if status == "invalid_output":
+                    print(
+                        f"triage agent output failed validation (attempt {attempt}); retrying",
+                        file=sys.stderr,
+                    )
+                    continue
                 if status != "stale_context":
                     return plan
                 print(

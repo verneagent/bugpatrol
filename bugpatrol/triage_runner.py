@@ -333,7 +333,27 @@ def execute_triage_run(
             lark=lark,
         )
         raise RuntimeError("triage agent exited 0 but produced no output file")
-    result = parse_triage_result(json.loads(plan.output_path.read_text()))
+    try:
+        result = parse_triage_result(json.loads(plan.output_path.read_text()))
+    except (ValueError, json.JSONDecodeError) as error:
+        # The agent wrote an output file, but it failed schema/consistency
+        # validation (e.g. duplicate_of set without verdict 重复, or malformed
+        # JSON). This is a stochastic agent mistake, not a misconfiguration, so
+        # retry like no_output; only on the final attempt do we mark the issue
+        # Failed. Crashing here (the old behavior) left Triage status stuck at
+        # "Running" forever, which no re-scan would ever re-dispatch.
+        if not final_attempt:
+            return "invalid_output"
+        mark_triage_failed(
+            config=config,
+            issue_number=issue_number,
+            exit_code=0,
+            github=github,
+            issue_fields=issue_fields,
+            lark=lark,
+            reason=f"Triage agent output failed validation: {error}",
+        )
+        raise RuntimeError(f"triage agent output failed validation: {error}") from error
     if plan.known_assignees and result.assignee not in plan.known_assignees:
         mark_triage_failed(
             config=config,

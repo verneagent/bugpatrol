@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -421,6 +422,77 @@ class TriageRunnerTest(unittest.TestCase):
         # No Failed status or failure comment yet: the caller retries.
         self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Running"})
         self.assertNotIn("BugPatrol triage failed", "".join(github.comments))
+
+    def test_execute_triage_run_retries_on_invalid_output_before_final_attempt(self) -> None:
+        # Reproduces #3987: agent wrote duplicate_of>0 without verdict 重复.
+        # The strict parser used to raise unhandled, wedging Triage status at
+        # "Running" forever; now it retries like no_output.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        bad = json.loads(valid_triage_output())
+        bad["duplicate_of"] = 42
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "output.json"
+            output.write_text(json.dumps(bad))
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=output,
+                invocation=AgentInvocation(provider="codex", command=["true"]),
+                context_comment_ids=("1",),
+            )
+
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["true"], 0)
+                status = execute_triage_run(
+                    config=config,
+                    issue_number=7,
+                    plan=plan,
+                    github=github,  # type: ignore[arg-type]
+                    issue_fields=issue_fields,  # type: ignore[arg-type]
+                    final_attempt=False,
+                )
+
+        self.assertEqual(status, "invalid_output")
+        # Not wedged: no Failed status, no apply, caller retries.
+        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Running"})
+        self.assertNotIn("BugPatrol triage failed", "".join(github.comments))
+        self.assertEqual(github.issue_types, [])
+
+    def test_execute_triage_run_marks_failed_on_invalid_output_final_attempt(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        bad = json.loads(valid_triage_output())
+        bad["duplicate_of"] = 42
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "output.json"
+            output.write_text(json.dumps(bad))
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=output,
+                invocation=AgentInvocation(provider="codex", command=["true"]),
+                context_comment_ids=("1",),
+            )
+
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["true"], 0)
+                with self.assertRaisesRegex(RuntimeError, "failed validation"):
+                    execute_triage_run(
+                        config=config,
+                        issue_number=7,
+                        plan=plan,
+                        github=github,  # type: ignore[arg-type]
+                        issue_fields=issue_fields,  # type: ignore[arg-type]
+                    )
+
+        # Terminal Failed status clears the wedged "Running".
+        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Failed"})
+        self.assertIn("BugPatrol triage failed", "".join(github.comments))
 
     def test_render_triage_failed_comment_is_actionable(self) -> None:
         comment = render_triage_failed_comment(exit_code=2)
