@@ -228,6 +228,7 @@ def apply_triage_result(
                     "issue": issue_number,
                     "result_fingerprint": fingerprint,
                     "decision_key": decision_key,
+                    "duplicate_of": result.duplicate_of,
                     "blame_suggestion": result.blame_suggestion,
                     "suspected_owner": result.suspected_owner,
                 },

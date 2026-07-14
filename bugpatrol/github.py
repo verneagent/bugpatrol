@@ -60,7 +60,7 @@ class GitHubCliIssuesClient:
                 "--limit",
                 str(self._search_limit),
                 "--json",
-                "number,url,title,body",
+                "number,url,title,body,state,stateReason",
             ]
         )
         for item in json.loads(result.stdout):
@@ -71,6 +71,8 @@ class GitHubCliIssuesClient:
                     url=str(item["url"]),
                     title=str(item["title"]),
                     body=body,
+                    state=str(item.get("state") or "").lower(),
+                    state_reason=str(item.get("stateReason") or ""),
                 )
         return None
 
@@ -203,6 +205,10 @@ class GitHubCliIssuesClient:
             body=str(data.get("body") or ""),
             state=str(data.get("state") or ""),
             state_reason=str(data.get("state_reason") or ""),
+            closed_at=str(data.get("closed_at") or ""),
+            closed_by=str((data.get("closed_by") or {}).get("login") or "")
+            if isinstance(data.get("closed_by"), dict)
+            else "",
             assignees=tuple(
                 str(item["login"])
                 for item in data.get("assignees") or ()

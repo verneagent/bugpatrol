@@ -15,6 +15,7 @@ class GitHubIssue:
     state: str = ""
     state_reason: str = ""
     closed_at: str = ""
+    closed_by: str = ""
     assignees: tuple[str, ...] = ()
 
 

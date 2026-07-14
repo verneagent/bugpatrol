@@ -15,6 +15,14 @@ from bugpatrol.config import load_project_config
 from bugpatrol.fix_notify import render_fix_metadata_comment
 from bugpatrol.intake import IntakeRecord, render_issue_body
 from bugpatrol.testing.fakes import FakeLarkMessengerClient
+from bugpatrol.triage_result import append_triage_metadata
+
+
+def render_triage_metadata_comment(*, duplicate_of: int) -> str:
+    return append_triage_metadata(
+        "结论：重复，已关闭。",
+        {"version": 1, "issue": 7, "duplicate_of": duplicate_of},
+    )
 
 
 def _managed_body(chat_id: str = "oc_1") -> str:
@@ -62,6 +70,7 @@ def _closed_issue(**overrides) -> GitHubIssue:
         body=_managed_body(),
         state="closed",
         state_reason="completed",
+        closed_by="octocat",
         assignees=("garlanddiego",),
     )
     values.update(overrides)
@@ -137,15 +146,82 @@ class CloseAuditTest(unittest.TestCase):
         self.assertFalse(summary.audited)
         self.assertEqual(summary.skipped_reason, "not bugpatrol-managed")
 
-    def test_skips_not_completed_close_reason(self) -> None:
-        github = FakeGithub(issue=_closed_issue(state_reason="not_planned"))
+    def test_skips_unknown_close_reason(self) -> None:
+        github = FakeGithub(issue=_closed_issue(state_reason=""))
 
         summary = audit_issue_close(
             repo="o/r", issue_number=7, config=self.config, github=github, dry_run=False
         )
 
         self.assertFalse(summary.audited)
-        self.assertIn("not_planned", summary.skipped_reason)
+        self.assertIn("nothing to notify", summary.skipped_reason)
+        self.assertEqual(github.comments, [])
+
+    def _notify_config(self):
+        return dataclasses.replace(
+            self.config,
+            lark=dataclasses.replace(self.config.lark, user_open_ids={"garlanddiego": "ou_dev"}),
+        )
+
+    def test_notifies_and_dedupes_on_not_planned_close(self) -> None:
+        config = self._notify_config()
+        github = FakeGithub(
+            issue=_closed_issue(state_reason="not_planned", body=_managed_body(chat_id=config.lark.chat_id))
+        )
+        lark = FakeLarkMessengerClient()
+
+        first = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+        second = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertTrue(first.notified)
+        self.assertTrue(first.lark_sent)
+        self.assertFalse(second.notified)
+        self.assertEqual(second.skipped_reason, "already notified")
+        self.assertEqual(len(github.comments), 1)
+        self.assertEqual(len(lark.replies), 1)
+        text = lark.replies[0].text
+        self.assertIn("not planned", text)
+        self.assertIn("octocat（GitHub）", text)
+        # reporter (ou_1 from _managed_body) and assignee are both @-mentioned.
+        self.assertIn('<at user_id="ou_1">上报人</at>', text)
+        self.assertIn('<at user_id="ou_dev">garlanddiego</at>', text)
+
+    def test_notifies_on_duplicate_close(self) -> None:
+        config = self._notify_config()
+        github = FakeGithub(
+            issue=_closed_issue(state_reason="duplicate", body=_managed_body(chat_id=config.lark.chat_id))
+        )
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertTrue(summary.notified)
+        self.assertEqual(summary.kind, "closed_duplicate")
+        self.assertIn("duplicate", lark.replies[0].text)
+
+    def test_skips_duplicate_when_triage_already_announced(self) -> None:
+        config = self._notify_config()
+        github = FakeGithub(
+            issue=_closed_issue(state_reason="duplicate", body=_managed_body(chat_id=config.lark.chat_id))
+        )
+        github.comments.append(render_triage_metadata_comment(duplicate_of=3))
+
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertTrue(summary.audited)
+        self.assertFalse(summary.notified)
+        self.assertEqual(summary.skipped_reason, "triage already announced duplicate")
+        self.assertEqual(len(lark.replies), 0)
 
     def test_passes_when_evidence_exists(self) -> None:
         github = FakeGithub(
@@ -182,7 +258,7 @@ class CloseAuditTest(unittest.TestCase):
         self.assertTrue(first.nagged)
         self.assertTrue(first.lark_sent)
         self.assertFalse(second.nagged)
-        self.assertEqual(second.skipped_reason, "already nagged")
+        self.assertEqual(second.skipped_reason, "already notified")
         self.assertEqual(len(github.comments), 1)
         self.assertIn("@garlanddiego", github.comments[0])
         self.assertIn("Fixes #7", github.comments[0])

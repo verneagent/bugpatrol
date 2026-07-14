@@ -59,12 +59,13 @@ class _StubReplyClient:
         self.replies.append(text)
 
 
-def _issue(number: int = 42) -> GitHubIssue:
+def _issue(number: int = 42, state: str = "open") -> GitHubIssue:
     return GitHubIssue(
         number=number,
         url=f"https://github.test/acme/widgets/issues/{number}",
         title="bug",
         body="body",
+        state=state,
     )
 
 
@@ -213,6 +214,34 @@ class SlashCommandHandlerTest(unittest.TestCase):
         assert result is not None
         self.assertEqual(result.reason, "slash_retriage_unconfigured")
         self.assertIn("未配置", lark.replies[0])
+
+    def test_fix_on_closed_issue_does_not_dispatch(self) -> None:
+        calls: list[int] = []
+        github = _StubIssueClient(_issue(42, state="closed"))
+        lark = _StubReplyClient()
+        handler = SlashCommandHandler(
+            config=_config(), github=github, lark=lark, fix_dispatch=calls.append
+        )
+        result = handler.handle(_message(text="/fix"))
+        assert result is not None
+        self.assertEqual(result.reason, "slash_fix_closed")
+        self.assertEqual(calls, [])
+        self.assertIn("已关闭", lark.replies[0])
+        self.assertIn("reopen", lark.replies[0])
+
+    def test_retriage_on_closed_issue_does_not_dispatch(self) -> None:
+        calls: list[int] = []
+        github = _StubIssueClient(_issue(42, state="closed"))
+        lark = _StubReplyClient()
+        handler = SlashCommandHandler(
+            config=_config(), github=github, lark=lark, retriage_dispatch=calls.append
+        )
+        result = handler.handle(_message(text="/retriage"))
+        assert result is not None
+        self.assertEqual(result.reason, "slash_retriage_closed")
+        self.assertEqual(calls, [])
+        self.assertIn("已关闭", lark.replies[0])
+        self.assertIn("reopen", lark.replies[0])
 
     def test_no_issue_reports(self) -> None:
         github = _StubIssueClient(None)

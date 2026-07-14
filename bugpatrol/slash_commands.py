@@ -195,6 +195,13 @@ class SlashCommandHandler:
         return self._handle_assign(message, issue, command)
 
     def _handle_fix(self, message: LarkMessage, issue: GitHubIssue) -> SlashResult:
+        if issue.state == "closed":
+            self._reply(
+                message,
+                f"⚠️ [#{issue.number}]({issue.url}) 已关闭，未触发修复。"
+                f"如需修复请先手动 reopen 该 issue，再发 `/fix`。",
+            )
+            return SlashResult(command="fix", issue_number=issue.number, reason="slash_fix_closed")
         if self._fix_dispatch is None:
             self._reply(message, "⚠️ 未配置修复触发命令，无法从 Lark 启动修复")
             return SlashResult(command="fix", issue_number=issue.number, reason="slash_fix_unconfigured")
@@ -206,6 +213,13 @@ class SlashCommandHandler:
         return SlashResult(command="fix", issue_number=issue.number, reason="slash_fix")
 
     def _handle_retriage(self, message: LarkMessage, issue: GitHubIssue) -> SlashResult:
+        if issue.state == "closed":
+            self._reply(
+                message,
+                f"⚠️ [#{issue.number}]({issue.url}) 已关闭，未重新分诊。"
+                f"如需重新分诊请先手动 reopen 该 issue，再发 `/retriage`。",
+            )
+            return SlashResult(command="retriage", issue_number=issue.number, reason="slash_retriage_closed")
         if self._retriage_dispatch is None:
             self._reply(message, "⚠️ 未配置分诊触发命令，无法从 Lark 重新分诊")
             return SlashResult(
