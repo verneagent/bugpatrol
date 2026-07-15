@@ -246,6 +246,29 @@ class GitHubCliIssuesClient:
             raise GitHubCliError(f"unexpected timeline response for {repo}#{issue_number}")
         return tuple(item for item in data if isinstance(item, dict))
 
+    def commit_exists(self, *, repo: str, sha: str) -> bool:
+        """Whether `sha` resolves to a real commit in `repo`.
+
+        GitHub resolves abbreviated SHAs, so a 7-char short hash works. A
+        missing/ambiguous SHA makes `gh api` exit non-zero, which surfaces as a
+        GitHubCliError -- reported here as "not a commit" rather than raised, so
+        a bogus hex token in a comment simply isn't treated as fix evidence.
+        """
+        try:
+            self._run(
+                [
+                    "api",
+                    "-H",
+                    f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                    f"/repos/{repo}/commits/{sha}",
+                    "--jq",
+                    ".sha",
+                ]
+            )
+        except GitHubCliError:
+            return False
+        return True
+
     def get_pull_request(self, *, repo: str, pr: str) -> GitHubPullRequest:
         result = self._run(
             [

@@ -48,14 +48,24 @@ def _managed_body(chat_id: str = "oc_1") -> str:
 
 
 class FakeGithub:
-    def __init__(self, *, issue: GitHubIssue, timeline: tuple[dict, ...] = ()) -> None:
+    def __init__(
+        self,
+        *,
+        issue: GitHubIssue,
+        timeline: tuple[dict, ...] = (),
+        known_commits: tuple[str, ...] = (),
+    ) -> None:
         self.issue = issue
         self.timeline = timeline
         self.comments: list[str] = []
         self.reopened = False
+        self.known_commits = {sha.lower() for sha in known_commits}
 
     def get_issue(self, *, repo: str, issue_number: int) -> GitHubIssue:
         return self.issue
+
+    def commit_exists(self, *, repo: str, sha: str) -> bool:
+        return sha.lower() in self.known_commits
 
     def reopen_issue(self, *, repo: str, issue_number: int) -> None:
         self.reopened = True
@@ -265,6 +275,58 @@ class CloseAuditTest(unittest.TestCase):
         self.assertEqual(summary.evidence, "commit abc123")
         self.assertFalse(summary.nagged)
         self.assertEqual(github.comments, [])
+
+    def test_commit_sha_cited_in_comment_counts_as_evidence(self) -> None:
+        # A fix committed directly to a feature branch has no GitHub-native link,
+        # so a dev's "Fixed in <sha> ..." comment is honored when the SHA resolves.
+        github = FakeGithub(issue=_closed_issue(), known_commits=("0223259",))
+        github.comments.append("Fixed in 0223259 on 2026/chat-live: badge now reads 1 min.")
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="o/r", issue_number=7, config=self.config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertTrue(summary.audited)
+        self.assertEqual(summary.evidence, "commit 0223259 (cited in a comment)")
+        self.assertFalse(summary.nagged)
+        self.assertEqual(github.comments, ["Fixed in 0223259 on 2026/chat-live: badge now reads 1 min."])
+        self.assertEqual(len(lark.replies), 0)
+
+    def test_unresolvable_hex_in_comment_is_not_evidence(self) -> None:
+        # A hex-shaped token that isn't a real commit (known_commits empty) does
+        # not pass, so the missing-fix nag still fires.
+        config = self._notify_config()
+        github = FakeGithub(issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)))
+        github.comments.append("looks done, ref deadbeef1234")
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertTrue(summary.nagged)
+        self.assertEqual(summary.evidence, "")
+
+    def test_cited_commit_short_circuits_reopen_enforcement(self) -> None:
+        # The false-positive guard: an issue truly fixed on a feature branch and
+        # documented with a real SHA must NOT be reopened under enforcement.
+        config = self._enforce_config()
+        github = FakeGithub(
+            issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)),
+            known_commits=("0223259",),
+        )
+        github.comments.append("Fixed in 0223259 on 2026/chat-live.")
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertFalse(summary.reopened)
+        self.assertFalse(github.reopened)
+        self.assertEqual(summary.evidence, "commit 0223259 (cited in a comment)")
+        self.assertEqual(len(lark.replies), 0)
 
     def test_nags_once_with_github_comment_and_lark_mention(self) -> None:
         config = dataclasses.replace(

@@ -69,6 +69,14 @@ def audit_issue_close(
             timeline=github.list_issue_timeline(repo=repo, issue_number=issue_number),
             comments=comments,
         )
+        if not evidence:
+            # A fix on a feature branch (committed directly, not merged to the
+            # default branch, no PR) never gets a GitHub-native issue<->commit
+            # link, so devs point at it in a plain comment ("Fixed in <sha> ...").
+            # Honor that: a commit SHA cited in a comment that resolves to a real
+            # commit counts as a fix reference. Verifying the SHA keeps a random
+            # hex token from passing as evidence.
+            evidence = commit_evidence_from_comments(comments, repo=repo, github=github)
         if evidence:
             # A merged PR / linked fix commit is the canonical "fixed" signal;
             # fix_notify (reconcile) already announces it to Lark. Announcing it
@@ -189,6 +197,40 @@ def fix_evidence_for_issue(
             return f"fix notification PR #{pr.lstrip('#')}"
         if commit:
             return f"fix notification commit {commit}"
+    return ""
+
+
+# A word-bounded 7-40 char hex run: an (abbreviated) git commit SHA. Verified
+# against the repo before it counts, so decimal timestamps / issue numbers that
+# happen to match the shape are discarded when they don't resolve.
+_COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
+# Cap resolution attempts so a comment full of hex noise can't fan out into an
+# unbounded number of API calls.
+_MAX_SHA_CANDIDATES = 10
+
+
+def commit_evidence_from_comments(
+    comments: tuple[GitHubIssueComment, ...],
+    *,
+    repo: str,
+    github: GitHubCliIssuesClient,
+) -> str:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for comment in comments:
+        for match in _COMMIT_SHA_RE.findall(comment.body or ""):
+            sha = match.lower()
+            if sha in seen:
+                continue
+            seen.add(sha)
+            candidates.append(sha)
+            if len(candidates) >= _MAX_SHA_CANDIDATES:
+                break
+        if len(candidates) >= _MAX_SHA_CANDIDATES:
+            break
+    for sha in candidates:
+        if github.commit_exists(repo=repo, sha=sha):
+            return f"commit {sha} (cited in a comment)"
     return ""
 
 
