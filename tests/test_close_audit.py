@@ -52,9 +52,13 @@ class FakeGithub:
         self.issue = issue
         self.timeline = timeline
         self.comments: list[str] = []
+        self.reopened = False
 
     def get_issue(self, *, repo: str, issue_number: int) -> GitHubIssue:
         return self.issue
+
+    def reopen_issue(self, *, repo: str, issue_number: int) -> None:
+        self.reopened = True
 
     def list_issue_comments(self, *, repo: str, issue_number: int) -> tuple[GitHubIssueComment, ...]:
         return tuple(
@@ -288,6 +292,66 @@ class CloseAuditTest(unittest.TestCase):
         self.assertIn("Fixes #7", github.comments[0])
         self.assertEqual(len(lark.replies), 1)
         self.assertIn('<at user_id="ou_dev">garlanddiego</at>', lark.replies[0].text)
+
+    def _enforce_config(self):
+        base = self._notify_config()
+        return dataclasses.replace(
+            base,
+            close_audit=dataclasses.replace(
+                base.close_audit, reopen_completed_without_evidence=True
+            ),
+        )
+
+    def test_reopens_completed_close_without_evidence(self) -> None:
+        config = self._enforce_config()
+        github = FakeGithub(issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)))
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertTrue(summary.reopened)
+        self.assertTrue(summary.notified)
+        self.assertTrue(github.reopened)
+        self.assertEqual(len(github.comments), 1)
+        self.assertIn("已自动重新打开", github.comments[0])
+        self.assertIn("Fixes #7", github.comments[0])
+        self.assertEqual(len(lark.replies), 1)
+        self.assertIn("已自动重新打开", lark.replies[0].text)
+        self.assertIn('<at user_id="ou_dev">garlanddiego</at>', lark.replies[0].text)
+
+    def test_reopen_re_fires_on_each_close_not_deduped_by_marker(self) -> None:
+        # Dedup rides on issue state (the top guard), not the persistent marker,
+        # so a genuine re-close (issue still closed, no evidence) reopens again.
+        config = self._enforce_config()
+        github = FakeGithub(issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)))
+        lark = FakeLarkMessengerClient()
+
+        first = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+        second = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertTrue(first.reopened)
+        self.assertTrue(second.reopened)
+        self.assertEqual(len(github.comments), 2)
+        self.assertEqual(len(lark.replies), 2)
+
+    def test_reopen_dry_run_does_not_reopen(self) -> None:
+        config = self._enforce_config()
+        github = FakeGithub(issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)))
+
+        summary = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, dry_run=True
+        )
+
+        self.assertTrue(summary.audited)
+        self.assertFalse(summary.reopened)
+        self.assertFalse(github.reopened)
+        self.assertEqual(github.comments, [])
 
     def test_dry_run_does_not_comment(self) -> None:
         github = FakeGithub(issue=_closed_issue())

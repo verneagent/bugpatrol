@@ -123,6 +123,32 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"\[fix.agent\] must be a table"):
             parse_project_config(data)
 
+    def test_close_audit_defaults_to_nag_only(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        parsed = parse_project_config(self._minimal_data(config))
+
+        self.assertFalse(parsed.close_audit.reopen_completed_without_evidence)
+
+    def test_close_audit_reopen_flag_parses(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["close_audit"] = {"reopen_completed_without_evidence": True}
+        parsed = parse_project_config(data)
+
+        self.assertTrue(parsed.close_audit.reopen_completed_without_evidence)
+
+    def test_close_audit_rejects_non_table(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["close_audit"] = "yes"
+        with self.assertRaisesRegex(ValueError, r"\[close_audit\] must be a table"):
+            parse_project_config(data)
+
+    def test_fived_config_enables_reopen_enforcement(self) -> None:
+        config = load_project_config(Path("projects/fived.toml"))
+
+        self.assertTrue(config.close_audit.reopen_completed_without_evidence)
+
     def test_fix_gate_max_conflict_files_defaults_and_overrides(self) -> None:
         config = load_project_config(Path("projects/example.toml"))
         data = self._minimal_data(config)

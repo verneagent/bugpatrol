@@ -93,6 +93,12 @@ pattern = "\\*\\*iOS install:\\*\\* (https://\\S+)"
 label = "Android 安装"
 pattern = "Install APK: (https://\\S+)"
 
+[close_audit]
+# GitHub can't reject a close, so "closed as completed" without a linked fix
+# commit/merged PR is enforced after the fact: bugpatrol reopens it. Close as
+# not planned / duplicate (or add a `Fixes #N` reference) to close for good.
+reopen_completed_without_evidence = true
+
 [prd]
 root_wiki_node = "LOCAL_PRD_DOCS"
 cache_path = "openspec"

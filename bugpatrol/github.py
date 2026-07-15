@@ -406,6 +406,9 @@ class GitHubCliIssuesClient:
             ]
         )
 
+    def reopen_issue(self, *, repo: str, issue_number: int) -> None:
+        self._run(["issue", "reopen", str(issue_number), "--repo", repo])
+
     def close_issue_as_not_planned(self, *, repo: str, issue_number: int) -> None:
         owner, name = repo.split("/", 1)
         result = self._run(

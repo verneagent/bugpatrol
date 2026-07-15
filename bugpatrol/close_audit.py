@@ -31,6 +31,7 @@ class CloseAuditSummary:
     notified: bool = False
     kind: str = ""
     lark_sent: bool = False
+    reopened: bool = False
     skipped_reason: str = ""
 
 
@@ -62,6 +63,7 @@ def audit_issue_close(
     comments = github.list_issue_comments(repo=repo, issue_number=issue_number)
     reason = issue.state_reason
 
+    reopen = False
     if reason == "completed":
         evidence = fix_evidence_for_issue(
             timeline=github.list_issue_timeline(repo=repo, issue_number=issue_number),
@@ -73,6 +75,7 @@ def audit_issue_close(
             # again here would double-ping, so close-audit stays silent.
             return CloseAuditSummary(issue_number=issue_number, audited=True, evidence=evidence)
         kind = KIND_MISSING_FIX
+        reopen = config.close_audit.reopen_completed_without_evidence
     elif reason == "not_planned":
         if _triage_announced_expected_behavior(comments):
             # Triage's own 预期行为 close already posted the Lark summary; don't
@@ -98,6 +101,38 @@ def audit_issue_close(
             skipped_reason=f"close reason is {reason or 'unknown'}, nothing to notify",
         )
 
+    if reopen:
+        # Enforcement: GitHub has no pre-close gate for issues, so we can't
+        # reject a "completed" close that lacks a fix reference -- we reopen it
+        # instead. Dedup rides on issue *state*: a workflow re-run after our
+        # reopen sees the issue already open and skips at the top guard, while a
+        # genuine re-close (still without a fix reference) re-fires and reopens
+        # again. So this path intentionally does NOT gate on the persistent
+        # marker (that would let one manual re-close slip through).
+        if dry_run:
+            return CloseAuditSummary(issue_number=issue_number, audited=True, kind=kind)
+        # Lark first, then reopen, then the record comment: a Lark failure leaves
+        # the issue closed so the next run retries; reopening before commenting
+        # means a comment failure still left an explanatory Lark ping.
+        lark_sent = _send_close_lark(
+            lark=lark, metadata=metadata, issue=issue, config=config, kind=kind, reopened=True
+        )
+        github.reopen_issue(repo=repo, issue_number=issue_number)
+        github.add_issue_comment(
+            repo=repo,
+            issue_number=issue_number,
+            body=_render_close_comment(issue=issue, kind=kind, reopened=True),
+        )
+        return CloseAuditSummary(
+            issue_number=issue_number,
+            audited=True,
+            kind=kind,
+            notified=True,
+            nagged=True,
+            reopened=True,
+            lark_sent=lark_sent,
+        )
+
     if _already_notified(comments, kind):
         return CloseAuditSummary(
             issue_number=issue_number, audited=True, kind=kind, skipped_reason="already notified"
@@ -109,22 +144,9 @@ def audit_issue_close(
     # idempotency marker) LAST. If the marker went first, a Lark failure would be
     # permanently suppressed on retry — a silent lost ping, which is worse than
     # the rare duplicate a marker-last order can cause.
-    lark_sent = False
-    if lark is not None:
-        chat_id = str(metadata.get("chat_id") or "")
-        message_id = str(metadata.get("message_id") or "")
-        if chat_id and message_id:
-            lark.reply_to_message(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=_render_close_lark_text(
-                    issue=issue,
-                    config=config,
-                    kind=kind,
-                    reporter_open_id=str(metadata.get("reporter_open_id") or ""),
-                ),
-            )
-            lark_sent = True
+    lark_sent = _send_close_lark(
+        lark=lark, metadata=metadata, issue=issue, config=config, kind=kind, reopened=False
+    )
     github.add_issue_comment(
         repo=repo,
         issue_number=issue_number,
@@ -229,27 +251,69 @@ def _closer_note(issue) -> str:
     return f"，由 {issue.closed_by}（GitHub）关闭" if issue.closed_by else ""
 
 
-def _render_close_comment(*, issue, kind: str) -> str:
+def _send_close_lark(
+    *,
+    lark: LarkMessengerClient | None,
+    metadata: dict[str, Any],
+    issue,
+    config: ProjectConfig,
+    kind: str,
+    reopened: bool,
+) -> bool:
+    if lark is None:
+        return False
+    chat_id = str(metadata.get("chat_id") or "")
+    message_id = str(metadata.get("message_id") or "")
+    if not (chat_id and message_id):
+        return False
+    lark.reply_to_message(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=_render_close_lark_text(
+            issue=issue,
+            config=config,
+            kind=kind,
+            reporter_open_id=str(metadata.get("reporter_open_id") or ""),
+            reopened=reopened,
+        ),
+    )
+    return True
+
+
+def _render_close_comment(*, issue, kind: str, reopened: bool = False) -> str:
     metadata = render_close_audit_metadata_comment(
         {"version": 1, "issue": issue.number, "kind": kind}
     )
     if kind == KIND_MISSING_FIX:
         mentions = " ".join(f"@{login}" for login in issue.assignees)
         prefix = f"{mentions} " if mentions else ""
+        reopened_note = "，已自动重新打开" if reopened else ""
+        closing_hint = (
+            "请补充修复出处后再关闭（任选其一）：\n"
+            if reopened
+            else "请补充修复出处（任选其一）：\n"
+        )
+        not_code_hint = (
+            "如果不是代码修复，请改用 close as not planned / duplicate（不会被重新打开）。"
+            if reopened
+            else "如果不是代码修复，请改用 close as not planned / duplicate。"
+        )
         body = (
             f"{prefix}此 issue 以 completed（已修复）关闭{_closer_note(issue)}，"
-            f"但没有找到关联的修复 commit 或已合并 PR。\n\n"
-            f"请补充修复出处（任选其一）：\n"
-            f"- 在本 issue 评论里贴修复 commit SHA 或 PR 链接\n"
-            f"- 修复 PR / commit message 里写 `Fixes #{issue.number}`（推荐，GitHub 会自动关联）\n\n"
-            f"如果不是代码修复，请改用 close as not planned / duplicate。"
+            f"但没有找到关联的修复 commit 或已合并 PR{reopened_note}。\n\n"
+            f"{closing_hint}"
+            f"- 修复 PR / commit message 里写 `Fixes #{issue.number}`（推荐，GitHub 会自动关联）\n"
+            f"- 在本 issue 评论里贴修复 commit SHA 或 PR 链接\n\n"
+            f"{not_code_hint}"
         )
     else:
         body = f"此 issue 已关闭：{_reason_label(kind)}{_closer_note(issue)}。已通知 Lark 话题。"
     return f"{body}\n\n{metadata}"
 
 
-def _render_close_lark_text(*, issue, config: ProjectConfig, kind: str, reporter_open_id: str) -> str:
+def _render_close_lark_text(
+    *, issue, config: ProjectConfig, kind: str, reporter_open_id: str, reopened: bool = False
+) -> str:
     mentions: list[str] = []
     if reporter_open_id:
         mentions.append(f'<at user_id="{reporter_open_id}">上报人</at>')
@@ -259,6 +323,12 @@ def _render_close_lark_text(*, issue, config: ProjectConfig, kind: str, reporter
             mentions.append(f'<at user_id="{open_id}">{login}</at>')
     prefix = ("".join(f"{mention} " for mention in mentions)) if mentions else ""
     if kind == KIND_MISSING_FIX:
+        if reopened:
+            return (
+                f"{prefix}Issue [#{issue.number}]({issue.url}) 以已修复关闭{_closer_note(issue)}，"
+                f"但没有关联修复 commit/PR，已自动重新打开。"
+                f"请补充修复出处后再关闭，或改用 not planned / duplicate。"
+            )
         return (
             f"{prefix}Issue [#{issue.number}]({issue.url}) 被标记为已修复关闭{_closer_note(issue)}，"
             f"但没有关联修复 commit/PR，请在 issue 里补充修复出处。"

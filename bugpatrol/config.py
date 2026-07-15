@@ -255,6 +255,15 @@ class FixConfig:
 
 
 @dataclass(frozen=True)
+class CloseAuditConfig:
+    # GitHub has no pre-close gate for issues, so "closed as completed without a
+    # fix reference" can't be rejected at close time -- it can only be enforced
+    # after the fact by reopening. Default off (nag only); a project that wants
+    # the hard gate opts in.
+    reopen_completed_without_evidence: bool = False
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     github_repo: str
     github_cli: str
@@ -269,6 +278,7 @@ class ProjectConfig:
     issue_field_names: dict[str, str]
     reference_repos: tuple[ReferenceRepo, ...] = ()
     fix: FixConfig | None = None
+    close_audit: CloseAuditConfig = CloseAuditConfig()
 
     @property
     def project(self) -> str:
@@ -452,6 +462,18 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
         },
         reference_repos=_parse_reference_repos(data),
         fix=_parse_fix(data),
+        close_audit=_parse_close_audit(data),
+    )
+
+
+def _parse_close_audit(data: dict[str, Any]) -> CloseAuditConfig:
+    table = data.get("close_audit") or {}
+    if not isinstance(table, dict):
+        raise ValueError("[close_audit] must be a table")
+    return CloseAuditConfig(
+        reopen_completed_without_evidence=bool(
+            table.get("reopen_completed_without_evidence") or False
+        ),
     )
 
 
