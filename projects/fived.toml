@@ -68,6 +68,11 @@ preflight = "./scripts/preflight.sh"
 [fix.gate]
 max_diff_lines = 800
 max_conflict_files = 5
+# `Case 错误` = a test-coverage gap: the product code is correct but a test is
+# missing. Adding the missing test is exactly what auto-fix does well (the fix
+# prompt already requires tests and self-verifies to green), so it is allowed
+# alongside `代码 Bug` rather than skipped for a human.
+allowed_verdicts = ["代码 Bug", "Case 错误"]
 
 [prd]
 root_wiki_node = "LOCAL_PRD_DOCS"
