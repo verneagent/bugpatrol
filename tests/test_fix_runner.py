@@ -1018,10 +1018,25 @@ class RunCiFixEndToEndTest(unittest.TestCase):
             self.assertEqual(metas[-1]["attempts"], 1)
 
 
+def _config_with_build_link():
+    from bugpatrol.config import BuildLinkPattern
+
+    base = _sandbox_config()
+    return replace(
+        base,
+        fix=replace(
+            base.fix,
+            build_link_patterns=(
+                BuildLinkPattern(label="iOS 安装", pattern=r"iOS install: (https://\S+)"),
+            ),
+        ),
+    )
+
+
 class RunBuildReadyTest(unittest.TestCase):
-    def _run(self, github):
+    def _run(self, github, config=None):
         return run_build_ready(
-            config=_sandbox_config(),
+            config=config or _sandbox_config(),
             issue_number=7,
             head_sha="deadbeef",
             github=github,  # type: ignore[arg-type]
@@ -1053,6 +1068,43 @@ class RunBuildReadyTest(unittest.TestCase):
         self.assertEqual(metas[-1]["last_notified_sha"], "deadbeef")
         # A second event for the same sha now de-dupes.
         self.assertEqual(self._run(github), "build_already_notified")
+
+    def test_late_link_triggers_followup_then_dedupes(self) -> None:
+        # The #4011 race: a fast build trips build-ready before the slow iOS build
+        # posts its install link. The first ping carries no link; when the link
+        # comment lands, the next event follows up with just that link, then stops.
+        config = _config_with_build_link()
+        pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
+        github = FakeGithub(open_pull_request=pr, assignees=("dev1",))
+
+        # 1) First event: no link comment yet -> main "可测试" ping, no link.
+        self.assertEqual(self._run(github, config), "build_notified")
+        self.assertTrue(any("可测试" in c for c in github.added_comments))
+
+        # 2) The slow iOS build now posts its install link on the PR.
+        github.pr_comment_bodies.append("📱 iOS install: https://ota.test/i")
+
+        # 3) Next event: same sha, but a new link appeared -> follow-up ping.
+        self.assertEqual(self._run(github, config), "build_links_notified")
+        self.assertTrue(any("已就绪" in c for c in github.added_comments))
+        self.assertTrue(
+            any("https://ota.test/i" in c for c in github.added_comments)
+        )
+
+        # 4) No further links -> de-dupes.
+        self.assertEqual(self._run(github, config), "build_already_notified")
+
+    def test_link_present_at_first_ping_not_repeated(self) -> None:
+        config = _config_with_build_link()
+        pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
+        github = FakeGithub(
+            open_pull_request=pr,
+            assignees=("dev1",),
+            pr_comment_bodies=["📱 iOS install: https://ota.test/i"],
+        )
+        self.assertEqual(self._run(github, config), "build_notified")
+        # The link was already surfaced in the main ping; no follow-up.
+        self.assertEqual(self._run(github, config), "build_already_notified")
 
 
 if __name__ == "__main__":

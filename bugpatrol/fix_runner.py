@@ -50,6 +50,7 @@ from bugpatrol.fix_result import (
     extract_build_links,
     fix_result_fingerprint,
     latest_ci_fix_meta,
+    notify_build_links_followup,
     notify_build_ready,
     notify_ci_escalation,
     notify_ci_fix,
@@ -883,9 +884,15 @@ def run_build_ready(
     """Surface a passing fix-PR build to the issue + reporter's Lark topic.
 
     Pure notification (no worktree, no agent, no gate): the fix PR built cleanly
-    and is testable. De-dupes on ``head_sha`` via ``last_notified_sha`` in the
-    BUGPATROL_CI_FIX_META marker so N green build workflows for one commit notify
-    once. Statuses: no_pr, build_already_notified, build_notified.
+    and is testable. De-dupes the main "可测试" ping on ``head_sha`` via
+    ``last_notified_sha`` so N green build workflows for one commit notify once.
+    Install/preview links, though, are posted by the slower builds (iOS/Android)
+    minutes AFTER a fast build first trips build-ready, so the first ping may
+    carry no link. Once the main ping is sent, later invocations for the same sha
+    send a follow-up listing only links that newly appeared (tracked in
+    ``notified_link_urls``), so a slow build's install link still reaches the
+    reporter without re-notifying. Statuses: no_pr, build_already_notified,
+    build_notified, build_links_notified.
     """
     if config.fix is None:
         raise ValueError("project config has no [fix] table; auto-fix is not enabled")
@@ -899,19 +906,44 @@ def run_build_ready(
         return "no_pr"
     comments = github.list_pull_request_comments(repo=config.github_repo, pr_number=pr.number)
     meta = latest_ci_fix_meta(comments)
-    if meta.get("last_notified_sha") == head_sha:
-        return "build_already_notified"
 
     assignee = issue.assignees[0] if issue.assignees else ""
     assignee_open_id = (config.lark.user_open_ids or {}).get(assignee, "") if assignee else ""
     links = extract_build_links(comments, fix.build_link_patterns)
+
+    if meta.get("last_notified_sha") == head_sha:
+        # Main ping already sent for this commit; only chase links that landed
+        # after it (slow builds post their install/preview link later).
+        notified_urls = list(meta.get("notified_link_urls") or [])
+        seen = set(notified_urls)
+        new_links = [(label, url) for label, url in links if url not in seen]
+        if not new_links:
+            return "build_already_notified"
+        notify_build_links_followup(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            issue_url=issue.url,
+            pr_url=pr.url,
+            head_sha=head_sha,
+            meta={**meta, "notified_link_urls": notified_urls + [u for _, u in new_links]},
+            github=github,
+            lark=lark,
+            assignee_open_id=assignee_open_id,
+            links=new_links,
+        )
+        return "build_links_notified"
+
     notify_build_ready(
         repo=config.github_repo,
         issue_number=issue.number,
         issue_url=issue.url,
         pr_url=pr.url,
         head_sha=head_sha,
-        meta={**meta, "last_notified_sha": head_sha},
+        meta={
+            **meta,
+            "last_notified_sha": head_sha,
+            "notified_link_urls": [url for _, url in links],
+        },
         github=github,
         lark=lark,
         assignee_open_id=assignee_open_id,

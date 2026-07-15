@@ -890,6 +890,93 @@ def notify_build_ready(
     )
 
 
+def render_build_links_followup_lark_message(
+    *,
+    issue_number: int,
+    issue_url: str,
+    pr_url: str,
+    assignee_open_id: str = "",
+    links: Sequence[tuple[str, str]],
+) -> str:
+    assignee = f'<at user_id="{assignee_open_id}"></at> ' if assignee_open_id else ""
+    lines = [
+        f"{assignee}🔗 修复 #{issue_number} 的安装 / 预览链接已就绪，"
+        f"GitHub issue [#{issue_number}]({issue_url})",
+        f"PR：{_pr_link(pr_url)}",
+    ]
+    lines.extend(f"{label}：[{label}]({url})" for label, url in links)
+    runner = triage_runner_name()
+    if runner:
+        lines.append(f"执行机：{runner}")
+    return "\n".join(lines)
+
+
+def render_build_links_followup_issue_comment(
+    *, pr_url: str, links: Sequence[tuple[str, str]]
+) -> str:
+    lines = [
+        "## BugPatrol 安装 / 预览链接已就绪",
+        "",
+        f"修复 PR：{pr_url}",
+        "",
+    ]
+    lines.extend(f"- {label}：{url}" for label, url in links)
+    return "\n".join(lines)
+
+
+def render_build_links_followup_marker_comment(*, head_sha: str) -> str:
+    return f"BugPatrol：构建 `{head_sha[:12]}` 的安装 / 预览链接已通知。"
+
+
+def notify_build_links_followup(
+    *,
+    repo: str,
+    issue_number: int,
+    issue_url: str,
+    pr_url: str,
+    head_sha: str,
+    meta: dict[str, Any],
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient | None,
+    assignee_open_id: str = "",
+    links: Sequence[tuple[str, str]],
+) -> None:
+    """Follow-up ping when install/preview links land after the build-ready ping.
+
+    A fast build trips build-ready first; a slow build (iOS/Android) posts its
+    install link minutes later. This surfaces only the newly-arrived ``links``
+    (never re-listing ones already sent) so the reporter gets the real link
+    without spam. Same Lark-first → issue comment → PR meta marker ordering as
+    notify_build_ready; the marker carries the updated notified_link_urls set.
+    """
+    if lark is not None:
+        send_intake_topic_message(
+            repo=repo,
+            issue_number=issue_number,
+            github=github,
+            lark=lark,
+            text=render_build_links_followup_lark_message(
+                issue_number=issue_number,
+                issue_url=issue_url,
+                pr_url=pr_url,
+                assignee_open_id=assignee_open_id,
+                links=links,
+            ),
+        )
+    github.add_issue_comment(
+        repo=repo,
+        issue_number=issue_number,
+        body=render_build_links_followup_issue_comment(pr_url=pr_url, links=links),
+    )
+    github.add_pull_request_comment(
+        repo=repo,
+        pr=pr_url,
+        body=append_ci_fix_metadata(
+            render_build_links_followup_marker_comment(head_sha=head_sha), meta
+        ),
+    )
+
+
 def parse_fix_metadata(comment_body: str) -> dict[str, Any] | None:
     match = FIX_META_RE.search(comment_body)
     if not match:
