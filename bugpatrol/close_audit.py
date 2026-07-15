@@ -74,6 +74,14 @@ def audit_issue_close(
             return CloseAuditSummary(issue_number=issue_number, audited=True, evidence=evidence)
         kind = KIND_MISSING_FIX
     elif reason == "not_planned":
+        if _triage_announced_expected_behavior(comments):
+            # Triage's own 预期行为 close already posted the Lark summary; don't
+            # re-announce the same close.
+            return CloseAuditSummary(
+                issue_number=issue_number,
+                audited=True,
+                skipped_reason="triage already announced expected behavior",
+            )
         kind = KIND_NOT_PLANNED
     elif reason == "duplicate":
         if _triage_announced_duplicate(comments):
@@ -194,6 +202,14 @@ def _triage_announced_duplicate(comments: tuple[GitHubIssueComment, ...]) -> boo
     for comment in comments:
         metadata = parse_triage_metadata(comment.body)
         if metadata is not None and metadata.get("duplicate_of"):
+            return True
+    return False
+
+
+def _triage_announced_expected_behavior(comments: tuple[GitHubIssueComment, ...]) -> bool:
+    for comment in comments:
+        metadata = parse_triage_metadata(comment.body)
+        if metadata is not None and metadata.get("verdict") == "预期行为":
             return True
     return False
 

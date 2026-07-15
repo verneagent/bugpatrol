@@ -16,6 +16,7 @@ class CreatedIssue:
     comments: list[str] = field(default_factory=list)
     assignees: list[str] = field(default_factory=list)
     closed_as_duplicate_of: int = 0
+    closed_not_planned: bool = False
 
 
 class FakeGitHubIssuesClient:
@@ -87,6 +88,13 @@ class FakeGitHubIssuesClient:
         for item in self.created:
             if item.repo == repo and item.issue.number == issue_number:
                 item.closed_as_duplicate_of = duplicate_of
+                return
+        raise ValueError(f"issue not found: {repo}#{issue_number}")
+
+    def close_issue_as_not_planned(self, *, repo: str, issue_number: int) -> None:
+        for item in self.created:
+            if item.repo == repo and item.issue.number == issue_number:
+                item.closed_not_planned = True
                 return
         raise ValueError(f"issue not found: {repo}#{issue_number}")
 

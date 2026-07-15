@@ -25,6 +25,13 @@ def render_triage_metadata_comment(*, duplicate_of: int) -> str:
     )
 
 
+def render_expected_behavior_triage_comment() -> str:
+    return append_triage_metadata(
+        "结论：预期行为，已关闭。",
+        {"version": 1, "issue": 7, "duplicate_of": 0, "verdict": "预期行为"},
+    )
+
+
 def _managed_body(chat_id: str = "oc_1") -> str:
     return render_issue_body(
         IntakeRecord(
@@ -221,6 +228,23 @@ class CloseAuditTest(unittest.TestCase):
         self.assertTrue(summary.audited)
         self.assertFalse(summary.notified)
         self.assertEqual(summary.skipped_reason, "triage already announced duplicate")
+        self.assertEqual(len(lark.replies), 0)
+
+    def test_skips_not_planned_when_triage_announced_expected_behavior(self) -> None:
+        config = self._notify_config()
+        github = FakeGithub(
+            issue=_closed_issue(state_reason="not_planned", body=_managed_body(chat_id=config.lark.chat_id))
+        )
+        github.comments.append(render_expected_behavior_triage_comment())
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertTrue(summary.audited)
+        self.assertFalse(summary.notified)
+        self.assertEqual(summary.skipped_reason, "triage already announced expected behavior")
         self.assertEqual(len(lark.replies), 0)
 
     def test_passes_when_evidence_exists(self) -> None:

@@ -17,6 +17,10 @@ from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake import parse_intake_metadata, require_bugpatrol_managed_issue
 from bugpatrol.lark import is_message_withdrawn_error
 
+# Terminal no-action verdict: triage decided the reported behavior is expected
+# (not a bug). Like 重复, this closes the issue automatically -- as not planned.
+VERDICT_EXPECTED_BEHAVIOR = "预期行为"
+
 
 @dataclass(frozen=True)
 class TriageResult:
@@ -39,6 +43,7 @@ class TriageApplySummary:
     duplicate_comment_skipped: bool
     result_fingerprint: str
     closed_as_duplicate: bool = False
+    closed_not_planned: bool = False
 
 
 @dataclass(frozen=True)
@@ -229,6 +234,7 @@ def apply_triage_result(
                     "result_fingerprint": fingerprint,
                     "decision_key": decision_key,
                     "duplicate_of": result.duplicate_of,
+                    "verdict": result.fields.get("Triage verdict", ""),
                     "blame_suggestion": result.blame_suggestion,
                     "suspected_owner": result.suspected_owner,
                 },
@@ -244,7 +250,9 @@ def apply_triage_result(
             lark=lark,
             run_stats=run_stats,
         )
+    verdict = result.fields.get("Triage verdict", "")
     closed_as_duplicate = False
+    closed_not_planned = False
     if result.duplicate_of:
         github.close_issue_as_duplicate(
             repo=repo,
@@ -252,16 +260,23 @@ def apply_triage_result(
             duplicate_of=result.duplicate_of,
         )
         closed_as_duplicate = True
+    elif verdict == VERDICT_EXPECTED_BEHAVIOR:
+        # Expected behavior is a terminal no-action verdict: no assignee, close
+        # the issue as not planned. close_audit skips its own not_planned ping
+        # because this run's triage summary already announced the closure.
+        github.close_issue_as_not_planned(repo=repo, issue_number=issue_number)
+        closed_not_planned = True
     else:
         github.add_assignee(repo=repo, issue_number=issue_number, assignee=result.assignee)
     return TriageApplySummary(
         issue_type_written=True,
         fields_written=True,
-        assignee_written=not result.duplicate_of,
+        assignee_written=not result.duplicate_of and not closed_not_planned,
         comment_added=not duplicate,
         duplicate_comment_skipped=duplicate,
         result_fingerprint=fingerprint,
         closed_as_duplicate=closed_as_duplicate,
+        closed_not_planned=closed_not_planned,
     )
 
 
@@ -600,6 +615,8 @@ def render_triage_summary_lark_message(
     if result.duplicate_of:
         duplicate_url = f"{issue_url.rsplit('/', 1)[0]}/{result.duplicate_of}"
         lines.append(f"结论：重复，已关闭。重复于 [#{result.duplicate_of}]({duplicate_url})")
+    elif result.fields.get("Triage verdict", "") == VERDICT_EXPECTED_BEHAVIOR:
+        lines.append("结论：预期行为（非 bug），已关闭（not planned）。")
     else:
         assignee = result.assignee
         if assignee and assignee_open_id:

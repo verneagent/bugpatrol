@@ -62,6 +62,9 @@ class FakeGithub:
     def close_issue_as_duplicate(self, **kwargs: object) -> None:
         self.calls.append(("close_issue_as_duplicate", kwargs))
 
+    def close_issue_as_not_planned(self, **kwargs: object) -> None:
+        self.calls.append(("close_issue_as_not_planned", kwargs))
+
     def list_issue_comments(self, **kwargs: object) -> tuple[GitHubIssueComment, ...]:
         self.calls.append(("list_issue_comments", kwargs))
         return tuple(
@@ -540,6 +543,49 @@ class TriageResultTest(unittest.TestCase):
                 github=github,  # type: ignore[arg-type]
                 issue_fields=issue_fields,  # type: ignore[arg-type]
             )
+
+    def test_apply_expected_behavior_closes_not_planned_and_skips_assignee(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        data = dict(VALID)
+        data["triage_verdict"] = "预期行为"
+        result = parse_triage_result(data)
+
+        summary = apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+        )
+
+        call_names = [name for name, _ in github.calls]
+        self.assertIn("close_issue_as_not_planned", call_names)
+        self.assertNotIn("add_assignee", call_names)
+        self.assertNotIn("close_issue_as_duplicate", call_names)
+        self.assertTrue(summary.closed_not_planned)
+        self.assertFalse(summary.assignee_written)
+        # The triage comment records the verdict so close_audit can dedup.
+        meta = parse_triage_metadata(github.comments[0])
+        assert meta is not None
+        self.assertEqual(meta["verdict"], "预期行为")
+
+    def test_render_triage_summary_lark_message_for_expected_behavior(self) -> None:
+        data = dict(VALID)
+        data["triage_verdict"] = "预期行为"
+        result = parse_triage_result(data)
+
+        message = render_triage_summary_lark_message(
+            issue_number=9,
+            issue_url="https://github.test/o/r/issues/9",
+            result=result,
+        )
+
+        self.assertIn("预期行为", message)
+        self.assertIn("not planned", message)
+        self.assertNotIn("负责人", message)
 
     def test_render_triage_summary_lark_message_for_duplicate(self) -> None:
         data = dict(VALID)
