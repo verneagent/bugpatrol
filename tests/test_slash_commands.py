@@ -47,7 +47,7 @@ class _StubIssueClient:
     ) -> GitHubIssue | None:
         return self._issue
 
-    def add_assignee(self, *, repo: str, issue_number: int, assignee: str) -> None:
+    def set_assignee(self, *, repo: str, issue_number: int, assignee: str) -> None:
         self.assigned.append((issue_number, assignee))
 
 

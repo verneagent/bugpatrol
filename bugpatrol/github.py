@@ -697,6 +697,26 @@ class GitHubCliIssuesClient:
             ]
         )
 
+    def set_assignee(self, *, repo: str, issue_number: int, assignee: str) -> None:
+        """Replace the whole assignee set with exactly one login.
+
+        The issues PATCH endpoint treats `assignees` as a full replacement, so
+        passing a single login drops any previously assigned people. Used by
+        `/assign` to guarantee a sole assignee.
+        """
+        self._run(
+            [
+                "api",
+                "-X",
+                "PATCH",
+                "-H",
+                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                f"/repos/{repo}/issues/{issue_number}",
+                "-f",
+                f"assignees[]={assignee}",
+            ]
+        )
+
     def _run(self, args: Sequence[str], *, stdin: str | None = None) -> CommandResult:
         completed = subprocess.run(
             [self._gh, *args],

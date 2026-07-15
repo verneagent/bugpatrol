@@ -108,7 +108,7 @@ class _IssueLookupClient(Protocol):
         self, *, repo: str, chat_id: str, root_id: str
     ) -> GitHubIssue | None: ...
 
-    def add_assignee(self, *, repo: str, issue_number: int, assignee: str) -> None: ...
+    def set_assignee(self, *, repo: str, issue_number: int, assignee: str) -> None: ...
 
 
 class _ReplyClient(Protocol):
@@ -241,7 +241,9 @@ class SlashCommandHandler:
             known = ", ".join(sorted((self._config.lark.user_open_ids or {}).keys())) or "（未配置）"
             self._reply(message, f"⚠️ 无法识别负责人「{command.target}」。可指派：{known}")
             return SlashResult(command="assign", issue_number=issue.number, reason="slash_assign_unknown")
-        self._github.add_assignee(
+        # A single sole assignee: replace the whole set so any previously
+        # assigned person is dropped.
+        self._github.set_assignee(
             repo=self._config.github_repo,
             issue_number=issue.number,
             assignee=login,
