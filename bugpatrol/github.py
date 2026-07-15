@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -34,6 +35,13 @@ class GitHubCliError(RuntimeError):
     pass
 
 
+# GitHub occasionally returns a transient gateway error (e.g. a `gh issue edit`
+# that hits a 502 Bad Gateway). These fail before reaching the backend, so a
+# bounded retry is safe and keeps one flaky call from dropping a mutation (like
+# the assignee, which is applied last) and failing the whole triage run.
+_TRANSIENT_GATEWAY_RE = re.compile(r"non-200 OK status code: 50[234]\b")
+
+
 class GitHubCliIssuesClient:
     def __init__(
         self,
@@ -42,11 +50,17 @@ class GitHubCliIssuesClient:
         search_limit: int = 200,
         issue_fields: GitHubIssueFieldsClient | None = None,
         project_config: "ProjectConfig | None" = None,
+        transient_retries: int = 3,
+        retry_backoff_seconds: float = 2.0,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._gh = gh
         self._search_limit = search_limit
         self._issue_fields = issue_fields
         self._project_config = project_config
+        self._transient_retries = transient_retries
+        self._retry_backoff_seconds = retry_backoff_seconds
+        self._sleep = sleep
 
     def find_issue_by_intake_root(self, *, repo: str, chat_id: str, root_id: str) -> GitHubIssue | None:
         result = self._run(
@@ -718,18 +732,24 @@ class GitHubCliIssuesClient:
         )
 
     def _run(self, args: Sequence[str], *, stdin: str | None = None) -> CommandResult:
-        completed = subprocess.run(
-            [self._gh, *args],
-            input=stdin,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise GitHubCliError(
-                f"gh {' '.join(args)} failed with exit {completed.returncode}: {completed.stderr.strip()}"
+        for attempt in range(1, self._transient_retries + 1):
+            completed = subprocess.run(
+                [self._gh, *args],
+                input=stdin,
+                text=True,
+                capture_output=True,
+                check=False,
             )
-        return CommandResult(stdout=completed.stdout, stderr=completed.stderr)
+            if completed.returncode == 0:
+                return CommandResult(stdout=completed.stdout, stderr=completed.stderr)
+            stderr = completed.stderr.strip()
+            if attempt < self._transient_retries and _TRANSIENT_GATEWAY_RE.search(stderr):
+                self._sleep(self._retry_backoff_seconds * attempt)
+                continue
+            raise GitHubCliError(
+                f"gh {' '.join(args)} failed with exit {completed.returncode}: {stderr}"
+            )
+        raise AssertionError("unreachable")  # loop always returns or raises
 
 
 def _truncate_log_tail(text: str, *, max_lines: int = 200, max_chars: int = 8000) -> str:

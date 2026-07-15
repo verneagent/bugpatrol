@@ -320,6 +320,40 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
             with self.assertRaisesRegex(GitHubCliError, "bad auth"):
                 client.find_issue_by_intake_root(repo="o/r", chat_id="oc", root_id="om")
 
+    def test_retries_transient_gateway_error_then_succeeds(self) -> None:
+        # A flaky 502 on `add_assignee` (the last apply step) must not drop the
+        # assignment nor fail the whole run: retry until it lands.
+        client = GitHubCliIssuesClient(sleep=lambda _s: None)
+        gateway = 'failed to update ...: non-200 OK status code: 502 Bad Gateway'
+
+        with patch("subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh"], 1, "", gateway),
+                subprocess.CompletedProcess(["gh"], 0, "", ""),
+            ]
+            client.add_assignee(repo="o/r", issue_number=4004, assignee="SoxiaLiSA")
+
+        self.assertEqual(run.call_count, 2)
+
+    def test_does_not_retry_non_transient_error(self) -> None:
+        client = GitHubCliIssuesClient(sleep=lambda _s: None)
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 1, "", "bad auth")
+            with self.assertRaisesRegex(GitHubCliError, "bad auth"):
+                client.add_assignee(repo="o/r", issue_number=1, assignee="a")
+        run.assert_called_once()
+
+    def test_raises_after_exhausting_transient_retries(self) -> None:
+        client = GitHubCliIssuesClient(transient_retries=3, sleep=lambda _s: None)
+        gateway = 'non-200 OK status code: 503 Service Unavailable'
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 1, "", gateway)
+            with self.assertRaisesRegex(GitHubCliError, "503"):
+                client.add_assignee(repo="o/r", issue_number=1, assignee="a")
+        self.assertEqual(run.call_count, 3)
+
 
 if __name__ == "__main__":
     unittest.main()
