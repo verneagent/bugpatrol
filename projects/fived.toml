@@ -74,6 +74,25 @@ max_conflict_files = 5
 # alongside `代码 Bug` rather than skipped for a human.
 allowed_verdicts = ["代码 Bug", "Case 错误"]
 
+# Install/preview links fived's build workflows post as PR comments once a build
+# actually deploys an artifact. The build-ready notification harvests these from
+# the fix PR's comments and surfaces the real links; if a build deploys nothing
+# (e.g. a test-only fix), no link comment exists and the notification stays
+# silent about install/preview rather than pointing at absent PR comments.
+# Formats (see fived .github/workflows): build-web `🔗 **Preview:** <url>`,
+# build-ios `📱 **iOS install:** <url>`, build-android `- Install APK: <url>`.
+[[fix.build_links]]
+label = "预览"
+pattern = "\\*\\*Preview:\\*\\* (https://\\S+)"
+
+[[fix.build_links]]
+label = "iOS 安装"
+pattern = "\\*\\*iOS install:\\*\\* (https://\\S+)"
+
+[[fix.build_links]]
+label = "Android 安装"
+pattern = "Install APK: (https://\\S+)"
+
 [prd]
 root_wiki_node = "LOCAL_PRD_DOCS"
 cache_path = "openspec"

@@ -26,6 +26,7 @@ from bugpatrol.fix_result import (
     render_verify_failed_lark_message,
     notify_fix_revise,
     append_ci_fix_metadata,
+    extract_build_links,
     latest_ci_fix_meta,
     notify_build_ready,
     notify_ci_escalation,
@@ -423,6 +424,83 @@ class CiFixRenderTest(unittest.TestCase):
     def test_build_ready_issue_comment_links_pr(self) -> None:
         text = render_build_ready_issue_comment(pr_url="https://github.test/o/r/pull/9")
         self.assertIn("https://github.test/o/r/pull/9", text)
+
+    def test_build_ready_lark_no_links_makes_no_install_claim(self) -> None:
+        # A test-only fix deploys no artifact, so no link comment exists; the
+        # notification must not point the user at PR comments that aren't there.
+        text = render_build_ready_lark_message(
+            issue_number=7,
+            issue_url="https://github.test/o/r/issues/7",
+            pr_url="https://github.test/o/r/pull/9",
+        )
+        self.assertNotIn("PR 评论", text)
+        self.assertNotIn("安装 / 预览", text)
+
+    def test_build_ready_lark_surfaces_real_links(self) -> None:
+        text = render_build_ready_lark_message(
+            issue_number=7,
+            issue_url="https://github.test/o/r/issues/7",
+            pr_url="https://github.test/o/r/pull/9",
+            links=[("预览", "https://preview.test/x"), ("iOS 安装", "https://ota.test/i")],
+        )
+        self.assertIn("[预览](https://preview.test/x)", text)
+        self.assertIn("[iOS 安装](https://ota.test/i)", text)
+        self.assertNotIn("PR 评论", text)
+
+    def test_build_ready_issue_comment_no_links_makes_no_claim(self) -> None:
+        text = render_build_ready_issue_comment(pr_url="https://github.test/o/r/pull/9")
+        self.assertNotIn("PR 评论", text)
+
+    def test_build_ready_issue_comment_lists_real_links(self) -> None:
+        text = render_build_ready_issue_comment(
+            pr_url="https://github.test/o/r/pull/9",
+            links=[("预览", "https://preview.test/x")],
+        )
+        self.assertIn("- 预览：https://preview.test/x", text)
+
+
+class ExtractBuildLinksTest(unittest.TestCase):
+    def _comment(self, body: str):
+        from bugpatrol.clients import GitHubIssueComment
+
+        return GitHubIssueComment(id="c", body=body)
+
+    def _patterns(self):
+        from bugpatrol.config import BuildLinkPattern
+
+        return (
+            BuildLinkPattern(label="预览", pattern=r"\*\*Preview:\*\* (https://\S+)"),
+            BuildLinkPattern(label="iOS 安装", pattern=r"\*\*iOS install:\*\* (https://\S+)"),
+            BuildLinkPattern(label="Android 安装", pattern=r"Install APK: (https://\S+)"),
+        )
+
+    def test_harvests_all_three_formats(self) -> None:
+        comments = [
+            self._comment("🔗 **Preview:** https://preview.test/x\n📊 Unit: ✅"),
+            self._comment("📱 **iOS install:** https://ota.test/i"),
+            self._comment("Android dev build\n- Install APK: https://apk.test/a.apk"),
+        ]
+        links = extract_build_links(comments, self._patterns())
+        self.assertEqual(
+            links,
+            (
+                ("预览", "https://preview.test/x"),
+                ("iOS 安装", "https://ota.test/i"),
+                ("Android 安装", "https://apk.test/a.apk"),
+            ),
+        )
+
+    def test_no_matching_comments_returns_empty(self) -> None:
+        comments = [self._comment("just a chat comment, no links")]
+        self.assertEqual(extract_build_links(comments, self._patterns()), ())
+
+    def test_dedupes_repeated_url(self) -> None:
+        comments = [
+            self._comment("🔗 **Preview:** https://preview.test/x"),
+            self._comment("🔗 **Preview:** https://preview.test/x"),
+        ]
+        links = extract_build_links(comments, self._patterns())
+        self.assertEqual(links, (("预览", "https://preview.test/x"),))
 
 
 def _managed_github(order: list[str]):

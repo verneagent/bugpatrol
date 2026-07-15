@@ -201,6 +201,45 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"\[fix.setup\] must be a table"):
             parse_project_config(data)
 
+    def test_fix_build_links_default_empty_and_parses(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["fix"] = {"verify": {"test": "make test"}}
+        self.assertEqual(parse_project_config(data).fix.build_link_patterns, ())
+
+        data["fix"] = {
+            "verify": {"test": "make test"},
+            "build_links": [
+                {"label": "预览", "pattern": r"Preview: (https://\S+)"},
+                {"label": "iOS", "pattern": r"iOS install: (https://\S+)"},
+            ],
+        }
+        patterns = parse_project_config(data).fix.build_link_patterns
+        self.assertEqual([p.label for p in patterns], ["预览", "iOS"])
+        self.assertEqual(patterns[0].pattern, r"Preview: (https://\S+)")
+
+    def test_fix_build_links_rejects_missing_label_or_pattern(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["fix"] = {"verify": {"test": "make test"}, "build_links": [{"label": "预览"}]}
+        with self.assertRaisesRegex(ValueError, r"non-empty label and pattern"):
+            parse_project_config(data)
+
+    def test_fix_build_links_rejects_wrong_capture_group_count(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["fix"] = {
+            "verify": {"test": "make test"},
+            "build_links": [{"label": "预览", "pattern": r"Preview: https://\S+"}],
+        }
+        with self.assertRaisesRegex(ValueError, r"exactly one capture group"):
+            parse_project_config(data)
+
+    def test_fived_config_build_links_cover_three_formats(self) -> None:
+        config = load_project_config(Path("projects/fived.toml"))
+        labels = [p.label for p in config.fix.build_link_patterns]
+        self.assertEqual(labels, ["预览", "iOS 安装", "Android 安装"])
+
     def test_fix_progress_heartbeat_defaults_and_overrides(self) -> None:
         config = load_project_config(Path("projects/example.toml"))
         data = self._minimal_data(config)

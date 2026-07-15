@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from dataclasses import dataclass, field
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -178,6 +179,20 @@ DEFAULT_FIX_PROTECTED_GLOBS: tuple[str, ...] = (
 
 
 @dataclass(frozen=True)
+class BuildLinkPattern:
+    """One install/preview link the project's CI posts as a PR comment.
+
+    ``pattern`` is a regex with a single capture group = the URL. The build-ready
+    notification scans the fix PR's comments and, for each match, surfaces the
+    real link (``label``) instead of vaguely telling the user to hunt through PR
+    comments. Kept in project config so link formats stay per-project.
+    """
+
+    label: str
+    pattern: str
+
+
+@dataclass(frozen=True)
 class FixConfig:
     """Configuration for the auto-fix runner.
 
@@ -229,6 +244,11 @@ class FixConfig:
     # claude). When None the fix runner inherits triage_agent. runner_labels are
     # unused for the fix agent (fix picks its runner via the workflow label var).
     agent: "TriageAgentConfig | None" = None
+    # Install/preview link formats the project's CI posts as PR comments, so the
+    # build-ready notification can surface the real links instead of pointing the
+    # user at PR comments that may not exist (e.g. a test-only fix deploys no
+    # artifact). Empty = the notification makes no install/preview claim.
+    build_link_patterns: tuple[BuildLinkPattern, ...] = ()
 
     def branch_for_issue(self, issue_number: int) -> str:
         return f"{self.branch_prefix}{issue_number}"
@@ -511,6 +531,26 @@ def _parse_fix(data: dict[str, Any]) -> FixConfig | None:
     if progress_heartbeat < 0:
         raise ValueError("fix.progress.heartbeat_seconds must be >= 0")
     branch_prefix = str(fix.get("branch_prefix") or "bugpatrol/fix-issue-")
+    build_links_raw = fix.get("build_links") or []
+    if not isinstance(build_links_raw, list):
+        raise ValueError("[[fix.build_links]] must be an array of tables")
+    build_link_patterns: list[BuildLinkPattern] = []
+    for entry in build_links_raw:
+        if not isinstance(entry, dict):
+            raise ValueError("[[fix.build_links]] entries must be tables")
+        label = str(entry.get("label") or "")
+        pattern = str(entry.get("pattern") or "")
+        if not label or not pattern:
+            raise ValueError("[[fix.build_links]] entries need non-empty label and pattern")
+        try:
+            compiled = re.compile(pattern)
+        except re.error as error:
+            raise ValueError(f"[[fix.build_links]] pattern for {label!r} is invalid: {error}") from error
+        if compiled.groups != 1:
+            raise ValueError(
+                f"[[fix.build_links]] pattern for {label!r} must have exactly one capture group (the URL)"
+            )
+        build_link_patterns.append(BuildLinkPattern(label=label, pattern=pattern))
     agent_raw = fix.get("agent")
     if agent_raw is None:
         agent = None
@@ -536,6 +576,7 @@ def _parse_fix(data: dict[str, Any]) -> FixConfig | None:
         max_ci_fix_attempts=max_ci_fix_attempts,
         max_verify_fix_attempts=max_verify_fix_attempts,
         agent=agent,
+        build_link_patterns=tuple(build_link_patterns),
     )
 
 

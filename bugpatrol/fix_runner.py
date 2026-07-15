@@ -47,6 +47,7 @@ from bugpatrol.fix_result import (
     FixResult,
     append_ci_fix_metadata,
     build_pr_body,
+    extract_build_links,
     fix_result_fingerprint,
     latest_ci_fix_meta,
     notify_build_ready,
@@ -903,6 +904,7 @@ def run_build_ready(
 
     assignee = issue.assignees[0] if issue.assignees else ""
     assignee_open_id = (config.lark.user_open_ids or {}).get(assignee, "") if assignee else ""
+    links = extract_build_links(comments, fix.build_link_patterns)
     notify_build_ready(
         repo=config.github_repo,
         issue_number=issue.number,
@@ -913,6 +915,7 @@ def run_build_ready(
         github=github,
         lark=lark,
         assignee_open_id=assignee_open_id,
+        links=links,
     )
     return "build_notified"
 

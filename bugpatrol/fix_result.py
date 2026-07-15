@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Sequence
 
 from bugpatrol.clients import GitHubIssueComment, LarkMessengerClient, ReviewThread
-from bugpatrol.config import ProjectConfig
+from bugpatrol.config import BuildLinkPattern, ProjectConfig
 from bugpatrol.fix_gate import VerifyOutcome
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.triage_result import (
@@ -776,6 +776,34 @@ def notify_ci_escalation(
     )
 
 
+def extract_build_links(
+    comments: Sequence[GitHubIssueComment],
+    patterns: Sequence[BuildLinkPattern],
+) -> tuple[tuple[str, str], ...]:
+    """Harvest install/preview links the project's CI posted on the fix PR.
+
+    Each configured pattern's single capture group is the URL. We scan every PR
+    comment body; the first match per pattern wins (CI posts one link comment per
+    artifact). Deduped by URL so a re-posted comment does not double-list. Returns
+    ``(label, url)`` pairs in the patterns' declared order.
+    """
+    links: list[tuple[str, str]] = []
+    seen_urls: set[str] = set()
+    for pattern in patterns:
+        compiled = re.compile(pattern.pattern)
+        for comment in comments:
+            match = compiled.search(comment.body)
+            if match is None:
+                continue
+            url = match.group(1)
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            links.append((pattern.label, url))
+            break
+    return tuple(links)
+
+
 def render_build_ready_lark_message(
     *,
     issue_number: int,
@@ -791,8 +819,6 @@ def render_build_ready_lark_message(
     ]
     if links:
         lines.extend(f"{label}：[{label}]({url})" for label, url in links)
-    else:
-        lines.append("安装 / 预览链接见 PR 评论。")
     runner = triage_runner_name()
     if runner:
         lines.append(f"执行机：{runner}")
@@ -810,9 +836,6 @@ def render_build_ready_issue_comment(
     if links:
         lines.append("")
         lines.extend(f"- {label}：{url}" for label, url in links)
-    else:
-        lines.append("")
-        lines.append("安装 / 预览链接见 PR 评论。")
     return "\n".join(lines)
 
 
