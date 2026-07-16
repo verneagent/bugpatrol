@@ -10,6 +10,7 @@ from bugpatrol.fix_gate import (
     evaluate_triage_readiness,
     protected_path_hits,
     run_verify_commands,
+    strip_ansi,
     verify_all_passed,
 )
 
@@ -118,6 +119,30 @@ class VerifyCommandsTest(unittest.TestCase):
                 cwd=Path(tmp),
             )
         self.assertIn("hello-tail", outcomes[0].stdout_tail)
+
+    def test_captured_tail_strips_ansi_color_codes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            outcomes = run_verify_commands(
+                fix=_fix(verify={"colored": "printf '\\033[0;31mLint failed\\033[0m\\n'"}),
+                cwd=Path(tmp),
+            )
+        tail = outcomes[0].stdout_tail
+        self.assertIn("Lint failed", tail)
+        self.assertNotIn("\x1b", tail)
+        self.assertNotIn("[0;31m", tail)
+
+
+class StripAnsiTest(unittest.TestCase):
+    def test_removes_sgr_color_sequences(self) -> None:
+        raw = "\x1b[0;31m\x1b[1m'serve' is not installed globally.\x1b[0m"
+        self.assertEqual(strip_ansi(raw), "'serve' is not installed globally.")
+
+    def test_removes_cursor_and_erase_sequences(self) -> None:
+        raw = "before\x1b[2K\x1b[1Gafter"
+        self.assertEqual(strip_ansi(raw), "beforeafter")
+
+    def test_leaves_plain_text_untouched(self) -> None:
+        self.assertEqual(strip_ansi("just plain text"), "just plain text")
 
 
 if __name__ == "__main__":

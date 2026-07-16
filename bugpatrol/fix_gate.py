@@ -166,8 +166,18 @@ def verify_all_passed(outcomes: tuple[VerifyOutcome, ...]) -> bool:
     return all(outcome.ok for outcome in outcomes)
 
 
+# Terminal escape sequences (CSI: colors, cursor moves, etc). Console tools
+# like fived's preflight emit these, but GitHub comments and Lark render them
+# as literal noise (`^[[0;31m`), so strip them before embedding output.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
+
 def _tail(text: str | None, *, max_lines: int = 30) -> str:
     if not text:
         return ""
-    lines = text.rstrip().splitlines()
+    lines = strip_ansi(text).rstrip().splitlines()
     return "\n".join(lines[-max_lines:])
