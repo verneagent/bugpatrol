@@ -309,6 +309,28 @@ def render_review_feedback_markdown(threads: tuple[ReviewThread, ...]) -> str:
     return "\n".join(lines).rstrip()
 
 
+def render_reporter_feedback_markdown(correction: str) -> str:
+    """Render the reporter's latest material follow-up as revise instructions.
+
+    A fix PR is already open, so a fresh material correction from the reporter
+    (not an ack) means the fix itself needs to change — possibly reversing an
+    earlier wrong direction. Unlike review feedback (which refines the diff),
+    this may require re-fixing, so the wording explicitly permits changing the
+    prior fix while still holding the scope to this issue.
+    """
+    return "\n".join(
+        [
+            "## 上报人补充 / 纠正（据此调整修复）",
+            "",
+            "这个 issue 的修复 PR 已经打开，但上报人又补充了新信息或指出之前的修复方向不对。"
+            "请结合下面这条最新反馈调整当前 PR：可以修改之前的修复（包括推翻错误方向），"
+            "但只针对这个 issue，做最小必要改动，不要重开无关的根因分析、不要扩大范围。",
+            "",
+            correction.strip(),
+        ]
+    )
+
+
 def render_conflict_instructions_markdown(*, base_branch: str, files: tuple[str, ...]) -> str:
     """Instruct the revise agent to resolve an in-progress merge's conflicts."""
     lines = [
@@ -336,6 +358,7 @@ def render_revise_pr_comment(
     addressed: int,
     conflicted: bool = False,
     base_branch: str = "",
+    reporter_feedback: bool = False,
 ) -> str:
     if conflicted and addressed == 0:
         headline = f"已合并目标分支 `{base_branch}` 解决冲突并推送更新到本 PR。"
@@ -344,16 +367,17 @@ def render_revise_pr_comment(
             f"已合并目标分支 `{base_branch}` 解决冲突，并处理 {addressed} 条评审意见，"
             "推送更新到本 PR。"
         )
+    elif addressed == 0 and reporter_feedback:
+        headline = "已根据上报人的最新反馈更新修复并推送到本 PR。"
     else:
         headline = f"已处理 {addressed} 条评审意见并推送更新到本 PR。"
-    tail = (
-        "请再次 review（BugPatrol 不会自动合并）。"
-        if conflicted and addressed == 0
-        else "对应的 review threads 已 resolve；请再次 review（BugPatrol 不会自动合并）。"
-    )
+    if addressed:
+        tail = "对应的 review threads 已 resolve；请再次 review（BugPatrol 不会自动合并）。"
+    else:
+        tail = "请再次 review（BugPatrol 不会自动合并）。"
     return "\n".join(
         [
-            "## BugPatrol 已按评审反馈更新",
+            "## BugPatrol 已更新修复",
             "",
             headline,
             "",
@@ -376,12 +400,15 @@ def render_revise_lark_message(
     run_stats: TriageRunStats | None = None,
     conflicted: bool = False,
     base_branch: str = "",
+    reporter_feedback: bool = False,
 ) -> str:
     reviewer = f'<at user_id="{reviewer_open_id}"></at> ' if reviewer_open_id else ""
     if conflicted and addressed == 0:
         head = f"{reviewer}已合并目标分支 `{base_branch}` 解决冲突，GitHub issue [#{issue_number}]({issue_url})"
     elif conflicted:
         head = f"{reviewer}已解决与 `{base_branch}` 的冲突并按评审反馈更新修复 PR，GitHub issue [#{issue_number}]({issue_url})"
+    elif addressed == 0 and reporter_feedback:
+        head = f"{reviewer}已根据上报人的最新反馈更新修复 PR，GitHub issue [#{issue_number}]({issue_url})"
     else:
         head = f"{reviewer}已按评审反馈更新修复 PR，GitHub issue [#{issue_number}]({issue_url})"
     lines = [head, f"PR：{_pr_link(pr_url)}"]
@@ -411,6 +438,7 @@ def notify_fix_revise(
     run_stats: TriageRunStats | None = None,
     conflicted: bool = False,
     base_branch: str = "",
+    reporter_feedback: bool = False,
 ) -> None:
     """Notify that revise updated the PR (Lark-first, then PR comment).
 
@@ -433,13 +461,18 @@ def notify_fix_revise(
                 run_stats=run_stats,
                 conflicted=conflicted,
                 base_branch=base_branch,
+                reporter_feedback=reporter_feedback,
             ),
         )
     github.add_pull_request_comment(
         repo=repo,
         pr=pr_url,
         body=render_revise_pr_comment(
-            result=result, addressed=addressed, conflicted=conflicted, base_branch=base_branch
+            result=result,
+            addressed=addressed,
+            conflicted=conflicted,
+            base_branch=base_branch,
+            reporter_feedback=reporter_feedback,
         ),
     )
 

@@ -353,6 +353,15 @@ def main(argv: list[str] | None = None) -> int:
             "repeatable, e.g. --reference-repo org/weaver=/cache/weaver"
         ),
     )
+    run_triage.add_argument(
+        "--fix-revise-dispatch-command",
+        nargs="+",
+        help=(
+            "command run instead of triage when the issue already has an open "
+            "bugpatrol fix PR, so a reporter's follow-up correction revises the PR "
+            "rather than re-triaging to a no-op; supports {issue_number}."
+        ),
+    )
 
     run_fix_parser = sub.add_parser("run-fix", help="auto-fix a triaged code bug and open a PR")
     run_fix_parser.add_argument("project_config", type=Path)
@@ -840,6 +849,32 @@ def main(argv: list[str] | None = None) -> int:
         config = load_project_config(args.project_config)
         github = GitHubCliIssuesClient(gh=config.github_cli)
         issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
+
+        # When the issue already has an open bugpatrol fix PR, a reporter's
+        # follow-up correction should revise that PR (the fix agent re-reads the
+        # latest correction as feedback) instead of re-triaging to a no-op
+        # "结论无变化" that silently drops the correction. Dispatch the separate
+        # fix-revise workflow (its own concurrency group serializes with fix/
+        # ci-fix) and skip triage.
+        if config.fix is not None and args.fix_revise_dispatch_command:
+            head = config.fix.branch_for_issue(args.issue)
+            open_pr = github.get_open_pull_request_by_head(
+                repo=config.github_repo, head=head
+            )
+            if open_pr is not None:
+                make_dispatch(args.fix_revise_dispatch_command)(args.issue)
+                print(
+                    json.dumps(
+                        {
+                            "redirected": "fix-revise",
+                            "issue": args.issue,
+                            "pr": open_pr.number,
+                            "pr_url": open_pr.url,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                return 0
 
         reference_checkouts = _parse_reference_repo_args(args.reference_repo)
 

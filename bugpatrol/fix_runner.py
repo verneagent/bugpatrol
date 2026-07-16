@@ -64,6 +64,7 @@ from bugpatrol.fix_result import (
     render_ci_fix_feedback_markdown,
     render_conflict_instructions_markdown,
     render_fix_blocked_lark_message,
+    render_reporter_feedback_markdown,
     render_review_feedback_markdown,
     render_verify_failed_comment,
     render_verify_failed_lark_message,
@@ -72,6 +73,7 @@ from bugpatrol.fix_result import (
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake import parse_intake_metadata, require_bugpatrol_managed_issue
+from bugpatrol.intake_workflow import parse_intake_reply_metadata
 from bugpatrol.lark import is_message_withdrawn_error
 from bugpatrol.progress import ProgressReporter
 from bugpatrol.triage_result import (
@@ -136,6 +138,33 @@ def latest_triage_analysis(comments: Sequence[GitHubIssueComment]) -> str:
         if parse_triage_metadata(comment.body) is not None:
             latest = comment.body
     return latest
+
+
+def latest_reporter_correction(comments: Sequence[GitHubIssueComment]) -> str:
+    """The reporter's most recent material follow-up on the issue ("" if none).
+
+    Once a fix PR is open, a reporter follow-up classified `material_followup`
+    (not an ack / fix-status chatter — see classify_triage_signal) means the fix
+    needs to change. Comments are chronological, so the last such intake reply is
+    the reporter's current word; the meta footer is stripped so only the
+    human-readable update reaches the revise agent.
+    """
+    latest = ""
+    for comment in comments:
+        meta = parse_intake_reply_metadata(comment.body)
+        if meta is None or meta.get("signal_reason") != "material_followup":
+            continue
+        latest = _strip_intake_reply_meta(comment.body)
+    return latest
+
+
+def _strip_intake_reply_meta(body: str) -> str:
+    """Drop the trailing `--- <!-- BUGPATROL_INTAKE_REPLY_META:... -->` footer."""
+    marker = "<!-- BUGPATROL_INTAKE_REPLY_META:"
+    index = body.find(marker)
+    if index == -1:
+        return body.strip()
+    return body[:index].rstrip().removesuffix("---").rstrip()
 
 
 def render_fix_context_markdown(
@@ -335,14 +364,16 @@ def prepare_fix_revise(
     threads: Sequence[ReviewThread],
     base_branch: str = "",
     conflict_files: Sequence[str] = (),
+    reporter_feedback: str = "",
     prompt_path: Path = Path("prompts/fix.zh.md"),
 ) -> FixRunPlan:
     """Build a revise plan: the fix context plus the PR's unresolved feedback.
 
     Reuses prepare_fix_run (same triage root cause + schema + invocation) and
-    appends any merge-conflict instructions (resolve first) and the review
-    threads so the agent addresses everything in place. `base_branch` here is
-    the PR's target branch, used only to word the conflict instructions.
+    appends any merge-conflict instructions (resolve first), the review threads,
+    and the reporter's latest material correction so the agent addresses
+    everything in place. `base_branch` here is the PR's target branch, used only
+    to word the conflict instructions.
     """
     plan = prepare_fix_run(
         config=config,
@@ -366,6 +397,8 @@ def prepare_fix_revise(
         )
     if threads:
         sections.append(render_review_feedback_markdown(tuple(threads)))
+    if reporter_feedback:
+        sections.append(render_reporter_feedback_markdown(reporter_feedback))
     if sections:
         with plan.context_path.open("a") as handle:
             handle.write("\n\n" + "\n\n".join(sections) + "\n")
@@ -411,8 +444,11 @@ def run_fix_revise(
         return "no_open_pr"
     threads = github.list_unresolved_review_threads(repo=config.github_repo, pr_number=pr.number)
     has_conflict = pr.mergeable.upper() == "CONFLICTING"
-    if not threads and not has_conflict:
-        # Stateless no-op: no unresolved feedback and the PR merges cleanly.
+    comments = github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)
+    reporter_feedback = latest_reporter_correction(comments)
+    if not threads and not has_conflict and not reporter_feedback:
+        # Stateless no-op: no unresolved feedback, no reporter correction, and the
+        # PR merges cleanly.
         return "no_feedback"
 
     with fix_revise_worktree(base_repo=base_repo, branch=head_branch) as worktree:
@@ -464,6 +500,7 @@ def run_fix_revise(
             threads=threads,
             base_branch=pr.base_ref,
             conflict_files=conflict_files,
+            reporter_feedback=reporter_feedback,
             prompt_path=prompt_path,
         )
         return execute_fix_revise(
@@ -476,6 +513,7 @@ def run_fix_revise(
             lark=lark,
             has_conflict=has_conflict,
             conflict_files=conflict_files,
+            reporter_feedback=reporter_feedback,
         )
 
 
@@ -490,6 +528,7 @@ def execute_fix_revise(
     lark: LarkMessengerClient | None = None,
     has_conflict: bool = False,
     conflict_files: Sequence[str] = (),
+    reporter_feedback: str = "",
 ) -> str:
     """Run the revise agent (feedback and/or conflict resolution), then push.
 
@@ -502,7 +541,7 @@ def execute_fix_revise(
     """
     fix = config.fix
     assert fix is not None  # run_fix_revise guards this.
-    needs_agent = bool(threads) or bool(conflict_files)
+    needs_agent = bool(threads) or bool(conflict_files) or bool(reporter_feedback)
     if lark is not None:
         send_intake_topic_message(
             repo=config.github_repo,
@@ -514,6 +553,7 @@ def execute_fix_revise(
                 issue_url=issue.url,
                 feedback_count=len(threads),
                 base_branch=pr.base_ref if has_conflict else "",
+                reporter_feedback=bool(reporter_feedback),
             ),
         )
     # Install deps once (fresh worktree) so the agent self-verifies and the
@@ -587,7 +627,12 @@ def execute_fix_revise(
         return "verify_failed"
 
     if changed_files:
-        worktree_commit_all(plan.agent_cwd, message=_revise_commit_message(issue.number, has_conflict, threads, pr.base_ref))
+        worktree_commit_all(
+            plan.agent_cwd,
+            message=_revise_commit_message(
+                issue.number, has_conflict, threads, pr.base_ref, bool(reporter_feedback)
+            ),
+        )
     # Fast-forward append to the existing remote fix branch, updating the PR.
     worktree_push_branch(plan.agent_cwd, branch=plan.head_branch)
     # Notify BEFORE resolving threads (Lark-first, marker-last): resolving is the
@@ -606,21 +651,30 @@ def execute_fix_revise(
         run_stats=run_stats,
         conflicted=has_conflict,
         base_branch=pr.base_ref,
+        reporter_feedback=bool(reporter_feedback),
     )
     for thread in threads:
         github.resolve_review_thread(thread_id=thread.id)
-    if threads:
+    if threads or (reporter_feedback and not has_conflict):
         return "revised"
     return "conflict_resolved"
 
 
 def _revise_commit_message(
-    issue_number: int, has_conflict: bool, threads: Sequence[ReviewThread], base_branch: str
+    issue_number: int,
+    has_conflict: bool,
+    threads: Sequence[ReviewThread],
+    base_branch: str,
+    reporter_feedback: bool = False,
 ) -> str:
     if has_conflict and threads:
         return f"fix: merge {base_branch} and address review feedback (#{issue_number})"
     if has_conflict:
         return f"fix: merge {base_branch} to resolve conflicts (#{issue_number})"
+    if threads:
+        return f"fix: address review feedback (#{issue_number})"
+    if reporter_feedback:
+        return f"fix: incorporate reporter follow-up (#{issue_number})"
     return f"fix: address review feedback (#{issue_number})"
 
 
@@ -1196,12 +1250,21 @@ def _build_progress_reporter(
 
 
 def _render_revise_start_message(
-    *, issue_number: int, issue_url: str, feedback_count: int, base_branch: str = ""
+    *,
+    issue_number: int,
+    issue_url: str,
+    feedback_count: int,
+    base_branch: str = "",
+    reporter_feedback: bool = False,
 ) -> str:
     if base_branch and feedback_count:
         head = f"开始解决与 `{base_branch}` 的冲突并按评审反馈更新修复（{feedback_count} 条）"
     elif base_branch:
         head = f"开始合并目标分支 `{base_branch}` 解决冲突"
+    elif feedback_count:
+        head = f"开始按评审反馈更新修复（{feedback_count} 条）"
+    elif reporter_feedback:
+        head = "开始根据上报人的最新反馈更新修复"
     else:
         head = f"开始按评审反馈更新修复（{feedback_count} 条）"
     text = f"{head}，GitHub issue [#{issue_number}]({issue_url})"

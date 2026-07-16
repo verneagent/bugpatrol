@@ -19,6 +19,7 @@ from bugpatrol.fix_result import (
     notify_conflict_escalation,
     render_conflict_escalation_pr_comment,
     render_conflict_instructions_markdown,
+    render_reporter_feedback_markdown,
     render_review_feedback_markdown,
     render_revise_lark_message,
     render_revise_pr_comment,
@@ -229,7 +230,7 @@ class ReviseRenderTest(unittest.TestCase):
     def test_revise_pr_comment_reports_count(self) -> None:
         text = render_revise_pr_comment(result=_result(), addressed=3)
         self.assertIn("3", text)
-        self.assertIn("已按评审反馈", text)
+        self.assertIn("已处理 3 条评审意见", text)
         self.assertIn("resolve", text)
 
     def test_revise_lark_message_at_mentions_reviewer(self) -> None:
@@ -258,6 +259,35 @@ class ReviseRenderTest(unittest.TestCase):
         )
         self.assertIn("解决冲突", text)
         self.assertIn("feature-demo", text)
+
+    def test_reporter_feedback_markdown_carries_correction_and_scope(self) -> None:
+        text = render_reporter_feedback_markdown("其实是标签上下位置不统一")
+        self.assertIn("上报人", text)
+        self.assertIn("其实是标签上下位置不统一", text)
+        # Explicitly allows overturning the prior fix but holds the scope.
+        self.assertIn("推翻错误方向", text)
+        self.assertIn("最小必要改动", text)
+
+    def test_reporter_feedback_revise_comment_is_honest(self) -> None:
+        text = render_revise_pr_comment(
+            result=_result(), addressed=0, reporter_feedback=True
+        )
+        # No review threads addressed -> must not claim it addressed feedback count.
+        self.assertIn("上报人", text)
+        self.assertNotIn("已处理 0 条", text)
+
+    def test_reporter_feedback_revise_lark_at_mentions_reviewer(self) -> None:
+        text = render_revise_lark_message(
+            issue_number=7,
+            issue_url="u",
+            pr_url="https://github.test/o/r/pull/9",
+            result=_result(),
+            addressed=0,
+            reviewer_open_id="ou_dev",
+            reporter_feedback=True,
+        )
+        self.assertIn('<at user_id="ou_dev">', text)
+        self.assertIn("上报人", text)
 
     def test_conflict_escalation_comment_lists_files(self) -> None:
         text = render_conflict_escalation_pr_comment(

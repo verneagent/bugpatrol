@@ -124,20 +124,26 @@ class IntakeWorkflow:
                 # Every message in this batch was already captured — skip the
                 # duplicate follow-up entirely (heal still applies above).
                 return self._duplicate_outcome(record=records[-1], issue=existing, healed=healed)
+            triage_signal = _merge_triage_signals(
+                classify_triage_signal("updated", record, self._config.followup_classifier)
+                for record in new_records
+            )
             if len(new_records) == 1:
-                comment = render_followup_comment(new_records[0], language=self._config.intake.language)
+                comment = render_followup_comment(
+                    new_records[0],
+                    language=self._config.intake.language,
+                    signal_reason=triage_signal.reason,
+                )
             else:
                 comment = render_batched_followup_comment(
-                    new_records, language=self._config.intake.language
+                    new_records,
+                    language=self._config.intake.language,
+                    signal_reason=triage_signal.reason,
                 )
             self._github.add_issue_comment(
                 repo=self._config.github_repo,
                 issue_number=existing.number,
                 body=comment,
-            )
-            triage_signal = _merge_triage_signals(
-                classify_triage_signal("updated", record, self._config.followup_classifier)
-                for record in new_records
             )
             if healed and not triage_signal.should_enqueue:
                 triage_signal = TriageSignal(
@@ -224,13 +230,17 @@ class IntakeWorkflow:
                 # backfill re-scan): never append a second follow-up comment for
                 # the same message.
                 return self._duplicate_outcome(record=record, issue=existing, healed=healed)
-            comment = render_followup_comment(record, language=self._config.intake.language)
+            triage_signal = classify_triage_signal("updated", record, self._config.followup_classifier)
+            comment = render_followup_comment(
+                record,
+                language=self._config.intake.language,
+                signal_reason=triage_signal.reason,
+            )
             self._github.add_issue_comment(
                 repo=self._config.github_repo,
                 issue_number=existing.number,
                 body=comment,
             )
-            triage_signal = classify_triage_signal("updated", record, self._config.followup_classifier)
             if healed and not triage_signal.should_enqueue:
                 # The issue was created but crashed before its fields were
                 # written; make sure triage still runs at least once.
@@ -460,7 +470,9 @@ def infer_evidence(attachments: tuple[Attachment, ...], original_text: str) -> s
     return "无"
 
 
-def render_followup_comment(record: IntakeRecord, *, language: str = "en-US") -> str:
+def render_followup_comment(
+    record: IntakeRecord, *, language: str = "en-US", signal_reason: str = ""
+) -> str:
     copy = _followup_copy(language)
     attachments = render_attachments_markdown(record.attachments, copy=copy)
     meta = {
@@ -471,6 +483,10 @@ def render_followup_comment(record: IntakeRecord, *, language: str = "en-US") ->
         "message_id": record.message_id,
         "reporter_open_id": record.reporter_open_id,
     }
+    if signal_reason:
+        # Record how the followup was classified so a later fix-revise can tell a
+        # material correction from an ack/fix-status chatter without re-parsing text.
+        meta["signal_reason"] = signal_reason
     return "\n".join(
         [
             f"## {copy['topic_update']}",
@@ -494,7 +510,9 @@ def render_followup_comment(record: IntakeRecord, *, language: str = "en-US") ->
     )
 
 
-def render_batched_followup_comment(records: Sequence[IntakeRecord], *, language: str = "en-US") -> str:
+def render_batched_followup_comment(
+    records: Sequence[IntakeRecord], *, language: str = "en-US", signal_reason: str = ""
+) -> str:
     """One comment carrying several messages of the same topic.
 
     Each message keeps its own reporter/timestamp/attachments section, and a
@@ -529,6 +547,8 @@ def render_batched_followup_comment(records: Sequence[IntakeRecord], *, language
         "message_ids": [record.message_id for record in records],
         "reporter_open_id": first.reporter_open_id,
     }
+    if signal_reason:
+        meta["signal_reason"] = signal_reason
     lines.extend(
         [
             "---",

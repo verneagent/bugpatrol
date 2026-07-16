@@ -180,6 +180,100 @@ class CliTest(unittest.TestCase):
         build_ready.assert_called_once()
         self.assertEqual(json.loads(stdout.getvalue())["status"], "build_notified")
 
+    def test_run_triage_redirects_to_fix_revise_when_open_pr_exists(self) -> None:
+        # A reporter follow-up re-triggers triage; when a fix PR is already open,
+        # redirect to fix-revise (feed the correction in) instead of re-triaging
+        # to a no-op "结论无变化".
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        stdout = io.StringIO()
+
+        class RedirectGithub(FakeGithub):
+            def get_open_pull_request_by_head(self, *, repo: str, head: str):
+                from bugpatrol.clients import OpenPullRequest
+
+                return OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
+
+        dispatched: list[tuple] = []
+
+        def fake_make_dispatch(cmd):
+            def dispatch(issue_number: int) -> None:
+                dispatched.append((tuple(cmd), issue_number))
+
+            return dispatch
+
+        with patch("bugpatrol.__main__.load_project_config", return_value=config):
+            with patch("bugpatrol.__main__.GitHubCliIssuesClient", return_value=RedirectGithub()):
+                with patch("bugpatrol.__main__.GitHubIssueFieldsClient", return_value=object()):
+                    with patch("bugpatrol.__main__.make_dispatch", side_effect=fake_make_dispatch):
+                        with patch("bugpatrol.__main__.resolve_issue_branch") as resolve:
+                            with contextlib.redirect_stdout(stdout):
+                                exit_code = main(
+                                    [
+                                        "run-triage",
+                                        "projects/todo-sandbox.toml",
+                                        "--issue",
+                                        "7",
+                                        "--repo-path",
+                                        "/tmp/repo",
+                                        "--execute",
+                                        "--fix-revise-dispatch-command",
+                                        "gh",
+                                        "workflow",
+                                        "run",
+                                    ]
+                                )
+
+        self.assertEqual(exit_code, 0)
+        # Triage was skipped entirely.
+        resolve.assert_not_called()
+        self.assertEqual(dispatched, [(("gh", "workflow", "run"), 7)])
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["redirected"], "fix-revise")
+        self.assertEqual(payload["pr"], 9)
+
+    def test_run_triage_no_redirect_when_no_open_pr(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+
+        class NoPrGithub(FakeGithub):
+            def get_open_pull_request_by_head(self, *, repo: str, head: str):
+                return None
+
+        dispatched: list[tuple] = []
+
+        class _ReachedTriage(Exception):
+            pass
+
+        with patch("bugpatrol.__main__.load_project_config", return_value=config):
+            with patch("bugpatrol.__main__.GitHubCliIssuesClient", return_value=NoPrGithub()):
+                with patch("bugpatrol.__main__.GitHubIssueFieldsClient", return_value=object()):
+                    with patch(
+                        "bugpatrol.__main__.make_dispatch",
+                        side_effect=lambda cmd: (lambda n: dispatched.append(n)),
+                    ):
+                        with patch(
+                            "bugpatrol.__main__.resolve_issue_branch",
+                            side_effect=_ReachedTriage,
+                        ):
+                            with self.assertRaises(_ReachedTriage):
+                                main(
+                                    [
+                                        "run-triage",
+                                        "projects/todo-sandbox.toml",
+                                        "--issue",
+                                        "7",
+                                        "--repo-path",
+                                        "/tmp/repo",
+                                        "--execute",
+                                        "--fix-revise-dispatch-command",
+                                        "gh",
+                                        "workflow",
+                                        "run",
+                                    ]
+                                )
+
+        # No open PR -> no redirect, normal triage path reached.
+        self.assertEqual(dispatched, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,7 @@ from bugpatrol.intake_workflow import (
     build_issue_title,
     infer_evidence,
     initial_intake_fields,
+    parse_intake_reply_metadata,
 )
 from bugpatrol.testing.fakes import FakeGitHubIssuesClient, FakeLarkMessengerClient
 
@@ -139,6 +140,32 @@ class IntakeWorkflowTest(unittest.TestCase):
         self.assertIn("## 消息", github.created[0].comments[0])
         self.assertEqual(len(lark.replies), 2)
         self.assertIn("已追加到 GitHub issue [#1](", lark.replies[1].text)
+
+    def test_followup_reply_meta_records_material_signal_reason(self) -> None:
+        # A later fix-revise reads signal_reason to tell a material correction
+        # apart from an ack without re-parsing the text.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        workflow.process(make_record(message_id="om_first", original_text="首次上报"))
+        workflow.process(make_record(message_id="om_second", original_text="补充：其实是标签位置不统一"))
+
+        meta = parse_intake_reply_metadata(github.created[0].comments[0])
+        self.assertEqual(meta["signal_reason"], "material_followup")
+
+    def test_followup_reply_meta_records_ack_signal_reason(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        workflow.process(make_record(message_id="om_first", original_text="首次上报"))
+        workflow.process(make_record(message_id="om_second", original_text="收到"))
+
+        meta = parse_intake_reply_metadata(github.created[0].comments[0])
+        self.assertNotEqual(meta["signal_reason"], "material_followup")
 
     def test_material_followup_after_done_marks_pending(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

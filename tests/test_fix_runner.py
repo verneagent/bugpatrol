@@ -22,6 +22,7 @@ from bugpatrol.fix_runner import (
     FixRunPlan,
     execute_fix_revise,
     execute_fix_run,
+    latest_reporter_correction,
     latest_triage_analysis,
     prepare_fix_run,
     read_triage_verdict,
@@ -33,6 +34,7 @@ from bugpatrol.fix_runner import (
 )
 from bugpatrol.fix_result import append_ci_fix_metadata
 from bugpatrol.intake import IntakeRecord, render_issue_body
+from bugpatrol.intake_workflow import render_followup_comment
 from bugpatrol.triage_result import append_triage_metadata
 
 
@@ -613,6 +615,101 @@ class RunFixReviseGuardsTest(unittest.TestCase):
         self.assertFalse(github.resolved_threads)
 
 
+def _followup_reply(text: str, reason: str, message_id: str = "om_x") -> str:
+    record = IntakeRecord(
+        reporter_name="Reporter",
+        reporter_open_id="ou_1",
+        created_at="2026-07-01T00:00:00Z",
+        chat_id="oc_1",
+        root_id="om_root",
+        message_id=message_id,
+        original_text=text,
+    )
+    return render_followup_comment(record, language="zh-CN", signal_reason=reason)
+
+
+class LatestReporterCorrectionTest(unittest.TestCase):
+    def test_picks_latest_material_and_strips_meta(self) -> None:
+        comments = [
+            GitHubIssueComment(id="1", body=_followup_reply("旧的补充", "material_followup", "om_a")),
+            GitHubIssueComment(id="2", body=_followup_reply("收到，谢谢", "acknowledgement", "om_b")),
+            GitHubIssueComment(
+                id="3", body=_followup_reply("其实是标签上下位置不统一", "material_followup", "om_c")
+            ),
+        ]
+        got = latest_reporter_correction(comments)
+        self.assertIn("其实是标签上下位置不统一", got)
+        # Only the newest material correction wins; older material is dropped.
+        self.assertNotIn("旧的补充", got)
+        # The machine-readable footer must not reach the agent.
+        self.assertNotIn("BUGPATROL_INTAKE_REPLY_META", got)
+
+    def test_ignores_acks_and_non_intake_comments(self) -> None:
+        comments = [
+            GitHubIssueComment(id="1", body=_followup_reply("收到", "acknowledgement", "om_a")),
+            GitHubIssueComment(id="2", body="随手写的普通评论，不是 intake 回复"),
+        ]
+        self.assertEqual(latest_reporter_correction(comments), "")
+
+
+class RunFixReviseReporterFeedbackTest(unittest.TestCase):
+    def test_material_reporter_followup_triggers_revise(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_repo = _make_fix_remote(root)
+            github = FakeGithub(
+                comments=[_followup_reply("其实是标签上下位置不统一", "material_followup")],
+                open_pull_request=OpenPullRequest(
+                    number=9,
+                    url="https://github.test/o/r/pull/9",
+                    base_ref="main",
+                    mergeable="MERGEABLE",
+                ),
+                review_threads=(),
+            )
+            with patch("bugpatrol.fix_runner.prepare_fix_revise", return_value=object()) as prep:
+                with patch(
+                    "bugpatrol.fix_runner.execute_fix_revise", return_value="revised"
+                ) as ex:
+                    status = run_fix_revise(
+                        config=_sandbox_config(),
+                        issue_number=7,
+                        base_repo=base_repo,
+                        output_dir=root / "out",
+                        github=github,  # type: ignore[arg-type]
+                        issue_fields=FakeIssueFields("代码 Bug"),  # type: ignore[arg-type]
+                    )
+        self.assertEqual(status, "revised")
+        # The reporter's stripped correction flows into both the context builder
+        # and the executor (as the reporter_feedback signal).
+        self.assertIn("其实是标签上下位置不统一", prep.call_args.kwargs["reporter_feedback"])
+        self.assertTrue(ex.call_args.kwargs["reporter_feedback"])
+
+    def test_ack_only_followup_is_no_feedback(self) -> None:
+        github = FakeGithub(
+            comments=[_followup_reply("收到，谢谢", "acknowledgement")],
+            open_pull_request=OpenPullRequest(
+                number=9,
+                url="https://github.test/o/r/pull/9",
+                base_ref="main",
+                mergeable="MERGEABLE",
+            ),
+            review_threads=(),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("bugpatrol.fix_runner.execute_fix_revise") as ex:
+                status = run_fix_revise(
+                    config=_sandbox_config(),
+                    issue_number=7,
+                    base_repo=Path(tmp),
+                    output_dir=Path(tmp) / "out",
+                    github=github,  # type: ignore[arg-type]
+                    issue_fields=FakeIssueFields("代码 Bug"),  # type: ignore[arg-type]
+                )
+        self.assertEqual(status, "no_feedback")
+        ex.assert_not_called()
+
+
 class ExecuteFixReviseTest(unittest.TestCase):
     def _plan(self, *, worktree: Path, output_dir: Path, verify: dict[str, str], command, setup=None):
         config = _sandbox_config()
@@ -666,7 +763,7 @@ class ExecuteFixReviseTest(unittest.TestCase):
             # No new PR is created on revise; the existing branch is updated.
             self.assertFalse(github.created_prs)
             self.assertEqual(github.resolved_threads, ["RT_1"])
-            self.assertTrue(any("已按评审反馈" in c["body"] for c in github.pr_comments))
+            self.assertTrue(any("已处理 1 条评审意见" in c["body"] for c in github.pr_comments))
 
     def test_verify_failed_does_not_resolve_threads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
