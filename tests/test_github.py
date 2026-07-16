@@ -354,6 +354,52 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
                 client.add_assignee(repo="o/r", issue_number=1, assignee="a")
         self.assertEqual(run.call_count, 3)
 
+    def test_commit_referencing_issue_matches_word_bounded_ref(self) -> None:
+        client = GitHubCliIssuesClient()
+        page = json.dumps(
+            [
+                {"sha": "aaa", "commit": {"message": "chore: bump deps for #40449"}},
+                {"sha": "bbb", "commit": {"message": "fix(x): handle mute (#4044)"}},
+                {"sha": "ccc", "commit": {"message": "docs: mention #4044 too"}},
+            ]
+        )
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 0, page, "")
+            sha = client.commit_referencing_issue(
+                repo="o/r", branch="2026/chat-live", issue_number=4044
+            )
+
+        # #40449 must not count (trailing digit); first true #4044 wins.
+        self.assertEqual(sha, "bbb")
+
+    def test_commit_referencing_issue_returns_empty_for_missing_branch(self) -> None:
+        client = GitHubCliIssuesClient()
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 1, "", "Not Found")
+            sha = client.commit_referencing_issue(
+                repo="o/r", branch="gone", issue_number=7
+            )
+
+        self.assertEqual(sha, "")
+
+    def test_commit_referencing_issue_no_match_stops_on_short_page(self) -> None:
+        client = GitHubCliIssuesClient()
+        page = json.dumps(
+            [{"sha": "aaa", "commit": {"message": "unrelated work"}}]
+        )
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 0, page, "")
+            sha = client.commit_referencing_issue(
+                repo="o/r", branch="main", issue_number=7
+            )
+
+        # A short page (< per_page) means no more commits: exactly one API call.
+        self.assertEqual(sha, "")
+        self.assertEqual(run.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

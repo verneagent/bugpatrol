@@ -85,6 +85,16 @@ def audit_issue_close(
             evidence = merged_pr_cited_in_comments(
                 comments, repo=repo, config=config, github=github
             )
+        if not evidence:
+            # The GitHub-native issue<->commit `referenced` timeline event is
+            # invisible to the workflow's GitHub App token for a commit on a
+            # non-default branch, so a real fix committed to the issue's feature
+            # branch (`fix: ... (#N)`) leaves no app-visible evidence. Reconstruct
+            # that link deterministically by scanning the intake target branch for
+            # a commit whose message references #N.
+            evidence = commit_evidence_on_target_branch(
+                metadata, repo=repo, issue_number=issue_number, github=github
+            )
         if evidence:
             # A merged PR / linked fix commit is the canonical "fixed" signal;
             # fix_notify (reconcile) already announces it to Lark. Announcing it
@@ -297,6 +307,31 @@ def merged_pr_cited_in_comments(
     for full_repo, number in targets[:_MAX_PR_CANDIDATES]:
         if github.pull_request_merged(repo=full_repo, number=number):
             return f"merged PR {full_repo}#{number} (cited in a comment)"
+    return ""
+
+
+def commit_evidence_on_target_branch(
+    metadata: dict[str, Any] | None,
+    *,
+    repo: str,
+    issue_number: int,
+    github: GitHubCliIssuesClient,
+) -> str:
+    """A fix commit referencing the issue on its intake target branch.
+
+    Feature-branch topics record `target_branch` in the intake metadata. When a
+    dev commits the fix there and references the issue, GitHub's `referenced`
+    timeline event exists but is invisible to the app token; this scans that
+    branch directly (app-token-visible) to recover the same evidence.
+    """
+    branch = str((metadata or {}).get("target_branch") or "")
+    if not branch:
+        return ""
+    sha = github.commit_referencing_issue(
+        repo=repo, branch=branch, issue_number=issue_number
+    )
+    if sha:
+        return f"commit {sha} on {branch}"
     return ""
 
 

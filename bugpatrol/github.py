@@ -285,6 +285,53 @@ class GitHubCliIssuesClient:
         data = json.loads(result.stdout)
         return bool(data.get("mergedAt"))
 
+    def commit_referencing_issue(
+        self, *, repo: str, branch: str, issue_number: int, max_commits: int = 200
+    ) -> str:
+        """A commit on `branch` whose message references `#issue_number`.
+
+        GitHub App installation tokens do NOT surface the issue<->commit
+        `referenced` timeline event for a commit on a non-default branch, so a
+        workflow running as the app sees no fix evidence even when a real fix
+        commit references the issue (`fix: ... (#N)` pushed to the issue's
+        feature branch). Reconstruct that native link deterministically: scan
+        the branch's most-recent commits (bounded) for a message that references
+        `#N` -- exactly the condition under which GitHub creates the referenced
+        event. Returns the first matching full SHA, else "". A deleted/missing
+        branch makes `gh api` exit non-zero -> "" rather than raised.
+        """
+        pattern = re.compile(rf"(?<!\d)#{issue_number}(?!\d)")
+        per_page = 100
+        seen = 0
+        page = 1
+        while seen < max_commits:
+            try:
+                result = self._run(
+                    [
+                        "api",
+                        "-H",
+                        f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                        f"/repos/{repo}/commits?sha={branch}&per_page={per_page}&page={page}",
+                    ]
+                )
+            except GitHubCliError:
+                return ""
+            data = json.loads(result.stdout)
+            if not isinstance(data, list) or not data:
+                return ""
+            for item in data:
+                seen += 1
+                if seen > max_commits:
+                    return ""
+                commit = item.get("commit") if isinstance(item, dict) else None
+                message = commit.get("message") if isinstance(commit, dict) else None
+                if isinstance(message, str) and pattern.search(message):
+                    return str(item.get("sha") or "")
+            if len(data) < per_page:
+                return ""
+            page += 1
+        return ""
+
     def get_pull_request(self, *, repo: str, pr: str) -> GitHubPullRequest:
         result = self._run(
             [

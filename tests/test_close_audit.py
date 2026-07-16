@@ -32,7 +32,7 @@ def render_expected_behavior_triage_comment() -> str:
     )
 
 
-def _managed_body(chat_id: str = "oc_1") -> str:
+def _managed_body(chat_id: str = "oc_1", target_branch: str = "main") -> str:
     return render_issue_body(
         IntakeRecord(
             reporter_name="Reporter",
@@ -42,6 +42,7 @@ def _managed_body(chat_id: str = "oc_1") -> str:
             root_id="om_root",
             message_id="om_1",
             original_text="bug",
+            target_branch=target_branch,
         ),
         language="zh-CN",
     )
@@ -55,6 +56,7 @@ class FakeGithub:
         timeline: tuple[dict, ...] = (),
         known_commits: tuple[str, ...] = (),
         merged_prs: tuple[str, ...] = (),
+        branch_fix_commits: dict[tuple[str, int], str] | None = None,
     ) -> None:
         self.issue = issue
         self.timeline = timeline
@@ -63,6 +65,8 @@ class FakeGithub:
         self.known_commits = {sha.lower() for sha in known_commits}
         # entries are "owner/repo#number"
         self.merged_prs = {ref.lower() for ref in merged_prs}
+        # (branch, issue_number) -> full SHA the branch scan should recover
+        self.branch_fix_commits = branch_fix_commits or {}
 
     def get_issue(self, *, repo: str, issue_number: int) -> GitHubIssue:
         return self.issue
@@ -72,6 +76,11 @@ class FakeGithub:
 
     def pull_request_merged(self, *, repo: str, number: int) -> bool:
         return f"{repo}#{number}".lower() in self.merged_prs
+
+    def commit_referencing_issue(
+        self, *, repo: str, branch: str, issue_number: int, max_commits: int = 200
+    ) -> str:
+        return self.branch_fix_commits.get((branch, issue_number), "")
 
     def reopen_issue(self, *, repo: str, issue_number: int) -> None:
         self.reopened = True
@@ -333,6 +342,49 @@ class CloseAuditTest(unittest.TestCase):
         self.assertFalse(github.reopened)
         self.assertEqual(summary.evidence, "commit 0223259 (cited in a comment)")
         self.assertEqual(len(lark.replies), 0)
+
+    def test_feature_branch_fix_commit_short_circuits_reopen_enforcement(self) -> None:
+        # #4044 repro: a real fix commit referencing the issue is pushed to the
+        # intake target branch. GitHub's `referenced` timeline event exists but is
+        # invisible to the workflow's app token (non-default branch), so evidence
+        # detection must fall back to scanning the target branch directly. It must
+        # recover the commit and NOT reopen.
+        config = self._enforce_config()
+        github = FakeGithub(
+            issue=_closed_issue(
+                body=_managed_body(chat_id=config.lark.chat_id, target_branch="2026/chat-live")
+            ),
+            branch_fix_commits={("2026/chat-live", 7): "628b04f672034ccc"},
+        )
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertFalse(summary.reopened)
+        self.assertFalse(github.reopened)
+        self.assertEqual(summary.evidence, "commit 628b04f672034ccc on 2026/chat-live")
+        self.assertEqual(len(lark.replies), 0)
+
+    def test_no_target_branch_fix_commit_still_reopens(self) -> None:
+        # No fix commit on the target branch (and no other evidence) -> still
+        # reopens, so the branch scan doesn't blanket-suppress enforcement.
+        config = self._enforce_config()
+        github = FakeGithub(
+            issue=_closed_issue(
+                body=_managed_body(chat_id=config.lark.chat_id, target_branch="2026/chat-live")
+            ),
+        )
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertTrue(summary.reopened)
+        self.assertTrue(github.reopened)
+        self.assertEqual(summary.evidence, "")
 
     def _weaver_config(self):
         base = self._notify_config()
