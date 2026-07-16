@@ -77,6 +77,14 @@ def audit_issue_close(
             # commit counts as a fix reference. Verifying the SHA keeps a random
             # hex token from passing as evidence.
             evidence = commit_evidence_from_comments(comments, repo=repo, github=github)
+        if not evidence:
+            # A cross-repo fix (e.g. the weaver backend behind the fived
+            # frontend) lands as a merged PR in the sibling repo, cited in a
+            # comment. GitHub's cross-repo timeline reference can also lag in
+            # reflecting the merge, so honor the cited reference directly.
+            evidence = merged_pr_cited_in_comments(
+                comments, repo=repo, config=config, github=github
+            )
         if evidence:
             # A merged PR / linked fix commit is the canonical "fixed" signal;
             # fix_notify (reconcile) already announces it to Lark. Announcing it
@@ -204,9 +212,18 @@ def fix_evidence_for_issue(
 # against the repo before it counts, so decimal timestamps / issue numbers that
 # happen to match the shape are discarded when they don't resolve.
 _COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
-# Cap resolution attempts so a comment full of hex noise can't fan out into an
-# unbounded number of API calls.
+# A github PR URL, e.g. https://github.com/TheCloverLab/weaver/pull/1000
+_PR_URL_RE = re.compile(
+    r"https?://github\.com/(?P<repo>[\w.-]+/[\w.-]+)/pull/(?P<num>\d+)", re.IGNORECASE
+)
+# A repo-qualified reference, e.g. TheCloverLab/weaver#1000 or weaver#1000. A
+# bare `#N` (no repo prefix) is intentionally NOT matched -- only an explicit
+# cross-repo (or repo-qualified) pointer counts.
+_PR_REF_RE = re.compile(r"\b(?P<slug>[\w.-]+(?:/[\w.-]+)?)#(?P<num>\d+)\b")
+# Cap resolution attempts so a comment full of hex/ref noise can't fan out into
+# an unbounded number of API calls.
 _MAX_SHA_CANDIDATES = 10
+_MAX_PR_CANDIDATES = 10
 
 
 def commit_evidence_from_comments(
@@ -231,6 +248,55 @@ def commit_evidence_from_comments(
     for sha in candidates:
         if github.commit_exists(repo=repo, sha=sha):
             return f"commit {sha} (cited in a comment)"
+    return ""
+
+
+def merged_pr_cited_in_comments(
+    comments: tuple[GitHubIssueComment, ...],
+    *,
+    repo: str,
+    config: ProjectConfig,
+    github: GitHubCliIssuesClient,
+) -> str:
+    """A merged PR cited in a comment, in this repo or a configured reference repo.
+
+    Cross-repo fixes (e.g. the Go backend `weaver` behind the `fived` frontend)
+    land as a merged PR in the sibling repo, which a dev points at in a comment
+    ("PR: TheCloverLab/weaver#1000"). Honor that: a repo-qualified PR reference
+    to `repo` or a `triage.reference_repos` repo that is actually merged counts
+    as fix evidence. Restricting to the allowlist stops an unrelated merged PR
+    from passing; verifying the merge stops an open/bogus reference.
+    """
+    allowed: dict[str, str] = {}
+    for full in (repo, *(ref.repo for ref in config.reference_repos)):
+        allowed[full.lower()] = full
+        allowed[full.rsplit("/", 1)[-1].lower()] = full
+
+    seen: set[tuple[str, int]] = set()
+    targets: list[tuple[str, int]] = []
+
+    def _add(full_repo: str, number: int) -> None:
+        key = (full_repo, number)
+        if key not in seen:
+            seen.add(key)
+            targets.append(key)
+
+    for comment in comments:
+        body = comment.body or ""
+        for match in _PR_URL_RE.finditer(body):
+            full_repo = allowed.get(match.group("repo").lower())
+            if full_repo:
+                _add(full_repo, int(match.group("num")))
+        for match in _PR_REF_RE.finditer(body):
+            full_repo = allowed.get(match.group("slug").lower())
+            if full_repo:
+                _add(full_repo, int(match.group("num")))
+        if len(targets) >= _MAX_PR_CANDIDATES:
+            break
+
+    for full_repo, number in targets[:_MAX_PR_CANDIDATES]:
+        if github.pull_request_merged(repo=full_repo, number=number):
+            return f"merged PR {full_repo}#{number} (cited in a comment)"
     return ""
 
 

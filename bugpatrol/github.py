@@ -269,6 +269,22 @@ class GitHubCliIssuesClient:
             return False
         return True
 
+    def pull_request_merged(self, *, repo: str, number: int) -> bool:
+        """Whether `repo#number` is a pull request that has been merged.
+
+        Used to verify a cross-repo fix PR a dev cites in a comment. A missing
+        PR (or a plain issue number) makes `gh pr view` exit non-zero -> treated
+        as "not a merged PR" rather than raised.
+        """
+        try:
+            result = self._run(
+                ["pr", "view", str(number), "--repo", repo, "--json", "mergedAt"]
+            )
+        except GitHubCliError:
+            return False
+        data = json.loads(result.stdout)
+        return bool(data.get("mergedAt"))
+
     def get_pull_request(self, *, repo: str, pr: str) -> GitHubPullRequest:
         result = self._run(
             [

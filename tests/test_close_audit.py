@@ -11,7 +11,7 @@ from bugpatrol.close_audit import (
     parse_close_audit_metadata,
     render_close_audit_metadata_comment,
 )
-from bugpatrol.config import load_project_config
+from bugpatrol.config import ReferenceRepo, load_project_config
 from bugpatrol.fix_notify import render_fix_metadata_comment
 from bugpatrol.intake import IntakeRecord, render_issue_body
 from bugpatrol.testing.fakes import FakeLarkMessengerClient
@@ -54,18 +54,24 @@ class FakeGithub:
         issue: GitHubIssue,
         timeline: tuple[dict, ...] = (),
         known_commits: tuple[str, ...] = (),
+        merged_prs: tuple[str, ...] = (),
     ) -> None:
         self.issue = issue
         self.timeline = timeline
         self.comments: list[str] = []
         self.reopened = False
         self.known_commits = {sha.lower() for sha in known_commits}
+        # entries are "owner/repo#number"
+        self.merged_prs = {ref.lower() for ref in merged_prs}
 
     def get_issue(self, *, repo: str, issue_number: int) -> GitHubIssue:
         return self.issue
 
     def commit_exists(self, *, repo: str, sha: str) -> bool:
         return sha.lower() in self.known_commits
+
+    def pull_request_merged(self, *, repo: str, number: int) -> bool:
+        return f"{repo}#{number}".lower() in self.merged_prs
 
     def reopen_issue(self, *, repo: str, issue_number: int) -> None:
         self.reopened = True
@@ -327,6 +333,84 @@ class CloseAuditTest(unittest.TestCase):
         self.assertFalse(github.reopened)
         self.assertEqual(summary.evidence, "commit 0223259 (cited in a comment)")
         self.assertEqual(len(lark.replies), 0)
+
+    def _weaver_config(self):
+        base = self._notify_config()
+        return dataclasses.replace(
+            base,
+            reference_repos=(
+                ReferenceRepo(repo="TheCloverLab/weaver", path="~/clover/weaver"),
+            ),
+        )
+
+    def test_merged_cross_repo_pr_cited_in_comment_counts_as_evidence(self) -> None:
+        # A weaver backend fix lands as a merged PR in the sibling repo, cited in
+        # a comment ("PR: TheCloverLab/weaver#1000"). It must count as evidence.
+        config = self._weaver_config()
+        github = FakeGithub(
+            issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)),
+            merged_prs=("TheCloverLab/weaver#1000",),
+        )
+        github.comments.append("这是 Server 端的修复，PR: TheCloverLab/weaver#1000")
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="TheCloverLab/fived", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertTrue(summary.audited)
+        self.assertEqual(summary.evidence, "merged PR TheCloverLab/weaver#1000 (cited in a comment)")
+        self.assertFalse(summary.nagged)
+        self.assertEqual(github.comments, ["这是 Server 端的修复，PR: TheCloverLab/weaver#1000"])
+        self.assertEqual(len(lark.replies), 0)
+
+    def test_short_form_reference_repo_pr_counts(self) -> None:
+        config = self._weaver_config()
+        github = FakeGithub(
+            issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)),
+            merged_prs=("TheCloverLab/weaver#1000",),
+        )
+        github.comments.append("fixed server-side in weaver#1000")
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="TheCloverLab/fived", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertEqual(summary.evidence, "merged PR TheCloverLab/weaver#1000 (cited in a comment)")
+        self.assertFalse(summary.nagged)
+
+    def test_unmerged_cross_repo_pr_is_not_evidence(self) -> None:
+        # weaver#1000 referenced but not merged (merged_prs empty) -> still nags.
+        config = self._weaver_config()
+        github = FakeGithub(issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)))
+        github.comments.append("server fix in TheCloverLab/weaver#1000 (still in review)")
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="TheCloverLab/fived", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertTrue(summary.nagged)
+        self.assertEqual(summary.evidence, "")
+
+    def test_merged_pr_in_unlisted_repo_is_not_evidence(self) -> None:
+        # A merged PR in a repo that is neither this repo nor a reference repo is
+        # not honored, even if it happens to be merged.
+        config = self._weaver_config()
+        github = FakeGithub(
+            issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)),
+            merged_prs=("SomeOther/repo#5",),
+        )
+        github.comments.append("see SomeOther/repo#5")
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="TheCloverLab/fived", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertTrue(summary.nagged)
+        self.assertEqual(summary.evidence, "")
 
     def test_nags_once_with_github_comment_and_lark_mention(self) -> None:
         config = dataclasses.replace(
