@@ -231,6 +231,70 @@ class CliTest(unittest.TestCase):
         self.assertEqual(payload["redirected"], "fix-revise")
         self.assertEqual(payload["pr"], 9)
 
+    def test_run_triage_redirect_dispatch_handles_single_string_with_flags(self) -> None:
+        # Locks the real production contract: the workflow passes the dispatch
+        # command as ONE quoted string after --fix-revise-dispatch-command
+        # (nargs="+"), and make_dispatch shlex-splits it. Passing the gh command
+        # as multiple bare tokens would make argparse eat --repo/-f as options;
+        # this test exercises the real make_dispatch (unpatched) + subprocess so a
+        # regression in the single-string/{issue_number} contract fails here.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        stdout = io.StringIO()
+
+        class RedirectGithub(FakeGithub):
+            def get_open_pull_request_by_head(self, *, repo: str, head: str):
+                from bugpatrol.clients import OpenPullRequest
+
+                return OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
+
+        captured: list[list[str]] = []
+
+        class _Completed:
+            returncode = 0
+
+        def fake_run(command, **kwargs):
+            captured.append(list(command))
+            return _Completed()
+
+        with patch("bugpatrol.__main__.load_project_config", return_value=config):
+            with patch("bugpatrol.__main__.GitHubCliIssuesClient", return_value=RedirectGithub()):
+                with patch("bugpatrol.__main__.GitHubIssueFieldsClient", return_value=object()):
+                    with patch("bugpatrol.slash_commands.subprocess.run", side_effect=fake_run):
+                        with contextlib.redirect_stdout(stdout):
+                            exit_code = main(
+                                [
+                                    "run-triage",
+                                    "projects/todo-sandbox.toml",
+                                    "--issue",
+                                    "7",
+                                    "--repo-path",
+                                    "/tmp/repo",
+                                    "--execute",
+                                    "--fix-revise-dispatch-command",
+                                    "gh workflow run bugpatrol-fix-revise.yml "
+                                    "--repo TheCloverLab/fived -f "
+                                    "issue_number={issue_number}",
+                                ]
+                            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            captured,
+            [
+                [
+                    "gh",
+                    "workflow",
+                    "run",
+                    "bugpatrol-fix-revise.yml",
+                    "--repo",
+                    "TheCloverLab/fived",
+                    "-f",
+                    "issue_number=7",
+                ]
+            ],
+        )
+        self.assertEqual(json.loads(stdout.getvalue())["redirected"], "fix-revise")
+
     def test_run_triage_no_redirect_when_no_open_pr(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
 
