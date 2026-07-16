@@ -59,8 +59,14 @@ purpose = "Go backend for the fived frontend (proto routes, comment/chat permiss
 # self-verify (typecheck/test) with deps present and iterate to green — and it
 # is NOT re-run on every verify (it persists across the baseline-attribution
 # reset). `[fix.verify]` is then just the pass/fail gate the agent must clear.
+# `serve` is required by preflight's surface-tests step; the canonical home for
+# it is fived's scripts/ci-runner-setup.sh (host provisioning), but this guarded
+# line self-heals any runner that predates that (no-op once serve is present, so
+# no network unless it's actually missing) — a fresh runner without serve would
+# otherwise fail the full preflight gate and be misread as baseline-red.
 [fix.setup]
 install = "npm ci --no-audit --no-fund"
+serve = "command -v serve > /dev/null 2>&1 || npm install -g serve"
 
 [fix.verify]
 preflight = "./scripts/preflight.sh"
