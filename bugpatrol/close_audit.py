@@ -85,16 +85,6 @@ def audit_issue_close(
             evidence = merged_pr_cited_in_comments(
                 comments, repo=repo, config=config, github=github
             )
-        if not evidence:
-            # The GitHub-native issue<->commit `referenced` timeline event is
-            # invisible to the workflow's GitHub App token for a commit on a
-            # non-default branch, so a real fix committed to the issue's feature
-            # branch (`fix: ... (#N)`) leaves no app-visible evidence. Reconstruct
-            # that link deterministically by scanning the intake target branch for
-            # a commit whose message references #N.
-            evidence = commit_evidence_on_target_branch(
-                metadata, repo=repo, issue_number=issue_number, github=github
-            )
         if evidence:
             # A merged PR / linked fix commit is the canonical "fixed" signal;
             # fix_notify (reconcile) already announces it to Lark. Announcing it
@@ -310,31 +300,6 @@ def merged_pr_cited_in_comments(
     return ""
 
 
-def commit_evidence_on_target_branch(
-    metadata: dict[str, Any] | None,
-    *,
-    repo: str,
-    issue_number: int,
-    github: GitHubCliIssuesClient,
-) -> str:
-    """A fix commit referencing the issue on its intake target branch.
-
-    Feature-branch topics record `target_branch` in the intake metadata. When a
-    dev commits the fix there and references the issue, GitHub's `referenced`
-    timeline event exists but is invisible to the app token; this scans that
-    branch directly (app-token-visible) to recover the same evidence.
-    """
-    branch = str((metadata or {}).get("target_branch") or "")
-    if not branch:
-        return ""
-    sha = github.commit_referencing_issue(
-        repo=repo, branch=branch, issue_number=issue_number
-    )
-    if sha:
-        return f"commit {sha} on {branch}"
-    return ""
-
-
 def render_close_audit_metadata_comment(metadata: dict[str, Any]) -> str:
     return "\n".join(
         [
@@ -446,7 +411,8 @@ def _render_close_comment(*, issue, kind: str, reopened: bool = False) -> str:
             f"但没有找到关联的修复 commit 或已合并 PR{reopened_note}。\n\n"
             f"{closing_hint}"
             f"- 修复 PR / commit message 里写 `Fixes #{issue.number}`（推荐，GitHub 会自动关联）\n"
-            f"- 在本 issue 评论里贴修复 commit SHA 或 PR 链接\n\n"
+            f"- 在本 issue 评论里、或直接在对应的 Lark 话题里回复修复 commit SHA 或 PR 链接"
+            f"（Lark 回复会自动同步成本 issue 的评论）\n\n"
             f"{not_code_hint}"
         )
     else:
@@ -470,11 +436,12 @@ def _render_close_lark_text(
             return (
                 f"{prefix}Issue [#{issue.number}]({issue.url}) 以已修复关闭{_closer_note(issue)}，"
                 f"但没有关联修复 commit/PR，已自动重新打开。"
-                f"请补充修复出处后再关闭，或改用 not planned / duplicate。"
+                f"请直接在本话题里回复修复 commit SHA 或 PR 链接（会自动同步到 issue），再关闭；"
+                f"或改用 not planned / duplicate。"
             )
         return (
             f"{prefix}Issue [#{issue.number}]({issue.url}) 被标记为已修复关闭{_closer_note(issue)}，"
-            f"但没有关联修复 commit/PR，请在 issue 里补充修复出处。"
+            f"但没有关联修复 commit/PR，请直接在本话题里回复修复 commit SHA 或 PR 链接（会自动同步到 issue）。"
         )
     return (
         f"{prefix}Issue [#{issue.number}]({issue.url}) 已关闭：{_reason_label(kind)}{_closer_note(issue)}。"
