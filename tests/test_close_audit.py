@@ -282,22 +282,55 @@ class CloseAuditTest(unittest.TestCase):
         self.assertFalse(summary.nagged)
         self.assertEqual(github.comments, [])
 
-    def test_commit_sha_cited_in_comment_counts_as_evidence(self) -> None:
+    def test_commit_sha_cited_in_comment_counts_as_evidence_and_notifies(self) -> None:
         # A fix committed directly to a feature branch has no GitHub-native link,
         # so a dev's "Fixed in <sha> ..." comment is honored when the SHA resolves.
-        github = FakeGithub(issue=_closed_issue(), known_commits=("0223259",))
+        # reconcile never announces such a bare feature-branch commit, so the close
+        # is announced here (#4053 gap) -- not silently dropped.
+        config = self._notify_config()
+        github = FakeGithub(
+            issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)),
+            known_commits=("0223259",),
+        )
         github.comments.append("Fixed in 0223259 on 2026/chat-live: badge now reads 1 min.")
         lark = FakeLarkMessengerClient()
 
         summary = audit_issue_close(
-            repo="o/r", issue_number=7, config=self.config, github=github, lark=lark, dry_run=False
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
         )
 
         self.assertTrue(summary.audited)
+        self.assertEqual(summary.kind, "closed_completed")
         self.assertEqual(summary.evidence, "commit 0223259 (cited in a comment)")
+        self.assertTrue(summary.notified)
         self.assertFalse(summary.nagged)
-        self.assertEqual(github.comments, ["Fixed in 0223259 on 2026/chat-live: badge now reads 1 min."])
-        self.assertEqual(len(lark.replies), 0)
+        self.assertFalse(summary.reopened)
+        self.assertEqual(len(lark.replies), 1)
+        self.assertIn("已修复（completed）", lark.replies[0].text)
+        # original cited comment + close-audit marker
+        self.assertEqual(len(github.comments), 2)
+        self.assertIn("已修复（completed）", github.comments[1])
+
+    def test_completed_close_with_cited_fix_dedupes_on_rerun(self) -> None:
+        config = self._notify_config()
+        github = FakeGithub(
+            issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)),
+            known_commits=("0223259",),
+        )
+        github.comments.append("Fixed in 0223259 on 2026/chat-live.")
+        lark = FakeLarkMessengerClient()
+
+        first = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+        second = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertTrue(first.notified)
+        self.assertFalse(second.notified)
+        self.assertEqual(second.skipped_reason, "already notified")
+        self.assertEqual(len(lark.replies), 1)
 
     def test_unresolvable_hex_in_comment_is_not_evidence(self) -> None:
         # A hex-shaped token that isn't a real commit (known_commits empty) does
@@ -316,7 +349,8 @@ class CloseAuditTest(unittest.TestCase):
 
     def test_cited_commit_short_circuits_reopen_enforcement(self) -> None:
         # The false-positive guard: an issue truly fixed on a feature branch and
-        # documented with a real SHA must NOT be reopened under enforcement.
+        # documented with a real SHA must NOT be reopened under enforcement -- but
+        # the close is still announced to Lark.
         config = self._enforce_config()
         github = FakeGithub(
             issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)),
@@ -332,7 +366,8 @@ class CloseAuditTest(unittest.TestCase):
         self.assertFalse(summary.reopened)
         self.assertFalse(github.reopened)
         self.assertEqual(summary.evidence, "commit 0223259 (cited in a comment)")
-        self.assertEqual(len(lark.replies), 0)
+        self.assertTrue(summary.notified)
+        self.assertEqual(len(lark.replies), 1)
 
     def _weaver_config(self):
         base = self._notify_config()
@@ -359,10 +394,11 @@ class CloseAuditTest(unittest.TestCase):
         )
 
         self.assertTrue(summary.audited)
+        self.assertEqual(summary.kind, "closed_completed")
         self.assertEqual(summary.evidence, "merged PR TheCloverLab/weaver#1000 (cited in a comment)")
         self.assertFalse(summary.nagged)
-        self.assertEqual(github.comments, ["这是 Server 端的修复，PR: TheCloverLab/weaver#1000"])
-        self.assertEqual(len(lark.replies), 0)
+        self.assertTrue(summary.notified)
+        self.assertEqual(len(lark.replies), 1)
 
     def test_short_form_reference_repo_pr_counts(self) -> None:
         config = self._weaver_config()

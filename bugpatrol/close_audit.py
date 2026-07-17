@@ -40,6 +40,7 @@ class CloseAuditSummary:
 # idempotency marker (dedup key), so a re-run of the audit — or a reopen +
 # re-close with the *same* reason — never double-pings.
 KIND_MISSING_FIX = "missing_fix_reference"  # closed completed, no fix evidence (dev nag)
+KIND_COMPLETED = "closed_completed"  # closed completed, fix cited in a comment (not reconcile-announced)
 KIND_NOT_PLANNED = "closed_not_planned"
 KIND_DUPLICATE = "closed_duplicate"
 
@@ -64,34 +65,35 @@ def audit_issue_close(
     reason = issue.state_reason
 
     reopen = False
+    evidence = ""
     if reason == "completed":
-        evidence = fix_evidence_for_issue(
+        # Timeline evidence -- a merged PR or a default-branch fix commit linked
+        # via GitHub's native issue<->commit machinery -- is exactly what
+        # fix_notify (reconcile) already announces to Lark. Re-announcing the
+        # same close here would double-ping, so close-audit stays silent.
+        timeline_evidence = fix_evidence_for_issue(
             timeline=github.list_issue_timeline(repo=repo, issue_number=issue_number),
             comments=comments,
         )
+        if timeline_evidence:
+            return CloseAuditSummary(
+                issue_number=issue_number, audited=True, evidence=timeline_evidence
+            )
+        # A fix on a feature branch (committed directly, not merged to the default
+        # branch, no PR) or a cross-repo fix has no GitHub-native issue link, so a
+        # dev cites it in a plain comment ("Fixed in <sha> ..." / a PR link).
+        # Nobody else announces such a close, so notify it here (verifying the ref
+        # keeps a random token from passing as evidence).
+        evidence = commit_evidence_from_comments(comments, repo=repo, github=github)
         if not evidence:
-            # A fix on a feature branch (committed directly, not merged to the
-            # default branch, no PR) never gets a GitHub-native issue<->commit
-            # link, so devs point at it in a plain comment ("Fixed in <sha> ...").
-            # Honor that: a commit SHA cited in a comment that resolves to a real
-            # commit counts as a fix reference. Verifying the SHA keeps a random
-            # hex token from passing as evidence.
-            evidence = commit_evidence_from_comments(comments, repo=repo, github=github)
-        if not evidence:
-            # A cross-repo fix (e.g. the weaver backend behind the fived
-            # frontend) lands as a merged PR in the sibling repo, cited in a
-            # comment. GitHub's cross-repo timeline reference can also lag in
-            # reflecting the merge, so honor the cited reference directly.
             evidence = merged_pr_cited_in_comments(
                 comments, repo=repo, config=config, github=github
             )
         if evidence:
-            # A merged PR / linked fix commit is the canonical "fixed" signal;
-            # fix_notify (reconcile) already announces it to Lark. Announcing it
-            # again here would double-ping, so close-audit stays silent.
-            return CloseAuditSummary(issue_number=issue_number, audited=True, evidence=evidence)
-        kind = KIND_MISSING_FIX
-        reopen = config.close_audit.reopen_completed_without_evidence
+            kind = KIND_COMPLETED
+        else:
+            kind = KIND_MISSING_FIX
+            reopen = config.close_audit.reopen_completed_without_evidence
     elif reason == "not_planned":
         if _triage_announced_expected_behavior(comments):
             # Triage's own 预期行为 close already posted the Lark summary; don't
@@ -174,6 +176,7 @@ def audit_issue_close(
         kind=kind,
         notified=True,
         nagged=kind == KIND_MISSING_FIX,
+        evidence=evidence,
         lark_sent=lark_sent,
     )
 
@@ -347,6 +350,7 @@ def _triage_announced_expected_behavior(comments: tuple[GitHubIssueComment, ...]
 def _reason_label(kind: str) -> str:
     return {
         KIND_MISSING_FIX: "已修复（completed）",
+        KIND_COMPLETED: "已修复（completed）",
         KIND_NOT_PLANNED: "不予处理（not planned）",
         KIND_DUPLICATE: "重复（duplicate）",
     }[kind]
