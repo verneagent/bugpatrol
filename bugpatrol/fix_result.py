@@ -809,6 +809,92 @@ def notify_ci_escalation(
     )
 
 
+def render_pr_ci_failure_lark_message(
+    *,
+    issue_number: int,
+    issue_url: str,
+    pr_url: str,
+    failed_names: tuple[str, ...],
+    assignee_open_id: str = "",
+) -> str:
+    assignee = f'<at user_id="{assignee_open_id}"></at> ' if assignee_open_id else ""
+    lines = [
+        f"{assignee}❌ 修复 PR 的 CI 构建失败，GitHub issue [#{issue_number}]({issue_url})",
+        f"PR：{_pr_link(pr_url)}",
+        f"失败构建：{len(failed_names)} 个",
+        "请查看 CI 失败原因后修复。",
+    ]
+    runner = triage_runner_name()
+    if runner:
+        lines.append(f"执行机：{runner}")
+    return "\n".join(lines)
+
+
+def render_pr_ci_failure_issue_comment(
+    *, pr_url: str, failed_names: tuple[str, ...]
+) -> str:
+    lines = [
+        "## PR CI 构建失败",
+        "",
+        f"关联的修复 PR 的 CI 构建失败：{pr_url}",
+        "",
+    ]
+    lines.extend(f"- `{name}`" for name in failed_names)
+    return "\n".join(lines)
+
+
+def render_pr_ci_failure_marker_comment(*, head_sha: str) -> str:
+    return f"BugPatrol：构建 `{head_sha[:12]}` 失败已通知。"
+
+
+def notify_pr_ci_failure(
+    *,
+    repo: str,
+    issue_number: int,
+    issue_url: str,
+    pr_url: str,
+    head_sha: str,
+    failed_names: tuple[str, ...],
+    meta: dict[str, Any],
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient | None,
+    assignee_open_id: str = "",
+) -> None:
+    """Surface a failing CI build on a human PR to the issue + Lark topic.
+
+    Notify-only: BugPatrol does not auto-revise a branch it does not own. Same
+    Lark-first → issue comment → PR meta marker ordering as notify_build_ready;
+    the marker carries last_failure_notified_sha so repeated failure events for
+    the same commit are de-duped.
+    """
+    if lark is not None:
+        send_intake_topic_message(
+            repo=repo,
+            issue_number=issue_number,
+            github=github,
+            lark=lark,
+            text=render_pr_ci_failure_lark_message(
+                issue_number=issue_number,
+                issue_url=issue_url,
+                pr_url=pr_url,
+                failed_names=failed_names,
+                assignee_open_id=assignee_open_id,
+            ),
+        )
+    github.add_issue_comment(
+        repo=repo,
+        issue_number=issue_number,
+        body=render_pr_ci_failure_issue_comment(pr_url=pr_url, failed_names=failed_names),
+    )
+    github.add_pull_request_comment(
+        repo=repo,
+        pr=pr_url,
+        body=append_ci_fix_metadata(
+            render_pr_ci_failure_marker_comment(head_sha=head_sha), meta
+        ),
+    )
+
+
 def extract_build_links(
     comments: Sequence[GitHubIssueComment],
     patterns: Sequence[BuildLinkPattern],

@@ -2,21 +2,25 @@
 
 Status: design approved 2026-07-12 (cap=3, escalate→PR reviewer, re-run all
 builds); build-ready notification added 2026-07-13. **Implemented 2026-07-13**
-(`run-ci-fix` / `run-build-ready`, `examples/github-actions/bugpatrol-ci-fix.yml`,
+(`run-ci-feedback`, `examples/github-actions/bugpatrol-ci-fix.yml`,
 `[fix.gate].max_ci_fix_attempts`; see [FIX-RUNNER.md](./FIX-RUNNER.md) → "PR CI
 feedback"). Not yet deployed on fived (needs the placeholder build-workflow names
 filled in). **Prerequisite (fix + revise deployed on the target repo) is DONE on
-fived as of 2026-07-13** (see "Prerequisite" below) — the loop rides on
-`bugpatrol/fix-issue-N` PRs, which now exist.
+fived as of 2026-07-13** (see "Prerequisite" below). **Generalised 2026-07-17**:
+the loop now reacts to **any** PR that closes a managed issue (association via
+`closingIssuesReferences`), not just `bugpatrol/fix-issue-N` PRs — a human's
+manual-fix PR gets its CI results surfaced too.
 
-One `workflow_run [completed]` listener, **two branches** off the run's
-conclusion:
+One `workflow_run [completed]` listener, resolving the managed issue from the
+PR's closing-issue references, then **three branches** off the run's conclusion:
 
-- **`success`** ⇒ *build-ready notification*: the fix PR built cleanly and is
-  testable, so surface it to the issue + the reporter's Lark topic, @ the
-  assignee. (This section — the reason a human ever gets a testable build.)
-- **`failure`** ⇒ *CI-fix loop*: feed the failing logs to revise, edit, push,
-  bounded retries. (The original design below.)
+- **`success`** ⇒ *build-ready notification*: the build is clean and testable, so
+  surface it to the issue + the reporter's Lark topic, @ the assignee. (Applies
+  to any managed-issue PR — the reason a human ever gets a testable build.)
+- **`failure` on a bugpatrol fix branch** ⇒ *CI-fix loop*: feed the failing logs
+  to revise, edit, push, bounded retries. (The original design below.)
+- **`failure` on a human branch** ⇒ *notify-only*: BugPatrol does not revise a
+  branch it does not own; it just surfaces the failing build to the topic.
 
 ## Goal (failure branch — CI-fix)
 
@@ -137,16 +141,19 @@ Success branch: `build_notified` / `build_already_notified` / `no_pr`.
 3. `fix_result.py` — render CI-failure instructions for the agent, escalation
    PR comment + Lark message, `notify_ci_fix` / `notify_ci_escalation`
    (Lark-first, marker-last).
-4. `fix_runner.py` — `run_ci_fix` / `execute_ci_fix`, reusing
-   `fix_revise_worktree` + `_run_fix_agent`; `run_build_ready` (success branch,
-   no worktree/agent — read PR + notify only).
-5. `__main__.py` — `run-ci-fix --issue N --head-sha SHA --repo-path
-   --output-dir [--execute]` (separate from revise: different input + de-dupe),
-   and `run-build-ready --issue N --head-sha SHA [--execute]` (success branch).
+4. `fix_runner.py` — `run_ci_feedback` orchestrator (resolve PR by head branch →
+   resolve managed closing issue → branch on conclusion), `run_ci_fix` /
+   `execute_ci_fix` reusing `fix_revise_worktree` + `_run_fix_agent`,
+   `run_build_ready` (success branch, no worktree/agent — read PR + notify only),
+   `_notify_human_pr_ci_failure` (human-branch failure, notify only). `run_ci_fix`
+   / `run_build_ready` take resolved `(issue, pr)` from the orchestrator.
+5. `__main__.py` — `run-ci-feedback --head-branch BRANCH --head-sha SHA
+   --conclusion success|failure --repo-path --output-dir [--execute]` (one
+   entrypoint; resolves the managed issue from the PR association).
 6. `examples/github-actions/bugpatrol-ci-fix.yml` — template
    (`on: workflow_run [completed]`, placeholder workflow names, shares the fix
-   concurrency group); one job that branches on `conclusion` → `run-ci-fix` or
-   `run-build-ready`.
+   concurrency group); one job that runs `run-ci-feedback` (which itself branches
+   on `conclusion` + branch ownership).
 7. `fix_result.py` — build-ready renderers (issue comment + Lark card, tier 1
    link-to-PR; tier 2 inline links from the PR comments) + `notify_build_ready`.
 8. `docs/FIX-RUNNER.md` — cross-link this loop + new statuses.

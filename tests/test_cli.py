@@ -125,7 +125,7 @@ class CliTest(unittest.TestCase):
         revise.assert_called_once()
         self.assertEqual(json.loads(stdout.getvalue())["status"], "revised")
 
-    def test_run_ci_fix_execute_dispatches_to_run_ci_fix(self) -> None:
+    def test_run_ci_feedback_execute_dispatches_to_run_ci_feedback(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         stdout = io.StringIO()
 
@@ -133,16 +133,20 @@ class CliTest(unittest.TestCase):
             with patch("bugpatrol.__main__.GitHubCliIssuesClient", return_value=FakeGithub()):
                 with patch("bugpatrol.__main__.GitHubIssueFieldsClient", return_value=object()):
                     with patch("bugpatrol.__main__._optional_lark_client", return_value=None):
-                        with patch("bugpatrol.__main__.run_ci_fix", return_value="ci_fixed") as ci_fix:
+                        with patch(
+                            "bugpatrol.__main__.run_ci_feedback", return_value="ci_fixed"
+                        ) as ci_feedback:
                             with contextlib.redirect_stdout(stdout):
                                 exit_code = main(
                                     [
-                                        "run-ci-fix",
+                                        "run-ci-feedback",
                                         "projects/todo-sandbox.toml",
-                                        "--issue",
-                                        "7",
+                                        "--head-branch",
+                                        "bugpatrol/fix-issue-7",
                                         "--head-sha",
                                         "deadbeef",
+                                        "--conclusion",
+                                        "failure",
                                         "--repo-path",
                                         "/tmp/repo",
                                         "--execute",
@@ -150,35 +154,8 @@ class CliTest(unittest.TestCase):
                                 )
 
         self.assertEqual(exit_code, 0)
-        ci_fix.assert_called_once()
+        ci_feedback.assert_called_once()
         self.assertEqual(json.loads(stdout.getvalue())["status"], "ci_fixed")
-
-    def test_run_build_ready_execute_dispatches_to_run_build_ready(self) -> None:
-        config = load_project_config(Path("projects/todo-sandbox.toml"))
-        stdout = io.StringIO()
-
-        with patch("bugpatrol.__main__.load_project_config", return_value=config):
-            with patch("bugpatrol.__main__.GitHubCliIssuesClient", return_value=FakeGithub()):
-                with patch("bugpatrol.__main__._optional_lark_client", return_value=None):
-                    with patch(
-                        "bugpatrol.__main__.run_build_ready", return_value="build_notified"
-                    ) as build_ready:
-                        with contextlib.redirect_stdout(stdout):
-                            exit_code = main(
-                                [
-                                    "run-build-ready",
-                                    "projects/todo-sandbox.toml",
-                                    "--issue",
-                                    "7",
-                                    "--head-sha",
-                                    "deadbeef",
-                                    "--execute",
-                                ]
-                            )
-
-        self.assertEqual(exit_code, 0)
-        build_ready.assert_called_once()
-        self.assertEqual(json.loads(stdout.getvalue())["status"], "build_notified")
 
     def test_run_triage_redirects_to_fix_revise_when_open_pr_exists(self) -> None:
         # A reporter follow-up re-triggers triage; when a fix PR is already open,

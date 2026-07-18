@@ -548,7 +548,7 @@ class GitHubCliIssuesClient:
                 "--state",
                 "open",
                 "--json",
-                "number,url,baseRefName,mergeable",
+                "number,url,baseRefName,mergeable,headRefName,closingIssuesReferences",
             ]
         )
         data = json.loads(result.stdout)
@@ -556,11 +556,19 @@ class GitHubCliIssuesClient:
             number = data[0].get("number")
             url = data[0].get("url")
             if isinstance(number, int) and isinstance(url, str):
+                closing = data[0].get("closingIssuesReferences")
+                closing_numbers: list[int] = []
+                if isinstance(closing, list):
+                    for item in closing:
+                        if isinstance(item, dict) and isinstance(item.get("number"), int):
+                            closing_numbers.append(int(item["number"]))
                 return OpenPullRequest(
                     number=number,
                     url=url,
                     base_ref=str(data[0].get("baseRefName") or ""),
                     mergeable=str(data[0].get("mergeable") or ""),
+                    head_ref=str(data[0].get("headRefName") or ""),
+                    closing_issue_numbers=tuple(closing_numbers),
                 )
         return None
 

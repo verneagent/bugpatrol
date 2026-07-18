@@ -57,6 +57,7 @@ from bugpatrol.fix_result import (
     notify_conflict_escalation,
     notify_fix_pr,
     notify_fix_revise,
+    notify_pr_ci_failure,
     parse_fix_result,
     render_baseline_broken_comment,
     render_baseline_broken_lark_message,
@@ -72,7 +73,11 @@ from bugpatrol.fix_result import (
 )
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
-from bugpatrol.intake import parse_intake_metadata, require_bugpatrol_managed_issue
+from bugpatrol.intake import (
+    is_bugpatrol_managed_issue,
+    parse_intake_metadata,
+    require_bugpatrol_managed_issue,
+)
 from bugpatrol.intake_workflow import parse_intake_reply_metadata
 from bugpatrol.lark import is_message_withdrawn_error
 from bugpatrol.progress import ProgressReporter
@@ -678,10 +683,131 @@ def _revise_commit_message(
     return f"fix: address review feedback (#{issue_number})"
 
 
+def _resolve_managed_closing_issue(
+    *,
+    config: ProjectConfig,
+    github: GitHubCliIssuesClient,
+    pr: OpenPullRequest,
+) -> GitHubIssue | None:
+    """The first bugpatrol-managed issue this PR closes, or None.
+
+    A PR reports its CI result to the managed issue it resolves via GitHub's
+    native closing-issue link, so both a bugpatrol fix PR and a human PR that
+    cites ``Fixes #N`` surface to the reporter's topic by association.
+    """
+    for number in pr.closing_issue_numbers:
+        issue = github.get_issue(repo=config.github_repo, issue_number=number)
+        if is_bugpatrol_managed_issue(issue):
+            return issue
+    return None
+
+
+def run_ci_feedback(
+    *,
+    config: ProjectConfig,
+    head_branch: str,
+    head_sha: str,
+    conclusion: str,
+    base_repo: Path,
+    output_dir: Path,
+    github: GitHubCliIssuesClient,
+    issue_fields: GitHubIssueFieldsClient,
+    lark: LarkMessengerClient | None = None,
+    prompt_path: Path = Path("prompts/fix.zh.md"),
+) -> str:
+    """React to a project PR CI build finishing, reporting to the managed issue.
+
+    The general PR-CI-feedback path: resolve the open PR for ``head_branch`` and
+    the managed issue it closes, then branch on the CI conclusion.
+      - success -> build-ready ping to the issue + reporter's Lark topic, for any
+        managed-issue PR (a human's manual-fix PR too, not just bugpatrol's);
+      - failure on a bugpatrol fix branch -> auto-revise (run_ci_fix);
+      - failure on a human branch -> notify the topic only (BugPatrol does not
+        revise a branch it does not own).
+    Statuses: no_pr, no_managed_issue, ci_failure_notified,
+    ci_failure_already_notified, no_ci_failure, plus the underlying run_ci_fix /
+    run_build_ready statuses.
+    """
+    if config.fix is None:
+        raise ValueError("project config has no [fix] table; auto-fix is not enabled")
+    fix = config.fix
+    pr = github.get_open_pull_request_by_head(repo=config.github_repo, head=head_branch)
+    if pr is None:
+        # No open PR for this branch (merged/closed, or the build ran on a branch
+        # push rather than a PR): nothing to report.
+        return "no_pr"
+    issue = _resolve_managed_closing_issue(config=config, github=github, pr=pr)
+    if issue is None:
+        # The PR does not close a bugpatrol-managed issue: not ours to report.
+        return "no_managed_issue"
+    if conclusion == "success":
+        return run_build_ready(
+            config=config, issue=issue, pr=pr, head_sha=head_sha, github=github, lark=lark
+        )
+    # failure: auto-revise our own fix branch; only notify a human's branch.
+    if head_branch == fix.branch_for_issue(issue.number):
+        return run_ci_fix(
+            config=config,
+            issue=issue,
+            pr=pr,
+            head_sha=head_sha,
+            base_repo=base_repo,
+            output_dir=output_dir,
+            github=github,
+            issue_fields=issue_fields,
+            lark=lark,
+            prompt_path=prompt_path,
+        )
+    return _notify_human_pr_ci_failure(
+        config=config, issue=issue, pr=pr, head_sha=head_sha, github=github, lark=lark
+    )
+
+
+def _notify_human_pr_ci_failure(
+    *,
+    config: ProjectConfig,
+    issue: GitHubIssue,
+    pr: OpenPullRequest,
+    head_sha: str,
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient | None = None,
+) -> str:
+    """Report a failing CI build on a human PR to the issue + Lark topic.
+
+    Notify-only (no auto-revise): de-dupes on ``last_failure_notified_sha`` in
+    the PR's CI-fix meta so N failed workflows for one commit notify once.
+    """
+    comments = github.list_pull_request_comments(repo=config.github_repo, pr_number=pr.number)
+    meta = latest_ci_fix_meta(comments)
+    if meta.get("last_failure_notified_sha") == head_sha:
+        return "ci_failure_already_notified"
+    failed_runs = github.list_failed_runs_for_sha(repo=config.github_repo, head_sha=head_sha)
+    if not failed_runs:
+        # The event fired but no run for this sha concluded failure (re-run green,
+        # or a transient/cancelled conclusion): nothing to report.
+        return "no_ci_failure"
+    assignee = issue.assignees[0] if issue.assignees else ""
+    assignee_open_id = (config.lark.user_open_ids or {}).get(assignee, "") if assignee else ""
+    notify_pr_ci_failure(
+        repo=config.github_repo,
+        issue_number=issue.number,
+        issue_url=issue.url,
+        pr_url=pr.url,
+        head_sha=head_sha,
+        failed_names=tuple(r.workflow_name or r.name for r in failed_runs),
+        meta={**meta, "last_failure_notified_sha": head_sha},
+        github=github,
+        lark=lark,
+        assignee_open_id=assignee_open_id,
+    )
+    return "ci_failure_notified"
+
+
 def run_ci_fix(
     *,
     config: ProjectConfig,
-    issue_number: int,
+    issue: GitHubIssue,
+    pr: OpenPullRequest,
     head_sha: str,
     base_repo: Path,
     output_dir: Path,
@@ -690,34 +816,31 @@ def run_ci_fix(
     lark: LarkMessengerClient | None = None,
     prompt_path: Path = Path("prompts/fix.zh.md"),
 ) -> str:
-    """React to a failed PR CI build on a fix branch (the third revise trigger).
+    """React to a failed PR CI build on a bugpatrol fix branch (auto-revise).
 
-    Stateless like run_fix_revise: rebuild from origin (the fix branch) and read
-    the failed runs + de-dupe meta from GitHub, so any runner can react. De-dupe
-    keys on ``head_sha`` (one push → many failed workflows → many events), not
-    run_id. Bounded by ``[fix.gate].max_ci_fix_attempts``; at the cap it escalates
-    to the PR reviewer instead of editing. Statuses: no_pr, issue_closed,
-    ci_already_handled, no_ci_failure, ci_fix_escalated, ci_fixed, blocked,
-    no_changes, no_output, setup_failed, verify_failed.
+    Only for branches BugPatrol owns (``bugpatrol/fix-issue-N``); the caller
+    (run_ci_feedback) resolves the managed ``issue`` + open ``pr`` and gates this
+    on the head branch. Stateless like run_fix_revise: rebuild from origin (the
+    fix branch) and read the failed runs + de-dupe meta from GitHub, so any
+    runner can react. De-dupe keys on ``head_sha`` (one push → many failed
+    workflows → many events), not run_id. Bounded by
+    ``[fix.gate].max_ci_fix_attempts``; at the cap it escalates to the PR
+    reviewer instead of editing. Statuses: issue_closed, ci_already_handled,
+    no_ci_failure, ci_fix_escalated, ci_fixed, blocked, no_changes, no_output,
+    setup_failed, verify_failed.
     """
     if config.fix is None:
         raise ValueError("project config has no [fix] table; auto-fix is not enabled")
     fix = config.fix
-    issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
-    require_bugpatrol_managed_issue(issue)
     if issue.state == "closed":
         # The issue was closed (won't-fix, or handled elsewhere): stop the CI-fix
         # loop even though the fix PR is still open. Reopen the issue to resume.
         # Silent skip -- CI failures fire this per-workflow (many events/push), so
         # a Lark notice here would spam the topic.
-        print(f"issue #{issue_number} is closed; skipping CI fix", file=sys.stderr)
+        print(f"issue #{issue.number} is closed; skipping CI fix", file=sys.stderr)
         return "issue_closed"
 
-    head_branch = fix.branch_for_issue(issue_number)
-    pr = github.get_open_pull_request_by_head(repo=config.github_repo, head=head_branch)
-    if pr is None:
-        # No open fix PR: nothing to react to (the PR may have merged/closed).
-        return "no_pr"
+    head_branch = pr.head_ref
     comments = github.list_pull_request_comments(repo=config.github_repo, pr_number=pr.number)
     meta = latest_ci_fix_meta(comments)
     if meta.get("last_fixed_sha") == head_sha:
@@ -759,7 +882,7 @@ def run_ci_fix(
     with fix_revise_worktree(base_repo=base_repo, branch=head_branch) as worktree:
         plan = prepare_fix_run(
             config=config,
-            issue_number=issue_number,
+            issue_number=issue.number,
             worktree_path=worktree,
             output_dir=output_dir,
             github=github,
@@ -930,34 +1053,31 @@ def _mark_ci_handled(
 def run_build_ready(
     *,
     config: ProjectConfig,
-    issue_number: int,
+    issue: GitHubIssue,
+    pr: OpenPullRequest,
     head_sha: str,
     github: GitHubCliIssuesClient,
     lark: LarkMessengerClient | None = None,
 ) -> str:
-    """Surface a passing fix-PR build to the issue + reporter's Lark topic.
+    """Surface a passing PR build to the issue + reporter's Lark topic.
 
-    Pure notification (no worktree, no agent, no gate): the fix PR built cleanly
-    and is testable. De-dupes the main "可测试" ping on ``head_sha`` via
+    Works for any PR that closes a managed issue -- a bugpatrol fix PR or a
+    human's PR -- since the caller (run_ci_feedback) resolves the managed
+    ``issue`` + open ``pr`` by association, not by branch name. Pure
+    notification (no worktree, no agent, no gate): the PR built cleanly and is
+    testable. De-dupes the main "可测试" ping on ``head_sha`` via
     ``last_notified_sha`` so N green build workflows for one commit notify once.
     Install/preview links, though, are posted by the slower builds (iOS/Android)
     minutes AFTER a fast build first trips build-ready, so the first ping may
     carry no link. Once the main ping is sent, later invocations for the same sha
     send a follow-up listing only links that newly appeared (tracked in
     ``notified_link_urls``), so a slow build's install link still reaches the
-    reporter without re-notifying. Statuses: no_pr, build_already_notified,
+    reporter without re-notifying. Statuses: build_already_notified,
     build_notified, build_links_notified.
     """
     if config.fix is None:
         raise ValueError("project config has no [fix] table; auto-fix is not enabled")
     fix = config.fix
-    issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
-    require_bugpatrol_managed_issue(issue)
-
-    head_branch = fix.branch_for_issue(issue_number)
-    pr = github.get_open_pull_request_by_head(repo=config.github_repo, head=head_branch)
-    if pr is None:
-        return "no_pr"
     comments = github.list_pull_request_comments(repo=config.github_repo, pr_number=pr.number)
     meta = latest_ci_fix_meta(comments)
 

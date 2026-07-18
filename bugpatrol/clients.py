@@ -33,12 +33,18 @@ class OpenPullRequest:
     conflict); ``mergeable`` is GitHub's mergeability signal ("MERGEABLE" /
     "CONFLICTING" / "UNKNOWN"), where "CONFLICTING" means the PR conflicts with
     its target branch and revise should merge the target in before proceeding.
+    ``head_ref`` is the PR's source branch (so CI feedback can tell a bugpatrol
+    fix branch apart from a human branch); ``closing_issue_numbers`` are the
+    issues the PR closes via GitHub's native linking, used to resolve which
+    managed issue a passing/failing build should report to.
     """
 
     number: int
     url: str
     base_ref: str = ""
     mergeable: str = ""
+    head_ref: str = ""
+    closing_issue_numbers: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)

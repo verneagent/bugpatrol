@@ -189,37 +189,47 @@ Workflow template — triggers on `pull_request_review [submitted]` (auto) and
 examples/github-actions/bugpatrol-fix-revise.yml
 ```
 
-## PR CI feedback (third revise trigger + build-ready)
+## PR CI feedback (general path: any PR closing a managed issue)
 
-After a fix PR opens, the project's **own** PR CI runs on it. One
-`workflow_run [completed]` listener reacts to that build's conclusion (BugPatrol
-reads only the CI *result surface* — a run's conclusion + its failed-step logs —
-never the project's build definition). Both branches de-dupe on the PR head
-**sha** (one push → many build workflows → many events) via a
-`BUGPATROL_CI_FIX_META` PR comment, and share the fix concurrency group so they
-serialize with fix/revise for the same issue.
+After **any** PR that closes a managed issue builds — a BugPatrol fix PR
+(`bugpatrol/fix-issue-N`) or a human's manual-fix PR that cites `Fixes #N` — the
+project's **own** PR CI runs on it. One `workflow_run [completed]` listener
+reacts to that build's conclusion (BugPatrol reads only the CI *result surface* —
+a run's conclusion + its failed-step logs — never the project's build
+definition). The tool resolves which managed issue to report to from the PR's
+closing-issue references (association), so results reach the reporter's topic
+regardless of who opened the PR. All branches de-dupe on the PR head **sha** (one
+push → many build workflows → many events) via a `BUGPATROL_CI_FIX_META` PR
+comment, and share the fix concurrency group so they serialize with fix/revise
+for the same issue.
 
-- **`failure` ⇒ CI-fix** (`run-ci-fix`): stateless like revise — rebuild from
-  `origin/<fix-branch>`, gather every failed run's log tail for the sha, feed
-  them to the agent, gate + verify the edit, fast-forward push. Bounded by
-  `[fix.gate].max_ci_fix_attempts` (default **3**); at the cap it escalates to
+- **`success` ⇒ build-ready**: pure notification (no worktree/agent) — the build
+  is clean and testable, so surface the PR to the issue + the reporter's Lark
+  topic and @ the assignee. De-dupes on `last_notified_sha` (plus
+  `notified_link_urls` for late install/preview links). Statuses:
+  `build_already_notified`, `build_notified`, `build_links_notified`.
+- **`failure` on a bugpatrol fix branch ⇒ CI-fix**: stateless like revise —
+  rebuild from `origin/<fix-branch>`, gather every failed run's log tail for the
+  sha, feed them to the agent, gate + verify the edit, fast-forward push. Bounded
+  by `[fix.gate].max_ci_fix_attempts` (default **3**); at the cap it escalates to
   the PR reviewer (Lark @reviewer + PR comment) instead of editing. Every
   terminal path records `last_fixed_sha` in the meta so sibling failed-run events
-  for the same commit skip. Statuses: `no_pr`, `ci_already_handled`,
+  for the same commit skip. Statuses: `issue_closed`, `ci_already_handled`,
   `no_ci_failure`, `ci_fix_escalated`, `ci_fixed`, `blocked`, `no_changes`,
-  `no_output`, `verify_failed`.
-- **`success` ⇒ build-ready** (`run-build-ready`): pure notification (no
-  worktree/agent) — the fix built cleanly and is testable, so surface the PR to
-  the issue + the reporter's Lark topic and @ the assignee. De-dupes on
-  `last_notified_sha`. Statuses: `no_pr`, `build_already_notified`,
-  `build_notified`.
+  `no_output`, `setup_failed`, `verify_failed`.
+- **`failure` on a human branch ⇒ notify-only**: BugPatrol does not revise a
+  branch it does not own, so it just surfaces the failing build to the issue +
+  Lark topic (@ the assignee). De-dupes on `last_failure_notified_sha`. Statuses:
+  `ci_failure_notified`, `ci_failure_already_notified`, `no_ci_failure`.
+
+The orchestrator itself returns `no_pr` (no open PR for the head branch) or
+`no_managed_issue` (the PR closes nothing BugPatrol manages) before either branch.
 
 CLI:
 
 ```text
-python -m bugpatrol run-ci-fix <config> --issue N --head-sha SHA \
-  --repo-path <checkout> --output-dir <dir> [--execute]
-python -m bugpatrol run-build-ready <config> --issue N --head-sha SHA [--execute]
+python -m bugpatrol run-ci-feedback <config> --head-branch BRANCH --head-sha SHA \
+  --conclusion success|failure --repo-path <checkout> --output-dir <dir> [--execute]
 ```
 
 Workflow template (the `workflows:` list must be **static** build-workflow names

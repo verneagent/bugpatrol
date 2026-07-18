@@ -49,11 +49,9 @@ from bugpatrol.triage_context import (
     render_triage_context_markdown,
 )
 from bugpatrol.triage_result import apply_triage_result, build_triage_dry_run_report, parse_triage_result
-from bugpatrol.fix_result import latest_ci_fix_meta
 from bugpatrol.fix_runner import (
     read_triage_verdict,
-    run_build_ready,
-    run_ci_fix,
+    run_ci_feedback,
     run_fix,
     run_fix_revise,
 )
@@ -381,26 +379,22 @@ def main(argv: list[str] | None = None) -> int:
         "--execute", action="store_true", help="actually run the agent and push the update"
     )
 
-    run_ci_fix_parser = sub.add_parser(
-        "run-ci-fix", help="react to a failed PR CI build on a fix branch"
+    run_ci_feedback_parser = sub.add_parser(
+        "run-ci-feedback",
+        help="react to a project PR CI build finishing, reporting to the managed issue",
     )
-    run_ci_fix_parser.add_argument("project_config", type=Path)
-    run_ci_fix_parser.add_argument("--issue", type=int, required=True)
-    run_ci_fix_parser.add_argument("--head-sha", required=True)
-    run_ci_fix_parser.add_argument("--repo-path", type=Path, required=True)
-    run_ci_fix_parser.add_argument("--output-dir", type=Path, default=Path(".bugpatrol/ci-fix"))
-    run_ci_fix_parser.add_argument(
-        "--execute", action="store_true", help="actually run the agent and push the update"
+    run_ci_feedback_parser.add_argument("project_config", type=Path)
+    run_ci_feedback_parser.add_argument("--head-branch", required=True)
+    run_ci_feedback_parser.add_argument("--head-sha", required=True)
+    run_ci_feedback_parser.add_argument(
+        "--conclusion", required=True, choices=["success", "failure"]
     )
-
-    run_build_ready_parser = sub.add_parser(
-        "run-build-ready", help="notify that a fix PR's CI build passed and is testable"
+    run_ci_feedback_parser.add_argument("--repo-path", type=Path, required=True)
+    run_ci_feedback_parser.add_argument(
+        "--output-dir", type=Path, default=Path(".bugpatrol/ci-fix")
     )
-    run_build_ready_parser.add_argument("project_config", type=Path)
-    run_build_ready_parser.add_argument("--issue", type=int, required=True)
-    run_build_ready_parser.add_argument("--head-sha", required=True)
-    run_build_ready_parser.add_argument(
-        "--execute", action="store_true", help="actually post the notification"
+    run_ci_feedback_parser.add_argument(
+        "--execute", action="store_true", help="actually react (notify / revise)"
     )
 
     reconcile_triage_parser = sub.add_parser(
@@ -1051,7 +1045,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"execute": True, "issue": args.issue, "status": status}, ensure_ascii=False))
         return 0
 
-    if args.command == "run-ci-fix":
+    if args.command == "run-ci-feedback":
         config = load_project_config(args.project_config)
         if config.fix is None:
             print("project config has no [fix] table; auto-fix is not enabled", file=sys.stderr)
@@ -1059,41 +1053,30 @@ def main(argv: list[str] | None = None) -> int:
         github = GitHubCliIssuesClient(gh=config.github_cli)
         issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
         if not args.execute:
-            # Dry run: report the open fix PR, how many CI runs failed for this
-            # sha, and the current attempt count / de-dupe state — no editing.
-            head = config.fix.branch_for_issue(args.issue)
-            pr = github.get_open_pull_request_by_head(repo=config.github_repo, head=head)
-            failed = (
-                github.list_failed_runs_for_sha(repo=config.github_repo, head_sha=args.head_sha)
-                if pr is not None
-                else ()
-            )
-            meta = (
-                latest_ci_fix_meta(
-                    github.list_pull_request_comments(repo=config.github_repo, pr_number=pr.number)
-                )
-                if pr is not None
-                else {}
+            # Dry run: report the open PR for this branch and the issues it closes
+            # (which resolve the managed issue to report to) — no notify / edit.
+            pr = github.get_open_pull_request_by_head(
+                repo=config.github_repo, head=args.head_branch
             )
             print(
                 json.dumps(
                     {
                         "execute": False,
-                        "issue": args.issue,
+                        "head_branch": args.head_branch,
                         "head_sha": args.head_sha,
+                        "conclusion": args.conclusion,
                         "open_pr": pr.url if pr is not None else "",
-                        "failed_runs": [r.workflow_name or r.name for r in failed],
-                        "attempts": int(meta.get("attempts") or 0),
-                        "already_handled": meta.get("last_fixed_sha") == args.head_sha,
+                        "closing_issues": list(pr.closing_issue_numbers) if pr is not None else [],
                     },
                     ensure_ascii=False,
                 )
             )
             return 0
-        status = run_ci_fix(
+        status = run_ci_feedback(
             config=config,
-            issue_number=args.issue,
+            head_branch=args.head_branch,
             head_sha=args.head_sha,
+            conclusion=args.conclusion,
             base_repo=args.repo_path,
             output_dir=args.output_dir,
             github=github,
@@ -1102,51 +1085,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(
             json.dumps(
-                {"execute": True, "issue": args.issue, "head_sha": args.head_sha, "status": status},
-                ensure_ascii=False,
-            )
-        )
-        return 0
-
-    if args.command == "run-build-ready":
-        config = load_project_config(args.project_config)
-        if config.fix is None:
-            print("project config has no [fix] table; auto-fix is not enabled", file=sys.stderr)
-            return 2
-        github = GitHubCliIssuesClient(gh=config.github_cli)
-        if not args.execute:
-            head = config.fix.branch_for_issue(args.issue)
-            pr = github.get_open_pull_request_by_head(repo=config.github_repo, head=head)
-            meta = (
-                latest_ci_fix_meta(
-                    github.list_pull_request_comments(repo=config.github_repo, pr_number=pr.number)
-                )
-                if pr is not None
-                else {}
-            )
-            print(
-                json.dumps(
-                    {
-                        "execute": False,
-                        "issue": args.issue,
-                        "head_sha": args.head_sha,
-                        "open_pr": pr.url if pr is not None else "",
-                        "already_notified": meta.get("last_notified_sha") == args.head_sha,
-                    },
-                    ensure_ascii=False,
-                )
-            )
-            return 0
-        status = run_build_ready(
-            config=config,
-            issue_number=args.issue,
-            head_sha=args.head_sha,
-            github=github,
-            lark=_optional_lark_client(config),
-        )
-        print(
-            json.dumps(
-                {"execute": True, "issue": args.issue, "head_sha": args.head_sha, "status": status},
+                {
+                    "execute": True,
+                    "head_branch": args.head_branch,
+                    "head_sha": args.head_sha,
+                    "conclusion": args.conclusion,
+                    "status": status,
+                },
                 ensure_ascii=False,
             )
         )

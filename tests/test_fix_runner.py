@@ -27,8 +27,7 @@ from bugpatrol.fix_runner import (
     prepare_fix_run,
     read_triage_verdict,
     render_fix_context_markdown,
-    run_build_ready,
-    run_ci_fix,
+    run_ci_feedback,
     run_fix,
     run_fix_revise,
 )
@@ -997,28 +996,57 @@ def _make_fix_remote(root: Path) -> Path:
     return base_repo
 
 
-class RunCiFixGuardsTest(unittest.TestCase):
-    def _run(self, github, base_repo, tmp):
-        return run_ci_fix(
+_BOT_BRANCH = "bugpatrol/fix-issue-7"
+
+
+def _bot_pr() -> OpenPullRequest:
+    return OpenPullRequest(
+        number=9,
+        url="https://github.test/o/r/pull/9",
+        head_ref=_BOT_BRANCH,
+        closing_issue_numbers=(7,),
+    )
+
+
+def _human_pr(head_ref: str = "feature/manual-fix") -> OpenPullRequest:
+    return OpenPullRequest(
+        number=9,
+        url="https://github.test/o/r/pull/9",
+        head_ref=head_ref,
+        closing_issue_numbers=(7,),
+    )
+
+
+class RunCiFeedbackFailureTest(unittest.TestCase):
+    def _run(self, github, base_repo, tmp, *, head_branch=_BOT_BRANCH):
+        return run_ci_feedback(
             config=_sandbox_config(),
-            issue_number=7,
+            head_branch=head_branch,
             head_sha="deadbeef",
+            conclusion="failure",
             base_repo=base_repo,
             output_dir=Path(tmp) / "out",
             github=github,  # type: ignore[arg-type]
             issue_fields=FakeIssueFields("代码 Bug"),  # type: ignore[arg-type]
         )
 
-    def test_no_pr_when_no_open_fix_pr(self) -> None:
+    def test_no_pr_when_no_open_pr(self) -> None:
         github = FakeGithub(open_pull_request=None)
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(self._run(github, Path(tmp), tmp), "no_pr")
 
+    def test_no_managed_issue_when_pr_closes_nothing_managed(self) -> None:
+        pr = OpenPullRequest(
+            number=9, url="https://github.test/o/r/pull/9", head_ref=_BOT_BRANCH
+        )
+        github = FakeGithub(open_pull_request=pr)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._run(github, Path(tmp), tmp), "no_managed_issue")
+
     def test_closed_issue_skips(self) -> None:
-        pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
         github = FakeGithub(
             state="closed",
-            open_pull_request=pr,
+            open_pull_request=_bot_pr(),
             failed_runs=(FailedRun(run_id=1, name="iOS Build", workflow_name="iOS Build"),),
         )
         with tempfile.TemporaryDirectory() as tmp:
@@ -1026,9 +1054,8 @@ class RunCiFixGuardsTest(unittest.TestCase):
         self.assertFalse(github.pr_comments)
 
     def test_sha_already_handled_short_circuits(self) -> None:
-        pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
         github = FakeGithub(
-            open_pull_request=pr,
+            open_pull_request=_bot_pr(),
             pr_comment_bodies=[
                 append_ci_fix_metadata("x", {"attempts": 1, "last_fixed_sha": "deadbeef"})
             ],
@@ -1037,15 +1064,13 @@ class RunCiFixGuardsTest(unittest.TestCase):
             self.assertEqual(self._run(github, Path(tmp), tmp), "ci_already_handled")
 
     def test_no_ci_failure_when_no_failed_runs(self) -> None:
-        pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
-        github = FakeGithub(open_pull_request=pr, failed_runs=())
+        github = FakeGithub(open_pull_request=_bot_pr(), failed_runs=())
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(self._run(github, Path(tmp), tmp), "no_ci_failure")
 
     def test_escalates_at_attempt_cap(self) -> None:
-        pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
         github = FakeGithub(
-            open_pull_request=pr,
+            open_pull_request=_bot_pr(),
             failed_runs=(FailedRun(run_id=1, name="iOS Build", workflow_name="iOS Build"),),
             pr_comment_bodies=[
                 append_ci_fix_metadata("x", {"attempts": 3, "last_fixed_sha": "older"})
@@ -1064,6 +1089,28 @@ class RunCiFixGuardsTest(unittest.TestCase):
         assert meta is not None
         self.assertEqual(meta["last_fixed_sha"], "deadbeef")
 
+    def test_human_branch_failure_notifies_only_then_dedupes(self) -> None:
+        # A human PR (not a bugpatrol fix branch) that fails CI: report to the
+        # topic, never auto-revise. Repeated failure events for the same sha
+        # de-dupe.
+        github = FakeGithub(
+            open_pull_request=_human_pr(),
+            assignees=("dev1",),
+            failed_runs=(FailedRun(run_id=1, name="iOS Build", workflow_name="iOS Build"),),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(
+                self._run(github, Path(tmp), tmp, head_branch="feature/manual-fix"),
+                "ci_failure_notified",
+            )
+        self.assertTrue(any("构建失败" in c for c in github.added_comments))
+        self.assertFalse(github.created_prs)  # never revises a human branch
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(
+                self._run(github, Path(tmp), tmp, head_branch="feature/manual-fix"),
+                "ci_failure_already_notified",
+            )
+
 
 class RunCiFixEndToEndTest(unittest.TestCase):
     def test_ci_fixed_edits_pushes_and_records_marker(self) -> None:
@@ -1071,9 +1118,8 @@ class RunCiFixEndToEndTest(unittest.TestCase):
             root = Path(tmp)
             base_repo = _make_fix_remote(root)
             config = replace(_sandbox_config(), fix=replace(_sandbox_config().fix, verify={"ok": "true"}, setup={}))
-            pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
             github = FakeGithub(
-                open_pull_request=pr,
+                open_pull_request=_bot_pr(),
                 assignees=("dev1",),
                 failed_runs=(FailedRun(run_id=1, name="iOS Build", workflow_name="iOS Build"),),
                 failed_logs={1: "error: boom"},
@@ -1094,10 +1140,11 @@ class RunCiFixEndToEndTest(unittest.TestCase):
             with patch("bugpatrol.fix_runner.prepare_fix_run", side_effect=fake_prepare), patch(
                 "bugpatrol.fix_runner.worktree_push_branch"
             ) as push:
-                status = run_ci_fix(
+                status = run_ci_feedback(
                     config=config,
-                    issue_number=7,
+                    head_branch=_BOT_BRANCH,
                     head_sha="deadbeef",
+                    conclusion="failure",
                     base_repo=base_repo,
                     output_dir=root / "out",
                     github=github,  # type: ignore[arg-type]
@@ -1131,21 +1178,31 @@ def _config_with_build_link():
 
 
 class RunBuildReadyTest(unittest.TestCase):
-    def _run(self, github, config=None):
-        return run_build_ready(
-            config=config or _sandbox_config(),
-            issue_number=7,
-            head_sha="deadbeef",
-            github=github,  # type: ignore[arg-type]
-        )
+    def _run(self, github, config=None, *, head_branch=_BOT_BRANCH):
+        with tempfile.TemporaryDirectory() as tmp:
+            return run_ci_feedback(
+                config=config or _sandbox_config(),
+                head_branch=head_branch,
+                head_sha="deadbeef",
+                conclusion="success",
+                base_repo=Path(tmp),
+                output_dir=Path(tmp) / "out",
+                github=github,  # type: ignore[arg-type]
+                issue_fields=FakeIssueFields("代码 Bug"),  # type: ignore[arg-type]
+            )
 
     def test_no_pr(self) -> None:
         self.assertEqual(self._run(FakeGithub(open_pull_request=None)), "no_pr")
 
+    def test_human_pr_build_ready_notifies(self) -> None:
+        # A passing build on a human PR that closes a managed issue also surfaces.
+        github = FakeGithub(open_pull_request=_human_pr(), assignees=("dev1",))
+        self.assertEqual(self._run(github, head_branch="feature/manual-fix"), "build_notified")
+        self.assertTrue(any("可测试" in c for c in github.added_comments))
+
     def test_already_notified_short_circuits(self) -> None:
-        pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
         github = FakeGithub(
-            open_pull_request=pr,
+            open_pull_request=_bot_pr(),
             pr_comment_bodies=[
                 append_ci_fix_metadata("x", {"last_notified_sha": "deadbeef"})
             ],
@@ -1153,8 +1210,7 @@ class RunBuildReadyTest(unittest.TestCase):
         self.assertEqual(self._run(github), "build_already_notified")
 
     def test_notifies_once_and_records_marker(self) -> None:
-        pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
-        github = FakeGithub(open_pull_request=pr, assignees=("dev1",))
+        github = FakeGithub(open_pull_request=_bot_pr(), assignees=("dev1",))
         self.assertEqual(self._run(github), "build_notified")
         self.assertTrue(any("可测试" in c for c in github.added_comments))
         from bugpatrol.fix_result import parse_ci_fix_metadata
@@ -1171,8 +1227,7 @@ class RunBuildReadyTest(unittest.TestCase):
         # posts its install link. The first ping carries no link; when the link
         # comment lands, the next event follows up with just that link, then stops.
         config = _config_with_build_link()
-        pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
-        github = FakeGithub(open_pull_request=pr, assignees=("dev1",))
+        github = FakeGithub(open_pull_request=_bot_pr(), assignees=("dev1",))
 
         # 1) First event: no link comment yet -> main "可测试" ping, no link.
         self.assertEqual(self._run(github, config), "build_notified")
@@ -1193,9 +1248,8 @@ class RunBuildReadyTest(unittest.TestCase):
 
     def test_link_present_at_first_ping_not_repeated(self) -> None:
         config = _config_with_build_link()
-        pr = OpenPullRequest(number=9, url="https://github.test/o/r/pull/9")
         github = FakeGithub(
-            open_pull_request=pr,
+            open_pull_request=_bot_pr(),
             assignees=("dev1",),
             pr_comment_bodies=["📱 iOS install: https://ota.test/i"],
         )
