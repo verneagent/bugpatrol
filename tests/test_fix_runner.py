@@ -64,6 +64,7 @@ class FakeGithub:
         pr_comment_bodies=(),
         failed_runs=(),
         failed_logs=None,
+        failed_check_runs=(),
         state: str = "open",
     ) -> None:
         self.state = state
@@ -80,6 +81,7 @@ class FakeGithub:
         self.pr_comment_bodies = list(pr_comment_bodies)
         self.failed_runs = tuple(failed_runs)
         self.failed_logs = dict(failed_logs or {})
+        self.failed_check_runs = tuple(failed_check_runs)
 
     def get_issue(self, *, repo: str, issue_number: int) -> GitHubIssue:
         return GitHubIssue(
@@ -129,6 +131,9 @@ class FakeGithub:
 
     def list_failed_runs_for_sha(self, *, repo, head_sha):
         return self.failed_runs
+
+    def list_failed_check_runs_for_sha(self, *, repo, head_sha):
+        return self.failed_check_runs
 
     def get_run_failed_logs(self, *, repo, run_id):
         return self.failed_logs.get(run_id, "")
@@ -1058,12 +1063,12 @@ class ClosingIssueCandidatesTest(unittest.TestCase):
 
 
 class RunCiFeedbackFailureTest(unittest.TestCase):
-    def _run(self, github, base_repo, tmp, *, head_branch=_BOT_BRANCH):
+    def _run(self, github, base_repo, tmp, *, head_branch=_BOT_BRANCH, conclusion="failure"):
         return run_ci_feedback(
             config=_sandbox_config(),
             head_branch=head_branch,
             head_sha="deadbeef",
-            conclusion="failure",
+            conclusion=conclusion,
             base_repo=base_repo,
             output_dir=Path(tmp) / "out",
             github=github,  # type: ignore[arg-type]
@@ -1171,6 +1176,72 @@ class RunCiFeedbackFailureTest(unittest.TestCase):
             self.assertEqual(
                 self._run(github, Path(tmp), tmp, head_branch="feature/manual-fix"),
                 "ci_failure_already_notified",
+            )
+
+    def test_cancelled_aggregate_masking_failure_notifies(self) -> None:
+        # #4074: fail-fast/concurrency cancels a sibling so the aggregate run
+        # reports `cancelled`, but a job genuinely failed. The run-level failure
+        # query is empty; the check-run surface exposes it -> notify (do NOT
+        # auto-revise, a cancelled run has no clean per-run logs to feed).
+        github = FakeGithub(
+            open_pull_request=_bot_pr(),
+            assignees=("dev1",),
+            failed_runs=(),
+            failed_check_runs=("web / test",),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(
+                self._run(github, Path(tmp), tmp, conclusion="cancelled"),
+                "ci_failure_notified",
+            )
+        self.assertTrue(any("web / test" in c for c in github.added_comments))
+        self.assertFalse(github.created_prs)  # masked failure -> notify, not revise
+
+    def test_cancelled_pure_supersede_is_noop(self) -> None:
+        # A cancelled run with nothing actually failed (a newer push superseded
+        # it) is a no-op, not a spurious notification.
+        github = FakeGithub(
+            open_pull_request=_bot_pr(), failed_runs=(), failed_check_runs=()
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(
+                self._run(github, Path(tmp), tmp, conclusion="cancelled"),
+                "no_ci_failure",
+            )
+        self.assertFalse(github.added_comments)
+
+    def test_cancelled_masked_failure_dedupes_across_events(self) -> None:
+        # One push -> several cancelled aggregates (PR Checks + PR Builds) -> many
+        # events for one sha; notify once.
+        github = FakeGithub(
+            open_pull_request=_bot_pr(),
+            assignees=("dev1",),
+            failed_check_runs=("web / test",),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(
+                self._run(github, Path(tmp), tmp, conclusion="cancelled"),
+                "ci_failure_notified",
+            )
+            self.assertEqual(
+                self._run(github, Path(tmp), tmp, conclusion="cancelled"),
+                "ci_failure_already_notified",
+            )
+
+    def test_cancelled_skipped_when_revise_already_handled_sha(self) -> None:
+        # A real `failure` event already triggered auto-revise for this commit;
+        # a cancelled sibling aggregate for the same sha must not also notify.
+        github = FakeGithub(
+            open_pull_request=_bot_pr(),
+            failed_check_runs=("web / test",),
+            pr_comment_bodies=[
+                append_ci_fix_metadata("x", {"attempts": 1, "last_fixed_sha": "deadbeef"})
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(
+                self._run(github, Path(tmp), tmp, conclusion="cancelled"),
+                "ci_already_handled",
             )
 
 

@@ -14,6 +14,9 @@ name: BugPatrol CI feedback
 #     [fix.gate].max_ci_fix_attempts; at the cap it escalates to the PR reviewer.
 #   - failure on a human branch -> notify the topic only (BugPatrol does not
 #     revise a branch it does not own).
+#   - cancelled aggregate that still hides a genuinely failed check-run -> notify
+#     the topic (a cancelled run has no clean per-run logs to auto-revise from);
+#     a cancelled run with nothing actually failed is a pure supersede -> no-op.
 #   - success -> build-ready: the build is clean and testable, so surface the PR
 #     to the issue + the reporter's Lark topic, @ the assignee.
 # De-dupes on head_sha (one push -> many failed workflows -> many events) via a
@@ -47,13 +50,18 @@ concurrency:
 
 jobs:
   ci-feedback:
-    # Act on any PR build that concluded success or failure (neutral / cancelled
-    # / skipped are no-ops). The tool resolves whether the PR closes a managed
-    # issue and no-ops otherwise, so no branch-name gate is needed here.
+    # Act on any PR build that concluded success, failure, or cancelled (neutral
+    # / skipped are no-ops). `cancelled` is included because a fail-fast or
+    # concurrency-cancelled sibling makes the aggregate run report `cancelled`
+    # even when a job genuinely failed; the tool inspects the check-run surface
+    # and no-ops on a pure supersede (nothing actually failed). The tool resolves
+    # whether the PR closes a managed issue and no-ops otherwise, so no
+    # branch-name gate is needed here.
     if: >-
       github.event.workflow_run.event == 'pull_request' &&
       (github.event.workflow_run.conclusion == 'failure' ||
-       github.event.workflow_run.conclusion == 'success')
+       github.event.workflow_run.conclusion == 'success' ||
+       github.event.workflow_run.conclusion == 'cancelled')
     runs-on: ${{ vars.BUGPATROL_FIX_RUNNER_LABEL || 'self-hosted' }}
     env:
       NODE_USE_ENV_PROXY: "1"

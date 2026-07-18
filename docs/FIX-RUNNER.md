@@ -225,6 +225,18 @@ for the same issue.
   branch it does not own, so it just surfaces the failing build to the issue +
   Lark topic (@ the assignee). De-dupes on `last_failure_notified_sha`. Statuses:
   `ci_failure_notified`, `ci_failure_already_notified`, `no_ci_failure`.
+- **`cancelled` aggregate ⇒ un-mask, then notify**: a fail-fast or a concurrency
+  lane can cancel a sibling job so the *aggregate* `workflow_run` reports
+  `cancelled` even though a job genuinely failed — and the run-level failure
+  query (`list_failed_runs_for_sha`) is then empty, so the failure would go
+  silent. The tool checks the **check-run** surface
+  (`list_failed_check_runs_for_sha`): if a check genuinely failed it notifies
+  (even on our own branch — a cancelled run has no clean per-run logs to
+  auto-revise from, so a human takes over); if nothing failed it was a pure
+  supersede and is a no-op. De-dupes on `last_failure_notified_sha`, and skips if
+  a real `failure` event already revised the same sha (`last_fixed_sha`).
+  Statuses: `ci_failure_notified`, `ci_failure_already_notified`,
+  `ci_already_handled`, `no_ci_failure`.
 
 The orchestrator itself returns `no_pr` (no open PR for the head branch) or
 `no_managed_issue` (the PR closes nothing BugPatrol manages) before either branch.

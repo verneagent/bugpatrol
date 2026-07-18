@@ -290,6 +290,19 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
         self.assertIn("--commit", args)
         self.assertIn("abc", args)
 
+    def test_list_failed_check_runs_for_sha_returns_names(self) -> None:
+        client = GitHubCliIssuesClient()
+        # The --jq already filters to failed check-run names, one per line.
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(
+                ["gh"], 0, "web / test\napi / api-tests\n", ""
+            )
+            names = client.list_failed_check_runs_for_sha(repo="o/r", head_sha="abc")
+        self.assertEqual(names, ("web / test", "api / api-tests"))
+        args = run.call_args.args[0]
+        self.assertIn("repos/o/r/commits/abc/check-runs", args)
+        self.assertIn("--jq", args)
+
     def test_get_run_failed_logs_truncates_tail(self) -> None:
         client = GitHubCliIssuesClient()
         big = "\n".join(f"line {i}" for i in range(500))

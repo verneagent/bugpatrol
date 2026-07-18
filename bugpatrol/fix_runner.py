@@ -765,9 +765,12 @@ def run_ci_feedback(
       - failure on a bugpatrol fix branch -> auto-revise (run_ci_fix);
       - failure on a human branch -> notify the topic only (BugPatrol does not
         revise a branch it does not own).
+      - cancelled aggregate hiding a genuine check-run failure -> notify (a
+        cancelled run has no clean per-run logs to auto-revise from); a cancelled
+        run with nothing actually failed is a pure supersede and is a no-op.
     Statuses: no_pr, no_managed_issue, ci_failure_notified,
-    ci_failure_already_notified, no_ci_failure, plus the underlying run_ci_fix /
-    run_build_ready statuses.
+    ci_failure_already_notified, ci_already_handled, no_ci_failure, plus the
+    underlying run_ci_fix / run_build_ready statuses.
     """
     if config.fix is None:
         raise ValueError("project config has no [fix] table; auto-fix is not enabled")
@@ -784,6 +787,28 @@ def run_ci_feedback(
     if conclusion == "success":
         return run_build_ready(
             config=config, issue=issue, pr=pr, head_sha=head_sha, github=github, lark=lark
+        )
+    if conclusion == "cancelled":
+        # A cancelled aggregate (a sibling job was cancelled by fail-fast or a
+        # concurrency lane) can still hide a genuinely failed job -- the run-level
+        # conclusion reads `cancelled`, but the check-run surface exposes the real
+        # failure. If nothing actually failed there it was a pure supersede
+        # (no-op); otherwise surface the masked failure to the reporter/assignee.
+        # We notify rather than auto-revise even on our own branch: a cancelled
+        # run has no clean per-run failure logs to feed the revise agent.
+        failed_checks = github.list_failed_check_runs_for_sha(
+            repo=config.github_repo, head_sha=head_sha
+        )
+        if not failed_checks:
+            return "no_ci_failure"
+        return _notify_human_pr_ci_failure(
+            config=config,
+            issue=issue,
+            pr=pr,
+            head_sha=head_sha,
+            github=github,
+            lark=lark,
+            failed_names=failed_checks,
         )
     # failure: auto-revise our own fix branch; only notify a human's branch.
     if head_branch == fix.branch_for_issue(issue.number):
@@ -812,21 +837,31 @@ def _notify_human_pr_ci_failure(
     head_sha: str,
     github: GitHubCliIssuesClient,
     lark: LarkMessengerClient | None = None,
+    failed_names: tuple[str, ...] | None = None,
 ) -> str:
-    """Report a failing CI build on a human PR to the issue + Lark topic.
+    """Report a failing CI build to the issue + Lark topic (notify-only).
 
-    Notify-only (no auto-revise): de-dupes on ``last_failure_notified_sha`` in
-    the PR's CI-fix meta so N failed workflows for one commit notify once.
+    Used for a human PR's failing build, and for a masked failure surfaced from a
+    cancelled aggregate on our own branch (``failed_names`` pre-computed from the
+    check-run surface). De-dupes on ``last_failure_notified_sha`` in the PR's
+    CI-fix meta so N failed workflows for one commit notify once, and skips if a
+    revise already handled the same commit (``last_fixed_sha``).
     """
     comments = github.list_pull_request_comments(repo=config.github_repo, pr_number=pr.number)
     meta = latest_ci_fix_meta(comments)
+    if meta.get("last_fixed_sha") == head_sha:
+        # A failure event for this commit already triggered auto-revise; don't
+        # also notify from a cancelled sibling aggregate for the same sha.
+        return "ci_already_handled"
     if meta.get("last_failure_notified_sha") == head_sha:
         return "ci_failure_already_notified"
-    failed_runs = github.list_failed_runs_for_sha(repo=config.github_repo, head_sha=head_sha)
-    if not failed_runs:
-        # The event fired but no run for this sha concluded failure (re-run green,
-        # or a transient/cancelled conclusion): nothing to report.
-        return "no_ci_failure"
+    if failed_names is None:
+        failed_runs = github.list_failed_runs_for_sha(repo=config.github_repo, head_sha=head_sha)
+        if not failed_runs:
+            # The event fired but no run for this sha concluded failure (re-run
+            # green, or a transient/cancelled conclusion): nothing to report.
+            return "no_ci_failure"
+        failed_names = tuple(r.workflow_name or r.name for r in failed_runs)
     assignee = issue.assignees[0] if issue.assignees else ""
     assignee_open_id = (config.lark.user_open_ids or {}).get(assignee, "") if assignee else ""
     notify_pr_ci_failure(
@@ -835,7 +870,7 @@ def _notify_human_pr_ci_failure(
         issue_url=issue.url,
         pr_url=pr.url,
         head_sha=head_sha,
-        failed_names=tuple(r.workflow_name or r.name for r in failed_runs),
+        failed_names=failed_names,
         meta={**meta, "last_failure_notified_sha": head_sha},
         github=github,
         lark=lark,

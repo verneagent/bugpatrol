@@ -766,6 +766,29 @@ class GitHubCliIssuesClient:
             )
         return tuple(runs)
 
+    def list_failed_check_runs_for_sha(
+        self, *, repo: str, head_sha: str
+    ) -> tuple[str, ...]:
+        """Names of individual check-runs that concluded ``failure`` for a commit.
+
+        A workflow_run whose aggregate conclusion is ``cancelled`` (a sibling job
+        was cancelled by fail-fast or a concurrency lane) still reports genuinely
+        failed jobs at the check-run surface, where the run-level conclusion hides
+        them. This lets CI feedback tell a real-but-masked failure apart from a
+        pure supersede (nothing failed, the run was just cancelled).
+        """
+        result = self._run(
+            [
+                "api",
+                f"repos/{repo}/commits/{head_sha}/check-runs",
+                "--paginate",
+                "--jq",
+                '.check_runs[] | select(.conclusion == "failure") | .name',
+            ]
+        )
+        names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        return tuple(names)
+
     def get_run_failed_logs(self, *, repo: str, run_id: int) -> str:
         """The failed-step logs of a workflow run, truncated to the tail.
 
