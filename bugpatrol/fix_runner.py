@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -34,7 +35,7 @@ from bugpatrol.clients import (
     OpenPullRequest,
     ReviewThread,
 )
-from bugpatrol.config import ProjectConfig
+from bugpatrol.config import FixConfig, ProjectConfig
 from bugpatrol.fields import fix_output_schema
 from bugpatrol.fix_gate import (
     evaluate_post_edit,
@@ -683,19 +684,59 @@ def _revise_commit_message(
     return f"fix: address review feedback (#{issue_number})"
 
 
+# GitHub's closing keywords in a PR body/title (case-insensitive): close(s|d),
+# fix(es|ed), resolve(s|d) followed by ``#N``. We parse these ourselves because
+# GitHub only populates a PR's *native* closingIssuesReferences when the PR
+# targets the DEFAULT branch -- a bugpatrol fix PR (and a human's manual-fix PR)
+# opened against a feature branch has an empty native link despite the keyword.
+_CLOSING_KEYWORD_RE = re.compile(
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s*#(\d+)",
+    re.IGNORECASE,
+)
+
+
+def _closing_issue_candidates(pr: OpenPullRequest, fix: FixConfig) -> tuple[int, ...]:
+    """Ordered, de-duplicated candidate issue numbers this PR may resolve.
+
+    Priority: (1) the issue encoded in a ``bugpatrol/fix-issue-N`` head branch --
+    deterministic for our own fix PRs, and the only source that survives a
+    feature-branch base; (2) GitHub's native closing references (populated only
+    for default-branch PRs); (3) ``Fixes #N`` keywords parsed from the PR body
+    (a human's manual-fix PR against a feature branch).
+    """
+    ordered: list[int] = []
+
+    def add(number: int) -> None:
+        if number > 0 and number not in ordered:
+            ordered.append(number)
+
+    prefix = fix.branch_prefix
+    if pr.head_ref.startswith(prefix):
+        suffix = pr.head_ref[len(prefix):]
+        if suffix.isdigit():
+            add(int(suffix))
+    for number in pr.closing_issue_numbers:
+        add(number)
+    for match in _CLOSING_KEYWORD_RE.finditer(pr.body):
+        add(int(match.group(1)))
+    return tuple(ordered)
+
+
 def _resolve_managed_closing_issue(
     *,
     config: ProjectConfig,
     github: GitHubCliIssuesClient,
     pr: OpenPullRequest,
 ) -> GitHubIssue | None:
-    """The first bugpatrol-managed issue this PR closes, or None.
+    """The first bugpatrol-managed issue this PR resolves, or None.
 
-    A PR reports its CI result to the managed issue it resolves via GitHub's
-    native closing-issue link, so both a bugpatrol fix PR and a human PR that
-    cites ``Fixes #N`` surface to the reporter's topic by association.
+    A PR reports its CI result to the managed issue it resolves, so both a
+    bugpatrol fix PR and a human PR that cites ``Fixes #N`` surface to the
+    reporter's topic. Resolution is multi-source (branch name / native link /
+    parsed body) because a PR against a feature branch has no native link.
     """
-    for number in pr.closing_issue_numbers:
+    assert config.fix is not None
+    for number in _closing_issue_candidates(pr, config.fix):
         issue = github.get_issue(repo=config.github_repo, issue_number=number)
         if is_bugpatrol_managed_issue(issue):
             return issue

@@ -1,11 +1,14 @@
 name: BugPatrol CI feedback
 
-# React to the project's own PR CI finishing on ANY PR that closes a
+# React to the project's own PR CI finishing on ANY PR that resolves a
 # BugPatrol-managed issue -- a bugpatrol auto-fix PR (bugpatrol/fix-issue-N) or
 # a human's manual-fix PR that cites `Fixes #N`. The tool resolves the managed
-# issue from the PR's closing-issue reference (association), so results reach the
-# reporter's topic regardless of who opened the PR. One workflow_run [completed]
-# listener, two branches off the run's conclusion:
+# issue from the fix branch name, then the PR's native closing reference, then a
+# `Fixes #N` keyword parsed from the PR body (GitHub only populates the native
+# reference for PRs targeting the default branch, so a PR opened against a
+# feature branch has none), so results reach the reporter's topic regardless of
+# who opened the PR. One workflow_run [completed] listener, branches on the run's
+# conclusion:
 #   - failure on a bugpatrol fix branch -> CI-fix: feed the failing logs to the
 #     revise agent, edit, push a fast-forward update, bounded by
 #     [fix.gate].max_ci_fix_attempts; at the cap it escalates to the PR reviewer.

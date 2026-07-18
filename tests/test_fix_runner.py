@@ -20,6 +20,7 @@ from bugpatrol.clients import (
 from bugpatrol.config import load_project_config
 from bugpatrol.fix_runner import (
     FixRunPlan,
+    _closing_issue_candidates,
     execute_fix_revise,
     execute_fix_run,
     latest_reporter_correction,
@@ -1000,21 +1001,60 @@ _BOT_BRANCH = "bugpatrol/fix-issue-7"
 
 
 def _bot_pr() -> OpenPullRequest:
+    # A real bugpatrol fix PR targets a feature branch, not the default branch,
+    # so GitHub populates NO native closing reference -- the issue must resolve
+    # from the bugpatrol/fix-issue-N head branch name.
     return OpenPullRequest(
         number=9,
         url="https://github.test/o/r/pull/9",
         head_ref=_BOT_BRANCH,
-        closing_issue_numbers=(7,),
+        closing_issue_numbers=(),
+        body="Fixes #7",
     )
 
 
 def _human_pr(head_ref: str = "feature/manual-fix") -> OpenPullRequest:
+    # A human's manual-fix PR against a feature branch: no native closing
+    # reference either, so the managed issue resolves from the body keyword.
     return OpenPullRequest(
         number=9,
         url="https://github.test/o/r/pull/9",
         head_ref=head_ref,
-        closing_issue_numbers=(7,),
+        closing_issue_numbers=(),
+        body="Fixes #7",
     )
+
+
+class ClosingIssueCandidatesTest(unittest.TestCase):
+    def _fix(self):
+        return _sandbox_config().fix
+
+    def _pr(self, **kw) -> OpenPullRequest:
+        base = dict(number=9, url="u", head_ref="", closing_issue_numbers=(), body="")
+        base.update(kw)
+        return OpenPullRequest(**base)  # type: ignore[arg-type]
+
+    def test_bot_branch_name_is_first_candidate(self) -> None:
+        pr = self._pr(head_ref="bugpatrol/fix-issue-42", body="Fixes #7")
+        self.assertEqual(_closing_issue_candidates(pr, self._fix()), (42, 7))
+
+    def test_empty_native_link_falls_back_to_body_keyword(self) -> None:
+        pr = self._pr(head_ref="feature/x", body="Closes #4061 per PRD")
+        self.assertEqual(_closing_issue_candidates(pr, self._fix()), (4061,))
+
+    def test_keyword_variants_and_dedupe(self) -> None:
+        pr = self._pr(
+            head_ref="feature/x",
+            closing_issue_numbers=(7,),
+            body="fixes #7\nresolved #8\nCLOSED #9\nsee #10",
+        )
+        # #7 from native link (deduped with body), #8/#9 from keywords, #10 has no
+        # keyword so it is ignored.
+        self.assertEqual(_closing_issue_candidates(pr, self._fix()), (7, 8, 9))
+
+    def test_no_candidates_when_nothing_cites_an_issue(self) -> None:
+        pr = self._pr(head_ref="feature/x", body="just cleanup")
+        self.assertEqual(_closing_issue_candidates(pr, self._fix()), ())
 
 
 class RunCiFeedbackFailureTest(unittest.TestCase):
@@ -1036,12 +1076,34 @@ class RunCiFeedbackFailureTest(unittest.TestCase):
             self.assertEqual(self._run(github, Path(tmp), tmp), "no_pr")
 
     def test_no_managed_issue_when_pr_closes_nothing_managed(self) -> None:
+        # A human PR on a feature branch with no native closing reference and no
+        # Fixes/#N keyword resolves nothing -> not ours to report.
         pr = OpenPullRequest(
-            number=9, url="https://github.test/o/r/pull/9", head_ref=_BOT_BRANCH
+            number=9,
+            url="https://github.test/o/r/pull/9",
+            head_ref="feature/unrelated",
+            closing_issue_numbers=(),
+            body="just some cleanup",
         )
         github = FakeGithub(open_pull_request=pr)
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(self._run(github, Path(tmp), tmp), "no_managed_issue")
+
+    def test_bot_pr_with_empty_native_link_resolves_via_branch_name(self) -> None:
+        # Regression (#4074): a fix PR targets a feature branch, so GitHub's
+        # closingIssuesReferences is empty; the issue must still resolve from the
+        # bugpatrol/fix-issue-N head branch. Reaching "no_ci_failure" (rather than
+        # "no_managed_issue") proves resolution got past the association gate.
+        pr = OpenPullRequest(
+            number=9,
+            url="https://github.test/o/r/pull/9",
+            head_ref=_BOT_BRANCH,
+            closing_issue_numbers=(),
+            body="",
+        )
+        github = FakeGithub(open_pull_request=pr, failed_runs=())
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._run(github, Path(tmp), tmp), "no_ci_failure")
 
     def test_closed_issue_skips(self) -> None:
         github = FakeGithub(

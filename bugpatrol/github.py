@@ -548,7 +548,7 @@ class GitHubCliIssuesClient:
                 "--state",
                 "open",
                 "--json",
-                "number,url,baseRefName,mergeable,headRefName,closingIssuesReferences",
+                "number,url,baseRefName,mergeable,headRefName,closingIssuesReferences,body",
             ]
         )
         data = json.loads(result.stdout)
@@ -569,6 +569,7 @@ class GitHubCliIssuesClient:
                     mergeable=str(data[0].get("mergeable") or ""),
                     head_ref=str(data[0].get("headRefName") or ""),
                     closing_issue_numbers=tuple(closing_numbers),
+                    body=str(data[0].get("body") or ""),
                 )
         return None
 

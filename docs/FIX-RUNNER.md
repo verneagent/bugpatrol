@@ -196,9 +196,13 @@ After **any** PR that closes a managed issue builds — a BugPatrol fix PR
 project's **own** PR CI runs on it. One `workflow_run [completed]` listener
 reacts to that build's conclusion (BugPatrol reads only the CI *result surface* —
 a run's conclusion + its failed-step logs — never the project's build
-definition). The tool resolves which managed issue to report to from the PR's
-closing-issue references (association), so results reach the reporter's topic
-regardless of who opened the PR. All branches de-dupe on the PR head **sha** (one
+definition). The tool resolves which managed issue to report to from three
+sources in order — the `bugpatrol/fix-issue-N` head branch name, the PR's native
+closing-issue reference, then a `Fixes #N` keyword parsed from the PR body —
+because GitHub only populates the native reference for PRs targeting the
+**default branch**, so a fix PR opened against a feature branch has none. This
+lets results reach the reporter's topic regardless of who opened the PR or which
+branch it targets. All branches de-dupe on the PR head **sha** (one
 push → many build workflows → many events) via a `BUGPATROL_CI_FIX_META` PR
 comment, and share the fix concurrency group so they serialize with fix/revise
 for the same issue.

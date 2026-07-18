@@ -36,7 +36,10 @@ class OpenPullRequest:
     ``head_ref`` is the PR's source branch (so CI feedback can tell a bugpatrol
     fix branch apart from a human branch); ``closing_issue_numbers`` are the
     issues the PR closes via GitHub's native linking, used to resolve which
-    managed issue a passing/failing build should report to.
+    managed issue a passing/failing build should report to. ``body`` is the PR
+    description, parsed for ``Fixes #N`` closing keywords when GitHub's native
+    link is empty -- it is only populated for PRs targeting the default branch,
+    so a fix PR opened against a feature branch has no native closing reference.
     """
 
     number: int
@@ -45,6 +48,7 @@ class OpenPullRequest:
     mergeable: str = ""
     head_ref: str = ""
     closing_issue_numbers: tuple[int, ...] = ()
+    body: str = ""
 
 
 @dataclass(frozen=True)
