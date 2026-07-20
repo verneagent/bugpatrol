@@ -211,6 +211,13 @@ def fix_evidence_for_issue(
     return ""
 
 
+# A SHA a human explicitly linked via a github /commit/<sha> URL -- the
+# highest-confidence citation. Collected before bare hex runs so it can never be
+# crowded out past the candidate cap by comment noise.
+_COMMIT_URL_RE = re.compile(
+    r"https?://github\.com/[\w.-]+/[\w.-]+/commit/(?P<sha>[0-9a-f]{7,40})\b",
+    re.IGNORECASE,
+)
 # A word-bounded 7-40 char hex run: an (abbreviated) git commit SHA. Verified
 # against the repo before it counts, so decimal timestamps / issue numbers that
 # happen to match the shape are discarded when they don't resolve.
@@ -237,17 +244,24 @@ def commit_evidence_from_comments(
 ) -> str:
     candidates: list[str] = []
     seen: set[str] = set()
-    for comment in comments:
-        for match in _COMMIT_SHA_RE.findall(comment.body or ""):
-            sha = match.lower()
-            if sha in seen:
-                continue
+
+    def _collect(sha: str) -> None:
+        sha = sha.lower()
+        if sha not in seen and len(candidates) < _MAX_SHA_CANDIDATES:
             seen.add(sha)
             candidates.append(sha)
-            if len(candidates) >= _MAX_SHA_CANDIDATES:
-                break
-        if len(candidates) >= _MAX_SHA_CANDIDATES:
-            break
+
+    # Highest-confidence first: SHAs a human explicitly linked via a /commit/<sha>
+    # URL. Collecting these before any bare hex run guarantees a genuinely-cited
+    # fix commit is verified even when earlier comments are dense with hex noise
+    # (Lark chat/message ids, triage run_id UUID fragments, numeric comment ids).
+    for comment in comments:
+        for match in _COMMIT_URL_RE.finditer(comment.body or ""):
+            _collect(match.group("sha"))
+    # Fallback: bare hex runs (a dev who writes "Fixed in <sha>" without a link).
+    for comment in comments:
+        for match in _COMMIT_SHA_RE.findall(comment.body or ""):
+            _collect(match)
     for sha in candidates:
         if github.commit_exists(repo=repo, sha=sha):
             return f"commit {sha} (cited in a comment)"

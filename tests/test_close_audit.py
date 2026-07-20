@@ -332,6 +332,41 @@ class CloseAuditTest(unittest.TestCase):
         self.assertEqual(second.skipped_reason, "already notified")
         self.assertEqual(len(lark.replies), 1)
 
+    def test_commit_url_cited_after_hex_noise_is_evidence(self) -> None:
+        # #4070 regression: the real fix commit was linked via a /commit/<sha>
+        # URL, but earlier comments were dense with hex-shaped noise (Lark
+        # chat/message ids, triage run_id UUID fragments, numeric comment/user
+        # ids). The bare-hex scanner used to exhaust its candidate cap on that
+        # noise and never verify the genuinely-cited SHA, so enforcement kept
+        # reopening a truly-fixed issue. The /commit/<sha> URL must win.
+        sha = "60691f7dc943966a3f7456a04953113b02cd3edb"
+        config = self._enforce_config()
+        github = FakeGithub(
+            issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)),
+            known_commits=(sha,),
+        )
+        # A pile of all-digit / UUID-fragment noise, then the real citation last.
+        for noise in (
+            "话题 oc_29b55b1560c31cafa9210fd4811cf3e0 消息 1784283944247",
+            "run_id d4130bc1-3991-46c5-b6fd-5d2c7cc13ed9 comment 5002099665",
+            "run_id 57f5ea01-5864-4ab6-b4b6-9782282ad4e0 user 2078038794371739648",
+            "comment 5002144657 5002160762 5002277608 5002336712 5002463436",
+        ):
+            github.comments.append(noise)
+        github.comments.append(
+            f"Fixed by https://github.com/TheCloverLab/fived/commit/{sha}"
+        )
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="TheCloverLab/fived", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertFalse(summary.reopened)
+        self.assertFalse(github.reopened)
+        self.assertEqual(summary.evidence, f"commit {sha} (cited in a comment)")
+        self.assertTrue(summary.notified)
+
     def test_unresolvable_hex_in_comment_is_not_evidence(self) -> None:
         # A hex-shaped token that isn't a real commit (known_commits empty) does
         # not pass, so the missing-fix nag still fires.
