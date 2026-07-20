@@ -94,6 +94,7 @@ class GitHubPullRequest:
     base_ref: str = ""
     merged_at: str = ""
     merge_commit_sha: str = ""
+    author: str = ""
 
 
 class GitHubIssuesClient(Protocol):

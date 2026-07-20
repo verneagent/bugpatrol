@@ -1162,6 +1162,7 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=not args.write,
                 github=github,
                 lark=lark,
+                user_open_ids=config.lark.user_open_ids,
             )
         except ValueError as error:
             if "BugPatrol Lark intake metadata" not in str(error):
@@ -1244,6 +1245,7 @@ def main(argv: list[str] | None = None) -> int:
             lark=lark,
             dry_run=not args.write,
             resend=args.resend,
+            user_open_ids=config.lark.user_open_ids,
         )
         print(
             json.dumps(

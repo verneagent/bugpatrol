@@ -294,7 +294,7 @@ class GitHubCliIssuesClient:
                 "--repo",
                 repo,
                 "--json",
-                "number,url,title,body,closingIssuesReferences,baseRefName",
+                "number,url,title,body,closingIssuesReferences,baseRefName,author",
             ]
         )
         data = json.loads(result.stdout)
@@ -312,7 +312,32 @@ class GitHubCliIssuesClient:
             closing_issue_numbers=tuple(closing_numbers),
             timeline_issue_numbers=self._timeline_issue_numbers_for_pr(repo=repo, pr_number=int(data["number"])),
             base_ref=str(data.get("baseRefName") or ""),
+            author=str((data.get("author") or {}).get("login") or "") if isinstance(data.get("author"), dict) else "",
         )
+
+    def get_commit_author(self, *, repo: str, sha: str) -> str:
+        """GitHub login of a commit's author (falls back to the git author name).
+
+        Used to attribute a `commit_linked` fix to a person so the Lark
+        notification can @-mention them. A missing/ambiguous SHA makes `gh api`
+        exit non-zero, which surfaces as GitHubCliError -> reported here as no
+        author (empty) rather than raised, so a bogus hex token can't abort the
+        notification.
+        """
+        try:
+            result = self._run(
+                [
+                    "api",
+                    "-H",
+                    f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                    f"/repos/{repo}/commits/{sha}",
+                    "--jq",
+                    '.author.login // .commit.author.name // ""',
+                ]
+            )
+        except GitHubCliError:
+            return ""
+        return result.stdout.strip()
 
     def list_merged_pull_requests(
         self, *, repo: str, limit: int = 30
@@ -334,7 +359,7 @@ class GitHubCliIssuesClient:
                 "--limit",
                 str(limit),
                 "--json",
-                "number,url,title,body,closingIssuesReferences,mergedAt,mergeCommit",
+                "number,url,title,body,closingIssuesReferences,mergedAt,mergeCommit,author",
             ]
         )
         pulls: list[GitHubPullRequest] = []
@@ -356,6 +381,7 @@ class GitHubCliIssuesClient:
                     closing_issue_numbers=tuple(closing_numbers),
                     merged_at=str(data.get("mergedAt") or ""),
                     merge_commit_sha=merge_commit_sha,
+                    author=str((data.get("author") or {}).get("login") or "") if isinstance(data.get("author"), dict) else "",
                 )
             )
         return tuple(pulls)

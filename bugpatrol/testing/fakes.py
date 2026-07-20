@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from bugpatrol.clients import GitHubIssue, GitHubIssueComment
+from bugpatrol.clients import GitHubIssue, GitHubIssueComment, GitHubPullRequest
 
 
 @dataclass
@@ -24,6 +24,23 @@ class FakeGitHubIssuesClient:
     def __init__(self) -> None:
         self.created: list[CreatedIssue] = []
         self._next_number = 1
+        # Optional fix-author lookups: tests seed these to exercise the
+        # 修复人 attribution; defaults yield no author (empty login).
+        self.pull_requests: dict[str, GitHubPullRequest] = {}
+        self.commit_authors: dict[str, str] = {}
+
+    def get_pull_request(self, *, repo: str, pr: str) -> GitHubPullRequest:
+        if pr in self.pull_requests:
+            return self.pull_requests[pr]
+        return GitHubPullRequest(
+            number=int(str(pr).lstrip("#") or 0),
+            url=f"https://github.test/{repo}/pull/{str(pr).lstrip('#')}",
+            title="",
+            body="",
+        )
+
+    def get_commit_author(self, *, repo: str, sha: str) -> str:
+        return self.commit_authors.get(sha, "")
 
     def find_issue_by_intake_root(self, *, repo: str, chat_id: str, root_id: str) -> GitHubIssue | None:
         needle = f'"chat_id":"{chat_id}","root_id":"{root_id}"'

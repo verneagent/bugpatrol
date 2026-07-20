@@ -70,6 +70,8 @@ def build_fix_notification(
     event: str,
     pr: str = "",
     commit: str = "",
+    author_login: str = "",
+    author_open_id: str = "",
 ) -> FixNotification:
     if event not in FIX_EVENTS:
         raise ValueError(f"unsupported fix event: {event}")
@@ -90,6 +92,9 @@ def build_fix_notification(
             repo=repo,
             pr=pr,
             commit=commit,
+            author_login=author_login,
+            author_open_id=author_open_id,
+            reporter_open_id=_metadata_str(metadata, "reporter_open_id"),
         ),
         chat_id=chat_id,
         message_id=message_id,
@@ -108,9 +113,12 @@ def apply_fix_notification(
     commit: str = "",
     dry_run: bool = True,
     resend: bool = False,
+    user_open_ids: dict[str, str] | None = None,
 ) -> FixNotificationSummary:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
     comments = github.list_issue_comments(repo=repo, issue_number=issue_number)
+    author_login = _resolve_fix_author(github=github, repo=repo, event=event, pr=pr, commit=commit)
+    author_open_id = (user_open_ids or {}).get(author_login, "") if author_login else ""
     notification = build_fix_notification(
         repo=repo,
         issue=issue,
@@ -118,6 +126,8 @@ def apply_fix_notification(
         event=event,
         pr=pr,
         commit=commit,
+        author_login=author_login,
+        author_open_id=author_open_id,
     )
     # `resend` re-delivers an already-notified event in the current message
     # format (e.g. after a rendering fix), without minting a second marker.
@@ -207,6 +217,9 @@ def render_fix_notification_text(
     repo: str,
     pr: str = "",
     commit: str = "",
+    author_login: str = "",
+    author_open_id: str = "",
+    reporter_open_id: str = "",
 ) -> str:
     # `reply_to_message` turns markdown `[text](url)` into masked Lark links (a
     # rich-text "post"), so every reference is a short label (`#3983`, a 12-char
@@ -228,11 +241,50 @@ def render_fix_notification_text(
     elif event == "commit_linked":
         lines = [f"关联修复 commit：{_link(commit[:12], f'https://github.com/{repo}/commit/{commit}')}"]
     elif event == "issue_fixed":
+        # Manual dispatch may still carry the fix PR/commit — surface it so a
+        # "已修复" notice is never evidence-free.
         lines = ["该问题已标记修复"]
+        if pr:
+            number = _normalize_pr(pr)
+            lines.append(f"修复 PR：{_link(f'#{number}', f'https://github.com/{repo}/pull/{number}')}")
+        if commit:
+            lines.append(f"关联 commit：{_link(commit[:12], f'https://github.com/{repo}/commit/{commit}')}")
     else:
         raise ValueError(f"unsupported fix event: {event}")
+    # Attribute the fix to a person; @-mention them when we can map the GitHub
+    # login to a Lark open_id, otherwise show the bare login.
+    if author_login:
+        if author_open_id:
+            lines.append(f'修复人：<at user_id="{author_open_id}">{author_login}</at>')
+        else:
+            lines.append(f"修复人：{author_login}")
     lines.append(f"Issue {_link(f'#{issue.number}', issue.url)}")
-    return "\n".join(lines)
+    # @-mention the original reporter at the head so they get pinged that their
+    # bug was fixed (mirrors the close-audit notification's reporter prefix).
+    prefix = f'<at user_id="{reporter_open_id}">上报人</at> ' if reporter_open_id else ""
+    return prefix + "\n".join(lines)
+
+
+def _resolve_fix_author(
+    *,
+    github: GitHubCliIssuesClient,
+    repo: str,
+    event: str,
+    pr: str,
+    commit: str,
+) -> str:
+    """GitHub login credited with the fix, for @-mention attribution.
+
+    PR events -> the PR author; a linked commit -> the commit author. A manual
+    `issue_fixed` may carry either. Returns "" when there is no PR/commit to
+    attribute (e.g. a bare manual `issue_fixed`), so the notification simply
+    omits the 修复人 line rather than guessing.
+    """
+    if pr and event in ("pr_opened", "pr_merged", "issue_fixed"):
+        return github.get_pull_request(repo=repo, pr=pr).author
+    if commit and event in ("commit_linked", "issue_fixed"):
+        return github.get_commit_author(repo=repo, sha=commit)
+    return ""
 
 
 def render_fix_metadata_comment(metadata: dict[str, Any]) -> str:
@@ -299,6 +351,7 @@ def reconcile_fix_notifications(
     lark: LarkMessengerClient | None = None,
     dry_run: bool = True,
     resend: bool = False,
+    user_open_ids: dict[str, str] | None = None,
 ) -> FixReconcileResult:
     summaries: list[FixNotificationSummary] = []
     errors: list[str] = []
@@ -329,6 +382,7 @@ def reconcile_fix_notifications(
                 lark=lark,
                 dry_run=dry_run,
                 resend=resend,
+                user_open_ids=user_open_ids,
             )
         except (ValueError, LarkOpenApiError) as error:
             # Isolate a bad candidate (unresolvable issue, transient Lark/API

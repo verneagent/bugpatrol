@@ -454,6 +454,111 @@ class FixNotifyTest(unittest.TestCase):
         # commit display is truncated to 12 chars.
         self.assertNotIn("abc123def4567890]", text)
 
+    def test_notification_text_mentions_fix_author_and_reporter(self) -> None:
+        issue = GitHubIssue(
+            number=3982,
+            title="bug",
+            body="",
+            url="https://github.com/o/r/issues/3982",
+            state="closed",
+        )
+        text = render_fix_notification_text(
+            issue=issue,
+            event="pr_merged",
+            repo="o/r",
+            pr="3983",
+            author_login="wind2star",
+            author_open_id="ou_wind",
+            reporter_open_id="ou_reporter",
+        )
+        # Reporter @-mentioned at the head, fix author @-mentioned on a 修复人 line.
+        self.assertTrue(text.startswith('<at user_id="ou_reporter">上报人</at> '))
+        self.assertIn('修复人：<at user_id="ou_wind">wind2star</at>', text)
+
+    def test_notification_text_shows_bare_login_without_open_id_mapping(self) -> None:
+        issue = GitHubIssue(number=1, title="b", body="", url="https://github.com/o/r/issues/1")
+        text = render_fix_notification_text(
+            issue=issue, event="commit_linked", repo="o/r", commit="abc123def4567890", author_login="ghost"
+        )
+        # No Lark open_id for this login -> plain text attribution, no <at> tag.
+        self.assertIn("修复人：ghost", text)
+        self.assertNotIn("<at", text)
+
+    def test_issue_fixed_text_includes_pr_and_commit_when_provided(self) -> None:
+        issue = GitHubIssue(number=7, title="b", body="", url="https://github.com/o/r/issues/7")
+        text = render_fix_notification_text(
+            issue=issue, event="issue_fixed", repo="o/r", pr="88", commit="deadbeef0000"
+        )
+        self.assertIn("该问题已标记修复", text)
+        self.assertIn("[#88](https://github.com/o/r/pull/88)", text)
+        self.assertIn("[deadbeef0000](https://github.com/o/r/commit/deadbeef0000)", text)
+
+    def test_apply_fix_notification_resolves_pr_author_and_mentions(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        issue = workflow.process(
+            IntakeRecord(
+                reporter_name="Reporter",
+                reporter_open_id="ou_reporter",
+                created_at="2026-07-01T00:00:00Z",
+                chat_id=config.lark.chat_id,
+                root_id="om_root",
+                message_id="om_1",
+                original_text="bug",
+            )
+        ).issue
+        github.pull_requests["123"] = GitHubPullRequest(
+            number=123, url="https://github.test/o/r/pull/123", title="", body="", author="wind2star"
+        )
+
+        apply_fix_notification(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            event="pr_merged",
+            pr="123",
+            dry_run=False,
+            github=github,  # type: ignore[arg-type]
+            lark=lark,
+            user_open_ids={"wind2star": "ou_wind"},
+        )
+
+        text = lark.replies[-1].text
+        self.assertIn('<at user_id="ou_reporter">上报人</at>', text)
+        self.assertIn('修复人：<at user_id="ou_wind">wind2star</at>', text)
+
+    def test_apply_fix_notification_resolves_commit_author(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        issue = workflow.process(
+            IntakeRecord(
+                reporter_name="Reporter",
+                reporter_open_id="ou_reporter",
+                created_at="2026-07-01T00:00:00Z",
+                chat_id=config.lark.chat_id,
+                root_id="om_root",
+                message_id="om_1",
+                original_text="bug",
+            )
+        ).issue
+        github.commit_authors["abc123def456"] = "jerry-emperor"
+
+        apply_fix_notification(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            event="commit_linked",
+            commit="abc123def456",
+            dry_run=False,
+            github=github,  # type: ignore[arg-type]
+            lark=lark,
+            user_open_ids={"jerry-emperor": "ou_jerry"},
+        )
+
+        self.assertIn('修复人：<at user_id="ou_jerry">jerry-emperor</at>', lark.replies[-1].text)
+
     def test_withdrawn_message_is_tolerated_and_still_records_marker(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGitHubIssuesClient()
