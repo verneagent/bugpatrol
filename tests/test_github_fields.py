@@ -7,11 +7,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bugpatrol.config import load_project_config
+from bugpatrol.fields import FieldSpec, default_field_specs
 from bugpatrol.github_fields import (
     GitHubIssueFieldsClient,
     GitHubIssueFieldsError,
     IssueField,
     build_issue_field_values_payload,
+    find_field_option_drift,
 )
 
 
@@ -140,6 +142,41 @@ class GitHubIssueFieldsTest(unittest.TestCase):
             "/repos/TheCloverLab/example/issues/9/issue-field-values",
             run.call_args.args[0],
         )
+
+
+class FieldOptionDriftTest(unittest.TestCase):
+    def _live(self, name: str, options: tuple[str, ...], data_type: str = "single_select") -> dict[str, IssueField]:
+        return {name: IssueField(id=1, name=name, data_type=data_type, options=options)}
+
+    def test_no_drift_when_specs_subset_of_live(self) -> None:
+        specs = {"Owner reason": FieldSpec("Owner reason", ("CODEOWNERS", "OpenSpec"), "")}
+        live = self._live("Owner reason", ("CODEOWNERS", "OpenSpec", "Manual"))
+        self.assertEqual(find_field_option_drift(specs, live), [])
+
+    def test_reports_missing_option(self) -> None:
+        specs = {"Owner reason": FieldSpec("Owner reason", ("CODEOWNERS", "OpenSpec"), "")}
+        live = self._live("Owner reason", ("CODEOWNERS", "Manual"))
+        drift = find_field_option_drift(specs, live)
+        self.assertEqual(len(drift), 1)
+        self.assertIn("Owner reason", drift[0])
+        self.assertIn("OpenSpec", drift[0])
+
+    def test_ignores_fields_absent_from_live(self) -> None:
+        specs = {"Owner reason": FieldSpec("Owner reason", ("OpenSpec",), "")}
+        self.assertEqual(find_field_option_drift(specs, {}), [])
+
+    def test_ignores_non_select_fields(self) -> None:
+        specs = {"Affected branch": FieldSpec("Affected branch", ("anything",), "")}
+        live = self._live("Affected branch", (), data_type="text")
+        self.assertEqual(find_field_option_drift(specs, live), [])
+
+    def test_canonical_specs_pass_against_matching_live_fields(self) -> None:
+        specs = default_field_specs()
+        live = {
+            name: IssueField(id=i, name=name, data_type="single_select", options=spec.values)
+            for i, (name, spec) in enumerate(specs.items())
+        }
+        self.assertEqual(find_field_option_drift(specs, live), [])
 
 
 if __name__ == "__main__":

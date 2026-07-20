@@ -20,9 +20,13 @@ from bugpatrol.agents import (
 )
 from bugpatrol.clients import GitHubIssueComment, LarkMessengerClient
 from bugpatrol.config import ProjectConfig
-from bugpatrol.fields import triage_output_schema
+from bugpatrol.fields import default_field_specs, triage_output_schema
 from bugpatrol.github import GitHubCliIssuesClient
-from bugpatrol.github_fields import GitHubIssueFieldsClient
+from bugpatrol.github_fields import (
+    GitHubIssueFieldsClient,
+    find_field_option_drift,
+    split_repo,
+)
 from bugpatrol.intake import (
     branch_tip_sha_from_metadata,
     require_bugpatrol_managed_issue,
@@ -250,6 +254,18 @@ def execute_triage_run(
 ) -> str:
     issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
     require_bugpatrol_managed_issue(issue)
+    # Fail fast if the canonical field specs declare an option the live org
+    # field is missing. Without this, a triage would run the agent to completion
+    # and only crash at write time (add_issue_field_values), leaving the issue
+    # un-triaged after burning agent tokens — exactly the OpenSpec drift that
+    # stalled a day of triage.
+    live_fields = issue_fields.list_org_fields(org=split_repo(config.github_repo)[0])
+    drift = find_field_option_drift(default_field_specs(), live_fields)
+    if drift:
+        raise RuntimeError(
+            "Issue field options are out of sync with GitHub; fix the org "
+            "field(s) before triaging:\n- " + "\n- ".join(drift)
+        )
     run_id = str(uuid4())
     mark_triage_running(
         config=config,

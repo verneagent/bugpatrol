@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from bugpatrol.config import ProjectConfig
+from bugpatrol.fields import FieldSpec
 
 GITHUB_API_VERSION = "2026-03-10"
 
@@ -159,6 +160,34 @@ def build_issue_field_values_payload(
             raise GitHubIssueFieldsError(f"unsupported issue field data type: {field.data_type}")
         payload.append({"field_id": field.id, "value": value})
     return payload
+
+
+def find_field_option_drift(
+    specs: dict[str, FieldSpec],
+    live_fields: dict[str, IssueField],
+) -> list[str]:
+    """Return drift lines where a declared spec option is absent from the live
+    org field. An empty list means the canonical specs are a subset of GitHub.
+
+    Only select-type fields that actually exist in the org are checked; a field
+    the org has not provisioned is out of scope here. This exists to fail a
+    triage run fast (before the agent runs) instead of crashing mid-apply when
+    someone adds an option to ``fields.py`` without syncing the org field.
+    """
+    drift: list[str] = []
+    for name, spec in specs.items():
+        field = live_fields.get(name)
+        if field is None:
+            continue
+        if field.data_type not in ("single_select", "multi_select"):
+            continue
+        missing = [value for value in spec.values if value not in field.options]
+        if missing:
+            drift.append(
+                f"{name!r} is missing option(s) {missing} — add them to the org "
+                f"issue field (live options: {sorted(field.options)})"
+            )
+    return drift
 
 
 def split_repo(repo: str) -> tuple[str, str]:

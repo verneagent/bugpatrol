@@ -11,6 +11,8 @@ from unittest.mock import patch
 from bugpatrol.agents import AgentInvocation
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment
 from bugpatrol.config import load_project_config
+from bugpatrol.fields import default_field_specs
+from bugpatrol.github_fields import IssueField
 from bugpatrol.intake import IntakeRecord, render_issue_body
 from bugpatrol.triage_context import ReferenceRepoContext
 from bugpatrol.triage_runner import (
@@ -65,6 +67,12 @@ class FakeIssueFields:
 
     def add_issue_field_values(self, **kwargs: object) -> None:
         self.writes.append(kwargs)
+
+    def list_org_fields(self, **kwargs: object) -> dict[str, IssueField]:
+        return {
+            name: IssueField(id=i, name=name, data_type="single_select", options=spec.values)
+            for i, (name, spec) in enumerate(default_field_specs().items())
+        }
 
 
 class TriageRunnerTest(unittest.TestCase):
