@@ -41,6 +41,31 @@ class GitHubCliError(RuntimeError):
 # the assignee, which is applied last) and failing the whole triage run.
 _TRANSIENT_GATEWAY_RE = re.compile(r"non-200 OK status code: 50[234]\b")
 
+# Transport-layer blips from the Go http client `gh` uses. These fail while
+# establishing or holding the connection (before or without a completed
+# response), so a bounded retry is as safe as the gateway case above — and it
+# stops a single flaky poll (e.g. `net/http: TLS handshake timeout` on a
+# `get_issue` at the very start of a run) from failing the whole triage.
+_TRANSIENT_NETWORK_RE = re.compile(
+    r"TLS handshake timeout"
+    r"|net/http: request canceled"
+    r"|Client\.Timeout exceeded"
+    r"|(?:dial|read|write) tcp\b"
+    r"|i/o timeout"
+    r"|connection reset by peer"
+    r"|connection refused"
+    r"|unexpected EOF"
+    r"|server misbehaving"
+    r"|no such host",
+    re.IGNORECASE,
+)
+
+
+def _is_transient_gh_error(stderr: str) -> bool:
+    return bool(
+        _TRANSIENT_GATEWAY_RE.search(stderr) or _TRANSIENT_NETWORK_RE.search(stderr)
+    )
+
 
 class GitHubCliIssuesClient:
     def __init__(
@@ -879,7 +904,7 @@ class GitHubCliIssuesClient:
             if completed.returncode == 0:
                 return CommandResult(stdout=completed.stdout, stderr=completed.stderr)
             stderr = completed.stderr.strip()
-            if attempt < self._transient_retries and _TRANSIENT_GATEWAY_RE.search(stderr):
+            if attempt < self._transient_retries and _is_transient_gh_error(stderr):
                 self._sleep(self._retry_backoff_seconds * attempt)
                 continue
             raise GitHubCliError(

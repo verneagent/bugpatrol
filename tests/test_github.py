@@ -367,6 +367,25 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
                 client.add_assignee(repo="o/r", issue_number=1, assignee="a")
         self.assertEqual(run.call_count, 3)
 
+    def test_retries_transient_network_errors_then_succeeds(self) -> None:
+        # Transport-layer blips (the TLS handshake timeout that failed a #4121
+        # backfill get_issue) must retry, not fail the run.
+        for stderr in (
+            'Get "https://api.github.com/...": net/http: TLS handshake timeout',
+            'dial tcp 140.82.112.5:443: i/o timeout',
+            'read tcp 10.0.0.2->140.82.112.5:443: connection reset by peer',
+            'Get "https://api.github.com/...": unexpected EOF',
+        ):
+            with self.subTest(stderr=stderr):
+                client = GitHubCliIssuesClient(sleep=lambda _s: None)
+                with patch("subprocess.run") as run:
+                    run.side_effect = [
+                        subprocess.CompletedProcess(["gh"], 1, "", stderr),
+                        subprocess.CompletedProcess(["gh"], 0, "", ""),
+                    ]
+                    client.add_assignee(repo="o/r", issue_number=4121, assignee="a")
+                self.assertEqual(run.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
