@@ -107,6 +107,9 @@ class TriageRunnerTest(unittest.TestCase):
             (change_dir / "tasks.md").write_text(
                 "- [x] empty-state: 删除全部 todo 的空态 · @naohn"
             )
+            # Baseline whitelist derived solely from the login sources
+            # (CODEOWNERS + config), computed without any openspec input.
+            baseline_assignees = tuple(list_known_assignees(root, config=config))
             plan = prepare_triage_run(
                 config=config,
                 issue_number=7,
@@ -123,6 +126,11 @@ class TriageRunnerTest(unittest.TestCase):
         self.assertIn("## OpenSpec Owners", context)
         self.assertIn("@naohn", context)
         self.assertNotIn("naohn", plan.known_assignees)
+        # Invariant: openspec owners add NOTHING to the schema-enum whitelist,
+        # regardless of the token. This holds even if a change owner happened to
+        # be a real login — guarding against re-introducing a union of external
+        # tokens into known_assignees (the pre-ship bug this feature nearly shipped).
+        self.assertEqual(tuple(plan.known_assignees), baseline_assignees)
 
     def test_prepare_triage_run_rejects_unmanaged_issue(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
