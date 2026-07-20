@@ -26,6 +26,7 @@ from bugpatrol.agents import (
     AgentInvocation,
     build_fix_agent_invocation,
     detect_sandbox_denial,
+    load_agent_json,
     parse_claude_token_usage,
 )
 from bugpatrol.clients import (
@@ -613,7 +614,7 @@ def execute_fix_revise(
                 lark=lark,
             )
             return "no_output"
-        result = parse_fix_result(json.loads(plan.output_path.read_text()))
+        result = parse_fix_result(load_agent_json(plan.output_path.read_text()))
     else:
         # Clean auto-merge with no feedback: no agent ran, so synthesize a
         # summary for the notification (the merge commit is the only change).
@@ -1064,7 +1065,7 @@ def execute_ci_fix(
             prior_meta=prior_meta, attempt=attempt, head_sha=head_sha,
         )
         return "no_output"
-    result = parse_fix_result(json.loads(plan.output_path.read_text()))
+    result = parse_fix_result(load_agent_json(plan.output_path.read_text()))
 
     verify_outcomes = run_verify_commands(fix=fix, cwd=plan.agent_cwd)
     if not verify_all_passed(verify_outcomes):
@@ -1331,7 +1332,7 @@ def execute_fix_run(
                     lark=lark,
                 )
                 return "no_output"
-            result = parse_fix_result(json.loads(plan.output_path.read_text()))
+            result = parse_fix_result(load_agent_json(plan.output_path.read_text()))
 
             reporter.set_phase("跑验证门（preflight）")
             status, verify_outcomes = _verify_with_baseline_attribution(fix=fix, worktree=plan.agent_cwd)

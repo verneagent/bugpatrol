@@ -62,6 +62,80 @@ def parse_claude_token_usage(stdout: str) -> tuple[int, int, int]:
     return (input_tokens, cached_input, _int("output_tokens"))
 
 
+def load_agent_json(text: str) -> object:
+    """Parse an agent's JSON output, tolerating unescaped inner double-quotes.
+
+    Models occasionally quote source verbatim inside a string value without
+    escaping it (e.g. ``"...代码注释也注明 "a lone Leave button hugs its label"..."``),
+    which breaks strict ``json.loads`` with ``Expecting ',' delimiter``. This
+    is deterministic for a given issue, so retrying the agent never recovers.
+
+    Strict parsing is tried first. Only on failure do we attempt a single,
+    bounded repair pass that escapes stray inner quotes, and we accept the
+    result *only if it re-parses* — otherwise the original decode error is
+    re-raised so the failure still surfaces honestly.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as original:
+        repaired = _escape_unescaped_inner_quotes(text)
+        if repaired is None or repaired == text:
+            raise
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            raise original from None
+
+
+def _escape_unescaped_inner_quotes(text: str) -> str | None:
+    """Escape ``"`` characters that appear inside JSON string values.
+
+    A quote inside a string is treated as the terminator only when the next
+    non-whitespace character is a structural JSON token (``,`` ``}`` ``]``
+    ``:``) or end-of-input; otherwise it is a stray inner quote and gets
+    escaped. This recovers pretty-printed agent output where a value contains
+    an unescaped quote. Returns ``None`` when nothing was changed.
+    """
+    out: list[str] = []
+    in_string = False
+    changed = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if not in_string:
+            out.append(ch)
+            if ch == '"':
+                in_string = True
+            i += 1
+            continue
+        if ch == "\\":
+            out.append(ch)
+            if i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+        if ch == '"':
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j >= n or text[j] in ",}]:":
+                out.append(ch)
+                in_string = False
+            else:
+                out.append('\\"')
+                changed = True
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    if not changed:
+        return None
+    return "".join(out)
+
+
 # Stable substrings Claude Code emits in a tool_result when it refuses a Bash
 # command or a file read that falls outside the sandbox. A denied run silently
 # yields a degraded triage (no CODEOWNERS/repo/git/dup-search) while still

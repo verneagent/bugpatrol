@@ -10,6 +10,7 @@ from bugpatrol.agents import (
     DEEPSEEK_DEFAULT_MODEL,
     build_triage_agent_invocation,
     detect_sandbox_denial,
+    load_agent_json,
     parse_claude_token_usage,
 )
 from bugpatrol.config import load_project_config, parse_project_config
@@ -36,6 +37,48 @@ def _config_with_provider(provider: str, *, model: str = ""):
             "issue_field_names": dict(config.issue_field_names),
         }
     )
+
+
+class LoadAgentJsonTest(unittest.TestCase):
+    def test_parses_well_formed_json(self) -> None:
+        self.assertEqual(load_agent_json('{"a": 1, "b": "x"}'), {"a": 1, "b": "x"})
+
+    def test_repairs_unescaped_inner_quotes(self) -> None:
+        # Real failure mode from fived #4129: the agent quoted a code comment
+        # verbatim inside a string value without escaping it.
+        raw = (
+            '{\n'
+            '  "summary": "ok",\n'
+            '  "blame_suggestion": "注释也注明 "a lone Leave button hugs its label"，'
+            '设计意图是自适应。",\n'
+            '  "assignee": ""\n'
+            '}'
+        )
+        with self.assertRaises(json.JSONDecodeError):
+            json.loads(raw)
+        result = load_agent_json(raw)
+        self.assertEqual(
+            result["blame_suggestion"],
+            '注释也注明 "a lone Leave button hugs its label"，设计意图是自适应。',
+        )
+        self.assertEqual(result["assignee"], "")
+
+    def test_repairs_multiple_values_with_inner_quotes(self) -> None:
+        raw = (
+            '{"a": "say "hi" now", "b": "and "bye" too"}'
+        )
+        result = load_agent_json(raw)
+        self.assertEqual(result["a"], 'say "hi" now')
+        self.assertEqual(result["b"], 'and "bye" too')
+
+    def test_preserves_already_escaped_quotes(self) -> None:
+        raw = '{"a": "he said \\"hi\\"", "b": 2}'
+        self.assertEqual(load_agent_json(raw), {"a": 'he said "hi"', "b": 2})
+
+    def test_reraises_original_error_when_unrepairable(self) -> None:
+        raw = '{"a": 1 "b": 2}'  # missing comma, no inner-quote issue
+        with self.assertRaises(json.JSONDecodeError):
+            load_agent_json(raw)
 
 
 class AgentsTest(unittest.TestCase):

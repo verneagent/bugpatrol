@@ -16,6 +16,7 @@ from bugpatrol.agents import (
     AgentInvocation,
     build_triage_agent_invocation,
     detect_sandbox_denial,
+    load_agent_json,
     parse_claude_token_usage,
 )
 from bugpatrol.clients import GitHubIssueComment, LarkMessengerClient
@@ -358,7 +359,7 @@ def execute_triage_run(
         )
         raise RuntimeError("triage agent exited 0 but produced no output file")
     try:
-        result = parse_triage_result(json.loads(plan.output_path.read_text()))
+        result = parse_triage_result(load_agent_json(plan.output_path.read_text()))
     except (ValueError, json.JSONDecodeError) as error:
         # The agent wrote an output file, but it failed schema/consistency
         # validation (e.g. duplicate_of set without verdict 重复, or malformed
