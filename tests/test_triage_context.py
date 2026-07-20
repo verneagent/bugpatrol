@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment
+from bugpatrol.openspec import OpenSpecChange, OpenSpecTask
 from bugpatrol.triage_context import (
     AssigneeIdentity,
     ReferenceRepoContext,
@@ -53,6 +54,69 @@ class TriageContextTest(unittest.TestCase):
         self.assertEqual(context.roster, roster)
         self.assertIn("## Assignee Roster", markdown)
         self.assertIn("`naohn42` — naohn42 / Naohn / 阿闹", markdown)
+
+    def test_context_renders_matched_openspec_owner_with_priority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            issue = GitHubIssue(
+                number=1,
+                url="https://github.test/o/r/issues/1",
+                title="帖子评论 comment 崩溃",
+                body="点开评论列表 comment 会崩溃",
+            )
+            change = OpenSpecChange(
+                change_id="post-comments",
+                title="帖子评论与表情",
+                path="changes/post-comments/tasks.md",
+                default_owner="naohn",
+                tasks=(
+                    OpenSpecTask(
+                        task_id="comment-api",
+                        description="comment-api: 帖子评论 comment 路由 · @naohn",
+                        owner="naohn",
+                        done=True,
+                    ),
+                ),
+                text="- [x] comment-api: 帖子评论 comment 路由 · @naohn",
+            )
+
+            context = build_triage_context(
+                issue=issue, prd_root=root, openspec_changes=(change,)
+            )
+            markdown = render_triage_context_markdown(context)
+
+        self.assertEqual([h.change_id for h in context.openspec_hits], ["post-comments"])
+        self.assertIn("## OpenSpec Owners", markdown)
+        self.assertIn("`post-comments`", markdown)
+        self.assertIn("@naohn", markdown)
+        self.assertIn("`OpenSpec`", markdown)
+        self.assertIn("Task `comment-api` → @naohn", markdown)
+
+    def test_context_openspec_section_empty_when_no_match(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            issue = GitHubIssue(
+                number=1,
+                url="https://github.test/o/r/issues/1",
+                title="完全不相关的登录问题",
+                body="登录页白屏",
+            )
+            change = OpenSpecChange(
+                change_id="post-comments",
+                title="帖子评论",
+                path="changes/post-comments/tasks.md",
+                default_owner="naohn",
+                tasks=(),
+                text="- [x] comment-api: 帖子评论 · @naohn",
+            )
+
+            context = build_triage_context(
+                issue=issue, prd_root=root, openspec_changes=(change,)
+            )
+            markdown = render_triage_context_markdown(context)
+
+        self.assertEqual(context.openspec_hits, ())
+        self.assertIn("- No matching OpenSpec change with a recorded owner.", markdown)
 
     def test_context_includes_comments_and_media_evidence_descriptions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

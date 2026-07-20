@@ -62,7 +62,7 @@ def default_field_specs() -> dict[str, FieldSpec]:
         FieldSpec("Triage confidence", ("高", "中", "低"), "Confidence in the triage result."),
         FieldSpec(
             "Owner reason",
-            ("CODEOWNERS", "Lark @mention", "Git history", "Capability fallback", "Manual"),
+            ("CODEOWNERS", "OpenSpec", "Lark @mention", "Git history", "Capability fallback", "Manual"),
             "Why the dev owner was selected.",
         ),
     ]

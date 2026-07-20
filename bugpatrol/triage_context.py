@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment
+from bugpatrol.openspec import OpenSpecChange, OpenSpecOwnerHit, score_openspec_changes
 from bugpatrol.prd import PrdSearchHit, load_prd_documents, search_prd_documents
 
 
@@ -43,6 +44,7 @@ class TriageContext:
     media: tuple[MediaEvidence, ...]
     roster: tuple[AssigneeIdentity, ...] = ()
     reference_repos: tuple[ReferenceRepoContext, ...] = ()
+    openspec_hits: tuple[OpenSpecOwnerHit, ...] = ()
 
 
 def build_triage_context(
@@ -54,11 +56,14 @@ def build_triage_context(
     prd_limit: int = 5,
     roster: tuple[AssigneeIdentity, ...] = (),
     reference_repos: tuple[ReferenceRepoContext, ...] = (),
+    openspec_changes: tuple[OpenSpecChange, ...] = (),
+    openspec_limit: int = 3,
 ) -> TriageContext:
     docs = load_prd_documents(prd_root, include_globs=prd_include_globs)
     comments_text = "\n".join(comment.body for comment in comments)
     query = f"{issue.title}\n{issue.body}\n{comments_text}"
     hits = search_prd_documents(query, docs, limit=prd_limit)
+    openspec_hits = score_openspec_changes(query, openspec_changes, limit=openspec_limit)
     media = (
         *extract_media_evidence(issue.body, source="issue body"),
         *(
@@ -74,6 +79,7 @@ def build_triage_context(
         media=media,
         roster=roster,
         reference_repos=reference_repos,
+        openspec_hits=openspec_hits,
     )
 
 
@@ -123,6 +129,34 @@ def render_triage_context_markdown(context: TriageContext) -> str:
     for identity in context.roster:
         aliases = " / ".join(identity.aliases) if identity.aliases else "(no aliases)"
         lines.append(f"- `{identity.login}` — {aliases}")
+    lines.extend(
+        [
+            "",
+            "## OpenSpec Owners",
+            "",
+            (
+                "These OpenSpec changes match this issue and record an owner. The "
+                "owner is a display-name nickname (e.g. `naohn`, `andy`), NOT a "
+                "GitHub login — map it to a login via the Assignee Roster above, "
+                "the same way you resolve a human's `assign to X`. When the issue "
+                "clearly belongs to one of these changes, prefer that change's "
+                "mapped owner as the assignee and set `owner_reason` to `OpenSpec` "
+                "(priority: a human's `Manual` instruction > OpenSpec > "
+                "CODEOWNERS). If no change matches, or the nickname maps to no "
+                "roster entry, fall back to CODEOWNERS inference."
+            ),
+            "",
+        ]
+    )
+    if not context.openspec_hits:
+        lines.append("- No matching OpenSpec change with a recorded owner.")
+    for hit in context.openspec_hits:
+        owners = ", ".join(f"@{login}" for login in hit.owners)
+        lines.append(f"- `{hit.change_id}` — {hit.title} (owners: {owners})")
+        lines.append(f"  - Path: `{hit.path}` · Score: {hit.score}")
+        for task in hit.matched_tasks:
+            label = task.task_id or task.description[:40]
+            lines.append(f"  - Task `{label}` → @{task.owner}")
     if context.reference_repos:
         lines.extend(
             [

@@ -97,6 +97,33 @@ class TriageRunnerTest(unittest.TestCase):
             self.assertIn("Follow-up comment", plan.context_path.read_text())
             self.assertIn("triage-context.md", plan.invocation.command[-1])
 
+    def test_prepare_triage_run_surfaces_openspec_owner_without_whitelisting(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prd_root = root / config.prd.cache_path
+            change_dir = prd_root / "changes" / "todo-empty-state"
+            change_dir.mkdir(parents=True)
+            (change_dir / "tasks.md").write_text(
+                "- [x] empty-state: 删除全部 todo 的空态 · @naohn"
+            )
+            plan = prepare_triage_run(
+                config=config,
+                issue_number=7,
+                repo_path=root,
+                output_dir=root / "run",
+                github=FakeGithub(),  # type: ignore[arg-type]
+            )
+
+            context = plan.context_path.read_text()
+
+        # The openspec owner nickname is surfaced in the context for the agent to
+        # map via the roster, but is NOT injected into the assignee whitelist
+        # (nicknames aren't GitHub logins — assigning one raw would fail).
+        self.assertIn("## OpenSpec Owners", context)
+        self.assertIn("@naohn", context)
+        self.assertNotIn("naohn", plan.known_assignees)
+
     def test_prepare_triage_run_rejects_unmanaged_issue(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         with tempfile.TemporaryDirectory() as tmp:

@@ -35,6 +35,7 @@ from bugpatrol.worktree import (
     SubprocessGitDriver,
     resolve_triage_branch,
 )
+from bugpatrol.openspec import load_openspec_changes
 from bugpatrol.triage_context import (
     AssigneeIdentity,
     ReferenceRepoContext,
@@ -105,6 +106,12 @@ def prepare_triage_run(
         resolved_refs.append(replace(ref, path=str(ref_path)))
     comments = github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)
     known_assignees = list_known_assignees(repo_path, config=config)
+    # OpenSpec records an owner per change (tasks.md `· @name` / `> **Owner**`).
+    # These are display-name nicknames, not GitHub logins, so we surface them in
+    # the context (not the assignee whitelist) and let the agent map a matched
+    # change's owner to a real login via the Assignee Roster — preferring it over
+    # CODEOWNERS inference, falling back when it cannot be mapped.
+    openspec_changes = load_openspec_changes(repo_path / config.prd.cache_path)
     context = build_triage_context(
         issue=issue,
         comments=comments,
@@ -115,6 +122,7 @@ def prepare_triage_run(
             codeowners_identities=load_codeowners_identities(repo_path),
         ),
         reference_repos=tuple(resolved_refs),
+        openspec_changes=openspec_changes,
     )
     context_path = output_dir / "triage-context.md"
     schema_path = output_dir / "triage.schema.json"
