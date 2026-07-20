@@ -1,11 +1,11 @@
-"""Deterministic Lark slash commands (`/fix`, `/retriage`, `/assign`).
+"""Deterministic Lark slash commands (`/fix`, `/retriage`, `/reopen`, `/assign`).
 
 These bypass the LLM triage path entirely: a reply in an existing bug topic
 that starts with a known slash command is executed literally. `/fix` dispatches
 the fix workflow for the topic's issue; `/retriage` re-dispatches the triage
-workflow for it; `/assign <who>` sets the GitHub issue assignee. Anything that
-is not an exact slash command is left untouched so it flows into normal
-intake/triage.
+workflow for it; `/reopen` reopens a closed issue and re-dispatches triage;
+`/assign <who>` sets the GitHub issue assignee. Anything that is not an exact
+slash command is left untouched so it flows into normal intake/triage.
 """
 
 from __future__ import annotations
@@ -22,12 +22,13 @@ from bugpatrol.lark import LarkMessage, is_message_withdrawn_error
 
 FIX_COMMAND = "/fix"
 RETRIAGE_COMMAND = "/retriage"
+REOPEN_COMMAND = "/reopen"
 ASSIGN_COMMAND = "/assign"
 
 
 @dataclass(frozen=True)
 class SlashCommand:
-    kind: str  # "fix" | "retriage" | "assign"
+    kind: str  # "fix" | "retriage" | "reopen" | "assign"
     target: str = ""  # raw assignee text for /assign
 
     def render(self) -> str:
@@ -35,6 +36,8 @@ class SlashCommand:
             return f"{ASSIGN_COMMAND} {self.target}".strip()
         if self.kind == "retriage":
             return RETRIAGE_COMMAND
+        if self.kind == "reopen":
+            return REOPEN_COMMAND
         return FIX_COMMAND
 
 
@@ -68,6 +71,10 @@ def parse_slash_command(text: str | None) -> SlashCommand | None:
         if len(tokens) != 1:
             return None
         return SlashCommand(kind="retriage")
+    if head == REOPEN_COMMAND:
+        if len(tokens) != 1:
+            return None
+        return SlashCommand(kind="reopen")
     if head == ASSIGN_COMMAND:
         target = stripped[len(tokens[0]):].strip()
         if not target:
@@ -107,6 +114,8 @@ class _IssueLookupClient(Protocol):
     def find_issue_by_intake_root(
         self, *, repo: str, chat_id: str, root_id: str
     ) -> GitHubIssue | None: ...
+
+    def reopen_issue(self, *, repo: str, issue_number: int) -> None: ...
 
     def set_assignee(self, *, repo: str, issue_number: int, assignee: str) -> None: ...
 
@@ -192,6 +201,8 @@ class SlashCommandHandler:
             return self._handle_fix(message, issue)
         if command.kind == "retriage":
             return self._handle_retriage(message, issue)
+        if command.kind == "reopen":
+            return self._handle_reopen(message, issue)
         return self._handle_assign(message, issue, command)
 
     def _handle_fix(self, message: LarkMessage, issue: GitHubIssue) -> SlashResult:
@@ -228,6 +239,27 @@ class SlashCommandHandler:
         self._retriage_dispatch(issue.number)
         self._reply(message, f"🔁 已重新触发分诊 [#{issue.number}]({issue.url})")
         return SlashResult(command="retriage", issue_number=issue.number, reason="slash_retriage")
+
+    def _handle_reopen(self, message: LarkMessage, issue: GitHubIssue) -> SlashResult:
+        # Reopening exists to un-close an issue and re-run triage on it, so it
+        # shares the triage dispatch. Without a triage trigger, reopening alone
+        # would leave the issue open but un-triaged, so refuse up front.
+        if self._retriage_dispatch is None:
+            self._reply(message, "⚠️ 未配置分诊触发命令，无法从 Lark 重新打开并分诊")
+            return SlashResult(
+                command="reopen", issue_number=issue.number, reason="slash_reopen_unconfigured"
+            )
+        if issue.state != "closed":
+            self._retriage_dispatch(issue.number)
+            self._reply(
+                message,
+                f"ℹ️ [#{issue.number}]({issue.url}) 已是打开状态，已重新触发分诊",
+            )
+            return SlashResult(command="reopen", issue_number=issue.number, reason="slash_reopen_open")
+        self._github.reopen_issue(repo=self._config.github_repo, issue_number=issue.number)
+        self._retriage_dispatch(issue.number)
+        self._reply(message, f"♻️ 已重新打开并触发分诊 [#{issue.number}]({issue.url})")
+        return SlashResult(command="reopen", issue_number=issue.number, reason="slash_reopen")
 
     def _handle_assign(
         self, message: LarkMessage, issue: GitHubIssue, command: SlashCommand

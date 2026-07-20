@@ -41,11 +41,15 @@ class _StubIssueClient:
     def __init__(self, issue: GitHubIssue | None) -> None:
         self._issue = issue
         self.assigned: list[tuple[int, str]] = []
+        self.reopened: list[int] = []
 
     def find_issue_by_intake_root(
         self, *, repo: str, chat_id: str, root_id: str
     ) -> GitHubIssue | None:
         return self._issue
+
+    def reopen_issue(self, *, repo: str, issue_number: int) -> None:
+        self.reopened.append(issue_number)
 
     def set_assignee(self, *, repo: str, issue_number: int, assignee: str) -> None:
         self.assigned.append((issue_number, assignee))
@@ -93,6 +97,15 @@ class ParseSlashCommandTest(unittest.TestCase):
 
     def test_retriage_with_arg_is_not_a_command(self) -> None:
         self.assertIsNone(parse_slash_command("/retriage now"))
+
+    def test_reopen_exact(self) -> None:
+        self.assertEqual(parse_slash_command("/reopen"), SlashCommand(kind="reopen"))
+
+    def test_reopen_case_insensitive(self) -> None:
+        self.assertEqual(parse_slash_command("  /REOPEN  "), SlashCommand(kind="reopen"))
+
+    def test_reopen_with_arg_is_not_a_command(self) -> None:
+        self.assertIsNone(parse_slash_command("/reopen now"))
 
     def test_assign_with_target(self) -> None:
         self.assertEqual(
@@ -242,6 +255,47 @@ class SlashCommandHandlerTest(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertIn("已关闭", lark.replies[0])
         self.assertIn("reopen", lark.replies[0])
+
+    def test_reopen_closed_issue_reopens_and_dispatches(self) -> None:
+        calls: list[int] = []
+        github = _StubIssueClient(_issue(42, state="closed"))
+        lark = _StubReplyClient()
+        handler = SlashCommandHandler(
+            config=_config(), github=github, lark=lark, retriage_dispatch=calls.append
+        )
+        result = handler.handle(_message(text="/reopen"))
+        assert result is not None
+        self.assertEqual(result.reason, "slash_reopen")
+        self.assertEqual(result.issue_number, 42)
+        self.assertEqual(github.reopened, [42])
+        self.assertEqual(calls, [42])
+        self.assertIn("已重新打开并触发分诊", lark.replies[0])
+
+    def test_reopen_open_issue_only_dispatches_triage(self) -> None:
+        calls: list[int] = []
+        github = _StubIssueClient(_issue(42, state="open"))
+        lark = _StubReplyClient()
+        handler = SlashCommandHandler(
+            config=_config(), github=github, lark=lark, retriage_dispatch=calls.append
+        )
+        result = handler.handle(_message(text="/reopen"))
+        assert result is not None
+        self.assertEqual(result.reason, "slash_reopen_open")
+        self.assertEqual(github.reopened, [])
+        self.assertEqual(calls, [42])
+        self.assertIn("已是打开状态", lark.replies[0])
+
+    def test_reopen_unconfigured_reports(self) -> None:
+        github = _StubIssueClient(_issue(42, state="closed"))
+        lark = _StubReplyClient()
+        handler = SlashCommandHandler(
+            config=_config(), github=github, lark=lark, retriage_dispatch=None
+        )
+        result = handler.handle(_message(text="/reopen"))
+        assert result is not None
+        self.assertEqual(result.reason, "slash_reopen_unconfigured")
+        self.assertEqual(github.reopened, [])
+        self.assertIn("未配置", lark.replies[0])
 
     def test_no_issue_reports(self) -> None:
         github = _StubIssueClient(None)
