@@ -78,10 +78,10 @@ def parse_slash_command(text: str | None) -> SlashCommand | None:
     if head == REOPEN_COMMAND:
         return SlashCommand(kind="reopen", body=rest)
     if head == ASSIGN_COMMAND:
-        target = rest
-        if not target:
-            return None
-        return SlashCommand(kind="assign", target=target)
+        # A bare `/assign` (no target) is still a recognized command, not a
+        # normal message: return it so the handler can reply with usage rather
+        # than silently letting it fall through to intake.
+        return SlashCommand(kind="assign", target=rest)
     return None
 
 
@@ -319,6 +319,9 @@ class SlashCommandHandler:
                 f"如需处理请先发 `/reopen` 重新打开。",
             )
             return SlashResult(command="assign", issue_number=issue.number, reason="slash_assign_closed")
+        if not command.target.strip() and not message.mention_open_ids:
+            self._reply(message, "⚠️ 用法：`/assign @某人`（需要指定负责人）")
+            return SlashResult(command="assign", issue_number=issue.number, reason="slash_assign_usage")
         login = resolve_assignee_login(
             target=command.target,
             mention_open_ids=message.mention_open_ids,

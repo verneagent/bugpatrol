@@ -126,9 +126,17 @@ class ParseSlashCommandTest(unittest.TestCase):
             SlashCommand(kind="assign", target="@Naohn"),
         )
 
-    def test_assign_without_target_is_not_a_command(self) -> None:
-        self.assertIsNone(parse_slash_command("/assign"))
-        self.assertIsNone(parse_slash_command("/assign   "))
+    def test_bare_assign_is_still_a_command_with_empty_target(self) -> None:
+        # A recognized command prefix must not silently fall through to intake;
+        # the handler replies with usage instead.
+        self.assertEqual(
+            parse_slash_command("/assign"),
+            SlashCommand(kind="assign", target=""),
+        )
+        self.assertEqual(
+            parse_slash_command("/assign   "),
+            SlashCommand(kind="assign", target=""),
+        )
 
     def test_non_command(self) -> None:
         self.assertIsNone(parse_slash_command("hello world"))
@@ -414,6 +422,18 @@ class SlashCommandHandlerTest(unittest.TestCase):
         self.assertEqual(result.reason, "slash_assign_unknown")
         self.assertEqual(github.assigned, [])
         self.assertIn("naohn42", lark.replies[0])
+
+    def test_bare_assign_reports_usage(self) -> None:
+        github = _StubIssueClient(_issue(42))
+        lark = _StubReplyClient()
+        handler = SlashCommandHandler(
+            config=_config({"naohn42": "ou_naohn"}), github=github, lark=lark
+        )
+        result = handler.handle(_message(text="/assign"))
+        assert result is not None
+        self.assertEqual(result.reason, "slash_assign_usage")
+        self.assertEqual(github.assigned, [])
+        self.assertIn("用法", lark.replies[0])
 
     def test_execution_error_is_surfaced_not_raised(self) -> None:
         def boom(_: int) -> None:
