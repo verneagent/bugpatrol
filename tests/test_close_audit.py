@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 import unittest
 from pathlib import Path
 
@@ -32,7 +33,7 @@ def render_expected_behavior_triage_comment() -> str:
     )
 
 
-def _managed_body(chat_id: str = "oc_1") -> str:
+def _managed_body(chat_id: str = "oc_1", *, target_branch: str = "main") -> str:
     return render_issue_body(
         IntakeRecord(
             reporter_name="Reporter",
@@ -42,6 +43,7 @@ def _managed_body(chat_id: str = "oc_1") -> str:
             root_id="om_root",
             message_id="om_1",
             original_text="bug",
+            target_branch=target_branch,
         ),
         language="zh-CN",
     )
@@ -55,6 +57,7 @@ class FakeGithub:
         timeline: tuple[dict, ...] = (),
         known_commits: tuple[str, ...] = (),
         merged_prs: tuple[str, ...] = (),
+        branch_commits: dict[str, tuple[tuple[str, str], ...]] | None = None,
     ) -> None:
         self.issue = issue
         self.timeline = timeline
@@ -63,6 +66,8 @@ class FakeGithub:
         self.known_commits = {sha.lower() for sha in known_commits}
         # entries are "owner/repo#number"
         self.merged_prs = {ref.lower() for ref in merged_prs}
+        # branch -> ((sha, message), ...) newest-first
+        self.branch_commits = branch_commits or {}
 
     def get_issue(self, *, repo: str, issue_number: int) -> GitHubIssue:
         return self.issue
@@ -72,6 +77,15 @@ class FakeGithub:
 
     def pull_request_merged(self, *, repo: str, number: int) -> bool:
         return f"{repo}#{number}".lower() in self.merged_prs
+
+    def commit_referencing_issue(
+        self, *, repo: str, branch: str, issue_number: int, max_commits: int = 200
+    ) -> str:
+        pattern = re.compile(rf"#{issue_number}(?!\d)")
+        for sha, message in self.branch_commits.get(branch, ())[:max_commits]:
+            if pattern.search(message):
+                return sha
+        return ""
 
     def reopen_issue(self, *, repo: str, issue_number: int) -> None:
         self.reopened = True
@@ -403,6 +417,82 @@ class CloseAuditTest(unittest.TestCase):
         self.assertEqual(summary.evidence, "commit 0223259 (cited in a comment)")
         self.assertTrue(summary.notified)
         self.assertEqual(len(lark.replies), 1)
+
+    def test_reverse_lookup_on_target_branch_short_circuits_reopen(self) -> None:
+        # #4124/#4108: fixed by a commit made straight to the feature branch,
+        # referencing the issue in its message -- but the App token can't see
+        # that referenced timeline event and nobody pasted the SHA in a comment.
+        # Reverse-look the intake-declared target branch: found -> notify, no
+        # reopen (instead of the earlier wrong reopen).
+        config = self._enforce_config()
+        github = FakeGithub(
+            issue=_closed_issue(
+                body=_managed_body(chat_id=config.lark.chat_id, target_branch="feature-community")
+            ),
+            branch_commits={
+                "feature-community": (
+                    ("deadbeef1", "unrelated refactor"),
+                    ("486265d0", "fix(header): route every nav-bar button (#7)"),
+                ),
+            },
+        )
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertFalse(summary.reopened)
+        self.assertFalse(github.reopened)
+        self.assertEqual(summary.kind, "closed_completed")
+        self.assertEqual(
+            summary.evidence, "commit 486265d0 (references #7 on feature-community)"
+        )
+        self.assertTrue(summary.notified)
+        self.assertEqual(len(lark.replies), 1)
+
+    def test_reverse_lookup_without_reference_still_reopens(self) -> None:
+        # Precision: a target branch with commits that do NOT reference the issue
+        # is not evidence -- the completed close is still reopened under enforcement.
+        config = self._enforce_config()
+        github = FakeGithub(
+            issue=_closed_issue(
+                body=_managed_body(chat_id=config.lark.chat_id, target_branch="feature-community")
+            ),
+            branch_commits={
+                "feature-community": (
+                    ("deadbeef1", "fix something else (#70)"),
+                    ("cafef00d2", "chore: bump deps"),
+                ),
+            },
+        )
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertTrue(summary.reopened)
+        self.assertTrue(github.reopened)
+        self.assertEqual(summary.kind, "missing_fix_reference")
+
+    def test_reverse_lookup_skipped_for_main_target_branch(self) -> None:
+        # A default-branch commit's referenced event IS visible to the App token,
+        # so the timeline path already covers main -- reverse-lookup must skip it
+        # (a bare #N in a main commit shouldn't override the timeline verdict).
+        config = self._enforce_config()
+        github = FakeGithub(
+            issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)),
+            branch_commits={"main": (("abc12345", "fix: whatever (#7)"),)},
+        )
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertTrue(summary.reopened)
+        self.assertTrue(github.reopened)
 
     def _weaver_config(self):
         base = self._notify_config()

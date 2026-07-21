@@ -32,6 +32,44 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
         self.assertIn("--state", run.call_args.args[0])
         self.assertIn("all", run.call_args.args[0])
 
+    def test_commit_referencing_issue_finds_reference_on_branch(self) -> None:
+        client = GitHubCliIssuesClient()
+        stdout = json.dumps(
+            [
+                {"sha": "aaa1111", "commit": {"message": "chore: bump deps"}},
+                {"sha": "bbb2222", "commit": {"message": "fix(header): route buttons (#4124)"}},
+            ]
+        )
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 0, stdout, "")
+            sha = client.commit_referencing_issue(
+                repo="o/r", branch="feature-community", issue_number=4124
+            )
+
+        self.assertEqual(sha, "bbb2222")
+        self.assertIn(
+            "/repos/o/r/commits?sha=feature-community&per_page=100&page=1",
+            run.call_args.args[0],
+        )
+
+    def test_commit_referencing_issue_returns_empty_without_match(self) -> None:
+        client = GitHubCliIssuesClient()
+        # A shorter-than-a-full-page result stops pagination; #41240 must not
+        # satisfy a lookup for #4124.
+        stdout = json.dumps(
+            [{"sha": "aaa1111", "commit": {"message": "fix: unrelated (#41240)"}}]
+        )
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 0, stdout, "")
+            sha = client.commit_referencing_issue(
+                repo="o/r", branch="feature-community", issue_number=4124
+            )
+
+        self.assertEqual(sha, "")
+        run.assert_called_once()
+
     def test_create_issue_posts_body_via_stdin_and_parses_url(self) -> None:
         client = GitHubCliIssuesClient()
 

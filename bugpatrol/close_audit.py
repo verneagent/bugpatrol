@@ -11,7 +11,7 @@ from bugpatrol.clients import GitHubIssueComment, LarkMessengerClient
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fix_notify import parse_fix_metadata
 from bugpatrol.github import GitHubCliIssuesClient
-from bugpatrol.intake import parse_intake_metadata
+from bugpatrol.intake import parse_intake_metadata, target_branch_from_metadata
 from bugpatrol.triage_result import parse_triage_metadata
 
 CLOSE_AUDIT_META_START = "<!-- BUGPATROL_CLOSE_AUDIT_META"
@@ -88,6 +88,10 @@ def audit_issue_close(
         if not evidence:
             evidence = merged_pr_cited_in_comments(
                 comments, repo=repo, config=config, github=github
+            )
+        if not evidence:
+            evidence = commit_referencing_issue_on_target_branch(
+                repo=repo, issue_number=issue_number, metadata=metadata, github=github
             )
         if evidence:
             kind = KIND_COMPLETED
@@ -314,6 +318,36 @@ def merged_pr_cited_in_comments(
     for full_repo, number in targets[:_MAX_PR_CANDIDATES]:
         if github.pull_request_merged(repo=full_repo, number=number):
             return f"merged PR {full_repo}#{number} (cited in a comment)"
+    return ""
+
+
+def commit_referencing_issue_on_target_branch(
+    *,
+    repo: str,
+    issue_number: int,
+    metadata: dict[str, Any],
+    github: GitHubCliIssuesClient,
+) -> str:
+    """A commit on the issue's declared feature branch that references `#N`.
+
+    A fix committed straight to a feature branch (no PR, not merged to the
+    default branch) produces an issue<->commit `referenced` timeline event that
+    a GitHub App installation token cannot see, so both the timeline path and
+    -- when the dev didn't paste the SHA in a comment -- the comment path miss
+    it, and close-audit would wrongly reopen a genuinely-fixed issue. Reverse-
+    look the intake-declared target branch for a commit whose message cites the
+    issue. Skipped for `main`: a default-branch commit's `referenced` event *is*
+    visible, so the timeline path already covers it (and scanning main is pure
+    cost).
+    """
+    branch = target_branch_from_metadata(metadata)
+    if branch == "main":
+        return ""
+    sha = github.commit_referencing_issue(
+        repo=repo, branch=branch, issue_number=issue_number
+    )
+    if sha:
+        return f"commit {sha} (references #{issue_number} on {branch})"
     return ""
 
 

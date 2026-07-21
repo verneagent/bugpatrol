@@ -263,6 +263,56 @@ class GitHubCliIssuesClient:
             return False
         return True
 
+    def commit_referencing_issue(
+        self, *, repo: str, branch: str, issue_number: int, max_commits: int = 200
+    ) -> str:
+        """Newest commit on `branch` whose message references `#issue_number`, else "".
+
+        A fix committed straight to a feature branch (no PR, not on the default
+        branch) produces an issue<->commit `referenced` timeline event that a
+        GitHub App installation token cannot see, so close-audit's timeline path
+        misses it -- and if the dev didn't paste the SHA in a comment either,
+        the issue gets wrongly reopened. When the issue's declared target branch
+        is known, reverse-look its recent commit messages for a `#N` reference.
+        Bounded to `max_commits` (newest first) so an active branch can't fan
+        out into unbounded API calls; a missing branch is treated as "no match".
+        """
+        pattern = re.compile(rf"#{issue_number}(?!\d)")
+        per_page = 100
+        scanned = 0
+        page = 1
+        while scanned < max_commits:
+            try:
+                result = self._run(
+                    [
+                        "api",
+                        "-H",
+                        f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                        f"/repos/{repo}/commits?sha={branch}&per_page={per_page}&page={page}",
+                    ]
+                )
+            except GitHubCliError:
+                return ""
+            data = json.loads(result.stdout)
+            if not isinstance(data, list) or not data:
+                return ""
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                commit = item.get("commit")
+                message = commit.get("message") if isinstance(commit, dict) else None
+                if isinstance(message, str) and pattern.search(message):
+                    sha = item.get("sha")
+                    if isinstance(sha, str) and sha:
+                        return sha
+                scanned += 1
+                if scanned >= max_commits:
+                    break
+            if len(data) < per_page:
+                return ""
+            page += 1
+        return ""
+
     def pull_request_merged(self, *, repo: str, number: int) -> bool:
         """Whether `repo#number` is a pull request that has been merged.
 
