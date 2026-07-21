@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from bugpatrol.agents import (
     AgentInvocation,
+    agent_error_from_stdout,
     build_triage_agent_invocation,
     detect_sandbox_denial,
     load_agent_json,
@@ -331,6 +332,7 @@ def execute_triage_run(
             reason=agent_failure_reason(
                 f"The triage agent exited with code `{completed.returncode}`.",
                 stderr=completed.stderr,
+                stdout=completed.stdout,
             ),
         )
         raise RuntimeError(f"triage agent failed with exit {completed.returncode}")
@@ -364,6 +366,7 @@ def execute_triage_run(
             reason=agent_failure_reason(
                 "The triage agent exited 0 but wrote no output file.",
                 stderr=completed.stderr,
+                stdout=completed.stdout,
             ),
         )
         raise RuntimeError("triage agent exited 0 but produced no output file")
@@ -579,21 +582,37 @@ def _bounded_log_tail(text: str | None, *, max_lines: int = 25, max_chars: int =
     return tail
 
 
-def agent_failure_reason(headline: str, *, stderr: str | None) -> str:
-    """Build a failure reason that surfaces the agent's real stderr.
+def agent_failure_reason(
+    headline: str, *, stderr: str | None, stdout: str | None = None
+) -> str:
+    """Build a failure reason that surfaces the agent's real error output.
 
     Without this the failure comment is just "exited with code 1", which forces
-    an operator to SSH into whichever runner ran the job and read
-    ``agent-stderr.log``. The captured stderr (bounded, de-ANSI'd) is the
-    actionable detail — put it in the issue comment and the Lark ping directly.
+    an operator to SSH into whichever runner ran the job and read the turn log.
+    Two sources carry the actionable detail:
+
+    * ``stdout`` — provider/API errors (e.g. DeepSeek 402 "Insufficient
+      Balance", auth failures) are emitted as a ``result`` event with
+      ``is_error: true`` on stdout while stderr stays empty;
+    * ``stderr`` — network/tooling failures (bounded, de-ANSI'd tail).
+
+    Surface whichever are present directly in the issue comment and Lark ping.
     """
-    tail = _bounded_log_tail(stderr)
-    if tail:
-        return f"{headline}\n\nAgent stderr (tail):\n```\n{tail}\n```"
-    return (
-        f"{headline} No agent stderr was captured; check the runner logs, "
-        "credentials, prompt/schema files, and repository checkout."
-    )
+    agent_error = agent_error_from_stdout(stdout)
+    stderr_tail = _bounded_log_tail(stderr)
+    sections = [headline]
+    if agent_error:
+        sections.append(
+            f"Agent error:\n```\n{_bounded_log_tail(agent_error)}\n```"
+        )
+    if stderr_tail:
+        sections.append(f"Agent stderr (tail):\n```\n{stderr_tail}\n```")
+    if not agent_error and not stderr_tail:
+        sections.append(
+            "No agent stderr or error output was captured; check the runner logs, "
+            "credentials, prompt/schema files, and repository checkout."
+        )
+    return "\n\n".join(sections)
 
 
 def render_triage_failed_comment(*, exit_code: int, reason: str = "") -> str:

@@ -297,6 +297,48 @@ class TriageRunnerTest(unittest.TestCase):
         # ANSI escapes are stripped before surfacing.
         self.assertNotIn("\x1b[", comment)
 
+    def test_execute_triage_run_surfaces_agent_stdout_api_error_on_failure(self) -> None:
+        # #4145 (and #4139/#4141) failed in ~0.5s with DeepSeek 402 "Insufficient
+        # Balance". The CLI reports that on stdout as a result event with
+        # is_error:true while stderr is empty, so the earlier stderr-only surfacing
+        # showed "No agent stderr was captured". Surface the stdout error too.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        api_error = (
+            'API Error: 402 {"error":{"message":"Insufficient Balance",'
+            '"type":"unknown_error","param":null,"code":"invalid_request_error"}}'
+        )
+        stdout = json.dumps(
+            {"type": "result", "subtype": "success", "is_error": True, "result": api_error}
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=root / "output.json",
+                invocation=AgentInvocation(provider="codex", command=["false"]),
+            )
+
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["false"], 1, stdout, "")
+                with self.assertRaisesRegex(RuntimeError, "exit 1"):
+                    execute_triage_run(
+                        config=config,
+                        issue_number=4145,
+                        plan=plan,
+                        github=github,  # type: ignore[arg-type]
+                        issue_fields=issue_fields,  # type: ignore[arg-type]
+                    )
+
+        comment = github.comments[-1]
+        self.assertIn("Agent error:", comment)
+        self.assertIn("Insufficient Balance", comment)
+        self.assertIn("402", comment)
+        # No hollow "No agent stderr was captured" when the cause is known.
+        self.assertNotIn("No agent stderr", comment)
+
     def test_execute_triage_run_rejects_unmanaged_issue_before_writes(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGithub(issue_body="legacy issue")

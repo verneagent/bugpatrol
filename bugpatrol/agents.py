@@ -190,6 +190,35 @@ def detect_sandbox_denial(stdout: str) -> str | None:
     return None
 
 
+def agent_error_from_stdout(stdout: str | None) -> str:
+    """Return the agent's own fatal error message from ``claude -p`` stdout.
+
+    Some fatal failures (provider API errors like 402 "Insufficient Balance",
+    401 auth, 5xx, or a model refusal) are reported by the CLI on **stdout** as
+    a ``result`` event with ``is_error: true`` while ``stderr`` stays empty.
+    Without surfacing this the failure comment only says "exited with code 1",
+    hiding the actionable cause. Returns the last such ``result`` string, or ""
+    when none is found.
+    """
+    if not stdout:
+        return ""
+    for raw in reversed(stdout.splitlines()):
+        line = raw.strip()
+        if not (line.startswith("{") and line.endswith("}")):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "result" and event.get("is_error"):
+            result = event.get("result")
+            if isinstance(result, str) and result.strip():
+                return result.strip()
+    return ""
+
+
 def build_triage_agent_invocation(
     config: ProjectConfig,
     *,
