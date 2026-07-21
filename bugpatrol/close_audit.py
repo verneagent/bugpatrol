@@ -84,7 +84,9 @@ def audit_issue_close(
         # dev cites it in a plain comment ("Fixed in <sha> ..." / a PR link).
         # Nobody else announces such a close, so notify it here (verifying the ref
         # keeps a random token from passing as evidence).
-        evidence = commit_evidence_from_comments(comments, repo=repo, github=github)
+        evidence = commit_evidence_from_comments(
+            comments, repo=repo, config=config, github=github
+        )
         if not evidence:
             evidence = merged_pr_cited_in_comments(
                 comments, repo=repo, config=config, github=github
@@ -219,7 +221,7 @@ def fix_evidence_for_issue(
 # highest-confidence citation. Collected before bare hex runs so it can never be
 # crowded out past the candidate cap by comment noise.
 _COMMIT_URL_RE = re.compile(
-    r"https?://github\.com/[\w.-]+/[\w.-]+/commit/(?P<sha>[0-9a-f]{7,40})\b",
+    r"https?://github\.com/(?P<repo>[\w.-]+/[\w.-]+)/commit/(?P<sha>[0-9a-f]{7,40})\b",
     re.IGNORECASE,
 )
 # A word-bounded 7-40 char hex run: an (abbreviated) git commit SHA. Verified
@@ -244,31 +246,49 @@ def commit_evidence_from_comments(
     comments: tuple[GitHubIssueComment, ...],
     *,
     repo: str,
+    config: ProjectConfig,
     github: GitHubCliIssuesClient,
 ) -> str:
-    candidates: list[str] = []
+    # A cited fix commit may live in this repo OR a configured reference repo --
+    # e.g. the Go backend `weaver` behind the `fived` frontend, whose fixes land
+    # as a commit a dev pastes into a comment. Restricting to this allowlist stops
+    # an unrelated SHA from an arbitrary repo counting; verifying it exists stops a
+    # bogus hex run passing.
+    allowed: dict[str, str] = {}
+    for full in (repo, *(ref.repo for ref in config.reference_repos)):
+        allowed[full.lower()] = full
+    verify_order: tuple[str, ...] = (repo, *(ref.repo for ref in config.reference_repos))
+
+    candidates: list[tuple[str, tuple[str, ...]]] = []
     seen: set[str] = set()
 
-    def _collect(sha: str) -> None:
+    def _collect(sha: str, repos: tuple[str, ...]) -> None:
         sha = sha.lower()
         if sha not in seen and len(candidates) < _MAX_SHA_CANDIDATES:
             seen.add(sha)
-            candidates.append(sha)
+            candidates.append((sha, repos))
 
-    # Highest-confidence first: SHAs a human explicitly linked via a /commit/<sha>
-    # URL. Collecting these before any bare hex run guarantees a genuinely-cited
-    # fix commit is verified even when earlier comments are dense with hex noise
-    # (Lark chat/message ids, triage run_id UUID fragments, numeric comment ids).
+    # Highest-confidence first: SHAs a human explicitly linked via a
+    # /<owner>/<repo>/commit/<sha> URL. Collecting these before any bare hex run
+    # guarantees a genuinely-cited fix commit is verified even when earlier
+    # comments are dense with hex noise (Lark chat/message ids, triage run_id UUID
+    # fragments, numeric comment ids). The URL names the repo, so verify only
+    # against that repo when it is on the allowlist.
     for comment in comments:
         for match in _COMMIT_URL_RE.finditer(comment.body or ""):
-            _collect(match.group("sha"))
+            url_repo = allowed.get(match.group("repo").lower())
+            if url_repo:
+                _collect(match.group("sha"), (url_repo,))
     # Fallback: bare hex runs (a dev who writes "Fixed in <sha>" without a link).
+    # No repo hint, so try each allowed repo (this repo first).
     for comment in comments:
         for match in _COMMIT_SHA_RE.findall(comment.body or ""):
-            _collect(match)
-    for sha in candidates:
-        if github.commit_exists(repo=repo, sha=sha):
-            return f"commit {sha} (cited in a comment)"
+            _collect(match, verify_order)
+    for sha, repos in candidates:
+        for candidate_repo in repos:
+            if github.commit_exists(repo=candidate_repo, sha=sha):
+                suffix = "" if candidate_repo == repo else f" in {candidate_repo}"
+                return f"commit {sha}{suffix} (cited in a comment)"
     return ""
 
 

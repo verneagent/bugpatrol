@@ -56,6 +56,7 @@ class FakeGithub:
         issue: GitHubIssue,
         timeline: tuple[dict, ...] = (),
         known_commits: tuple[str, ...] = (),
+        repo_commits: dict[str, tuple[str, ...]] | None = None,
         merged_prs: tuple[str, ...] = (),
         branch_commits: dict[str, tuple[tuple[str, str], ...]] | None = None,
     ) -> None:
@@ -63,7 +64,13 @@ class FakeGithub:
         self.timeline = timeline
         self.comments: list[str] = []
         self.reopened = False
+        # SHAs that resolve in ANY repo (repo-agnostic).
         self.known_commits = {sha.lower() for sha in known_commits}
+        # repo -> SHAs that resolve only in that repo (cross-repo evidence).
+        self.repo_commits = {
+            repo: {sha.lower() for sha in shas}
+            for repo, shas in (repo_commits or {}).items()
+        }
         # entries are "owner/repo#number"
         self.merged_prs = {ref.lower() for ref in merged_prs}
         # branch -> ((sha, message), ...) newest-first
@@ -73,7 +80,10 @@ class FakeGithub:
         return self.issue
 
     def commit_exists(self, *, repo: str, sha: str) -> bool:
-        return sha.lower() in self.known_commits
+        sha = sha.lower()
+        if sha in self.known_commits:
+            return True
+        return sha in self.repo_commits.get(repo, set())
 
     def pull_request_merged(self, *, repo: str, number: int) -> bool:
         return f"{repo}#{number}".lower() in self.merged_prs
@@ -564,6 +574,77 @@ class CloseAuditTest(unittest.TestCase):
             merged_prs=("SomeOther/repo#5",),
         )
         github.comments.append("see SomeOther/repo#5")
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="TheCloverLab/fived", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertTrue(summary.nagged)
+        self.assertEqual(summary.evidence, "")
+
+    def test_cross_repo_commit_url_cited_in_comment_counts_as_evidence(self) -> None:
+        # A weaver backend fix cited as a /TheCloverLab/weaver/commit/<sha> URL.
+        # It does not resolve in fived but does in the reference repo weaver, so
+        # verifying against that URL's repo must count it as evidence.
+        sha = "9f3c1ab7e2"
+        config = self._weaver_config()
+        github = FakeGithub(
+            issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)),
+            repo_commits={"TheCloverLab/weaver": (sha,)},
+        )
+        github.comments.append(
+            f"Server 端修复：https://github.com/TheCloverLab/weaver/commit/{sha}"
+        )
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="TheCloverLab/fived", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertFalse(summary.nagged)
+        self.assertEqual(summary.kind, "closed_completed")
+        self.assertEqual(
+            summary.evidence,
+            f"commit {sha} in TheCloverLab/weaver (cited in a comment)",
+        )
+        self.assertTrue(summary.notified)
+
+    def test_cross_repo_bare_sha_cited_in_comment_counts_as_evidence(self) -> None:
+        # A weaver SHA pasted bare ("Fixed in <sha>"), no repo hint. It resolves
+        # in the reference repo weaver (not fived), so trying each allowed repo
+        # must find it.
+        sha = "abc12345"
+        config = self._weaver_config()
+        github = FakeGithub(
+            issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)),
+            repo_commits={"TheCloverLab/weaver": (sha,)},
+        )
+        github.comments.append(f"后端已修复，commit {sha}")
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="TheCloverLab/fived", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertFalse(summary.nagged)
+        self.assertEqual(
+            summary.evidence,
+            f"commit {sha} in TheCloverLab/weaver (cited in a comment)",
+        )
+
+    def test_commit_in_unlisted_repo_url_is_not_evidence(self) -> None:
+        # A /commit/<sha> URL pointing at a repo that is neither this repo nor a
+        # reference repo is ignored even if that SHA would resolve there.
+        sha = "deadc0de1"
+        config = self._weaver_config()
+        github = FakeGithub(
+            issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)),
+            repo_commits={"SomeOther/repo": (sha,)},
+        )
+        github.comments.append(
+            f"see https://github.com/SomeOther/repo/commit/{sha}"
+        )
         lark = FakeLarkMessengerClient()
 
         summary = audit_issue_close(
