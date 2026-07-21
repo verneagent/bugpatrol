@@ -33,6 +33,7 @@ from bugpatrol.intake import (
     require_bugpatrol_managed_issue,
     target_branch_from_metadata,
 )
+from bugpatrol.fix_gate import strip_ansi
 from bugpatrol.ownership import load_codeowners, load_codeowners_identities
 from bugpatrol.worktree import (
     BranchResolution,
@@ -327,6 +328,10 @@ def execute_triage_run(
             github=github,
             issue_fields=issue_fields,
             lark=lark,
+            reason=agent_failure_reason(
+                f"The triage agent exited with code `{completed.returncode}`.",
+                stderr=completed.stderr,
+            ),
         )
         raise RuntimeError(f"triage agent failed with exit {completed.returncode}")
     denial = detect_sandbox_denial(completed.stdout or "")
@@ -356,6 +361,10 @@ def execute_triage_run(
             github=github,
             issue_fields=issue_fields,
             lark=lark,
+            reason=agent_failure_reason(
+                "The triage agent exited 0 but wrote no output file.",
+                stderr=completed.stderr,
+            ),
         )
         raise RuntimeError("triage agent exited 0 but produced no output file")
     try:
@@ -557,6 +566,34 @@ def annotate_result_stale_context(result: TriageResult) -> TriageResult:
         ]
     )
     return replace(result, comment_markdown=comment)
+
+
+def _bounded_log_tail(text: str | None, *, max_lines: int = 25, max_chars: int = 1500) -> str:
+    """ANSI-stripped tail of an agent log, bounded for a comment / Lark message."""
+    if not text:
+        return ""
+    lines = strip_ansi(text).rstrip().splitlines()
+    tail = "\n".join(lines[-max_lines:])
+    if len(tail) > max_chars:
+        tail = tail[-max_chars:]
+    return tail
+
+
+def agent_failure_reason(headline: str, *, stderr: str | None) -> str:
+    """Build a failure reason that surfaces the agent's real stderr.
+
+    Without this the failure comment is just "exited with code 1", which forces
+    an operator to SSH into whichever runner ran the job and read
+    ``agent-stderr.log``. The captured stderr (bounded, de-ANSI'd) is the
+    actionable detail — put it in the issue comment and the Lark ping directly.
+    """
+    tail = _bounded_log_tail(stderr)
+    if tail:
+        return f"{headline}\n\nAgent stderr (tail):\n```\n{tail}\n```"
+    return (
+        f"{headline} No agent stderr was captured; check the runner logs, "
+        "credentials, prompt/schema files, and repository checkout."
+    )
 
 
 def render_triage_failed_comment(*, exit_code: int, reason: str = "") -> str:

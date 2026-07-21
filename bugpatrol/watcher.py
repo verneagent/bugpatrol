@@ -39,6 +39,13 @@ from bugpatrol.triage_queue import CommandTriageDispatcher, TriageRequest, Triag
 # crashes (surfacing a persistent outage to launchd/operators).
 MAX_CONSECUTIVE_SCAN_FAILURES = 10
 
+# Consecutive polls where a topic keeps failing (e.g. the fived-assets push 403
+# that silently retried forever, dropping issues) before we ping Lark once. A
+# failed topic is never ledgered, so it re-processes every poll; without this an
+# outage is invisible until someone notices missing issues. No-Silent-Failures:
+# admit the repeated failure instead of retrying quietly.
+TOPIC_FAILURE_ALERT_THRESHOLD = 3
+
 
 @dataclass(frozen=True)
 class WatchResult:
@@ -105,6 +112,7 @@ def run_polling_watcher(
     parallel_topics: int = 1,
     branch_tip_resolver: BranchTipResolver | None = None,
     slash_handler: SlashCommandHandler | None = None,
+    topic_failure_alert_threshold: int = TOPIC_FAILURE_ALERT_THRESHOLD,
 ) -> WatchResult:
     if event_log is not None and event_log_path is not None:
         raise ValueError("event_log and event_log_path are mutually exclusive")
@@ -146,6 +154,8 @@ def run_polling_watcher(
     try:
         with ThreadPoolExecutor(max_workers=parallel_topics) as executor:
             consecutive_scan_failures = 0
+            consecutive_topic_failures = 0
+            topic_outage_alerted = False
             while True:
                 iterations += 1
                 try:
@@ -210,6 +220,26 @@ def run_polling_watcher(
                             ledger.mark_processed(message_id)
                     iteration_events.extend(result.events)
                     iteration_outcomes.extend(result.outcomes)
+                errored_results = [result for result in results if result.error]
+                if results:
+                    if errored_results:
+                        consecutive_topic_failures += 1
+                        if (
+                            consecutive_topic_failures >= topic_failure_alert_threshold
+                            and not topic_outage_alerted
+                            and not dry_run
+                        ):
+                            _alert_topic_outage(
+                                lark=lark,
+                                config=config,
+                                errored_results=errored_results,
+                                consecutive_iterations=consecutive_topic_failures,
+                                logger=logger,
+                            )
+                            topic_outage_alerted = True
+                    else:
+                        consecutive_topic_failures = 0
+                        topic_outage_alerted = False
                 iteration_skipped = sum(1 for event in iteration_events if event.action == "skipped")
                 scanned += scan.scanned
                 processed += len(iteration_outcomes)
@@ -361,3 +391,48 @@ def dispatch_due_triage(
         queue.mark_dispatched(request)
         dispatched += 1
     return dispatched
+
+
+def render_topic_outage_alert(
+    *,
+    errored_results: Sequence[TopicResult],
+    consecutive_iterations: int,
+    max_topics: int = 5,
+) -> str:
+    lines = [
+        f"⚠️ BugPatrol 连续 {consecutive_iterations} 轮处理话题失败：这些消息未能建成 "
+        "GitHub issue，watcher 正在自动重试。请检查 watcher 日志与凭据/网络：",
+    ]
+    for result in errored_results[:max_topics]:
+        lines.append(f"· `{result.root_key}` — {result.error}")
+    remaining = len(errored_results) - max_topics
+    if remaining > 0:
+        lines.append(f"…以及另外 {remaining} 个话题")
+    return "\n".join(lines)
+
+
+def _alert_topic_outage(
+    *,
+    lark: LarkOpenApiMessengerClient,
+    config: ProjectConfig,
+    errored_results: Sequence[TopicResult],
+    consecutive_iterations: int,
+    logger: JsonlEventLog | None,
+) -> None:
+    text = render_topic_outage_alert(
+        errored_results=errored_results,
+        consecutive_iterations=consecutive_iterations,
+    )
+    try:
+        lark.send_chat_message(chat_id=config.lark.chat_id, text=text)
+    except Exception as error:  # noqa: BLE001 — alerting must never crash the watcher
+        # Best-effort: log so the failed alert is visible, but keep polling.
+        print(f"watch-lark: failed to send topic-outage alert: {error}", file=sys.stderr)
+    if logger is not None:
+        logger.write(
+            {
+                "event": "watch_topic_outage_alert",
+                "consecutive_iterations": consecutive_iterations,
+                "failing_topics": [result.root_key for result in errored_results],
+            }
+        )

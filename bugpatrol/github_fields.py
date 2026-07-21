@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import FieldSpec
+from bugpatrol.gh_transient import is_transient_gh_error
 
 GITHUB_API_VERSION = "2026-03-10"
 
@@ -27,8 +29,18 @@ class IssueField:
 
 
 class GitHubIssueFieldsClient:
-    def __init__(self, *, gh: str = "gh") -> None:
+    def __init__(
+        self,
+        *,
+        gh: str = "gh",
+        transient_retries: int = 3,
+        retry_backoff_seconds: float = 2.0,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self._gh = gh
+        self._transient_retries = transient_retries
+        self._retry_backoff_seconds = retry_backoff_seconds
+        self._sleep = sleep
 
     def list_org_fields(self, *, org: str) -> dict[str, IssueField]:
         data = json.loads(
@@ -100,24 +112,34 @@ class GitHubIssueFieldsClient:
         return values
 
     def _run_api(self, args: Sequence[str], *, stdin: str | None = None) -> str:
-        completed = subprocess.run(
-            [self._gh, "api", *args],
-            input=stdin,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if completed.returncode != 0:
+        # Bounded retry on transient gateway/transport blips (e.g. a
+        # `net/http: TLS handshake timeout` mid-poll) so a single flaky call
+        # doesn't crash the whole watcher. GET reads are idempotent; the one
+        # mutation (add_issue_field_values POST) is a set-to-value upsert, so
+        # re-applying the same values is a no-op — safe to retry.
+        for attempt in range(1, self._transient_retries + 1):
+            completed = subprocess.run(
+                [self._gh, "api", *args],
+                input=stdin,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if completed.returncode == 0:
+                return completed.stdout
             stderr = completed.stderr.strip()
             if "Not Found" in stderr and "/issue-fields" in " ".join(args):
                 raise GitHubIssueFieldsError(
                     "GitHub Issue Fields are only available for organization-owned repositories "
                     "with Issue Fields enabled."
                 )
+            if attempt < self._transient_retries and is_transient_gh_error(stderr):
+                self._sleep(self._retry_backoff_seconds * attempt)
+                continue
             raise GitHubIssueFieldsError(
                 f"gh api {' '.join(args)} failed with exit {completed.returncode}: {stderr}"
             )
-        return completed.stdout
+        raise AssertionError("unreachable")  # loop always returns or raises
 
 
 def build_issue_field_values_payload(

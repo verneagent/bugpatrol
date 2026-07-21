@@ -258,6 +258,45 @@ class TriageRunnerTest(unittest.TestCase):
         self.assertEqual(issue_fields.writes[1]["values"], {"Triage status": "Failed"})
         self.assertIn("exited with code `42`", github.comments[-1])
 
+    def test_execute_triage_run_surfaces_agent_stderr_on_failure(self) -> None:
+        # The generic "exited with code N" gave zero clue why #4140 failed (a
+        # runner-side github.com TLS timeout + keychain auth failure). Surface a
+        # bounded, ANSI-stripped stderr tail in both the GitHub comment and Lark.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        stderr = (
+            "\x1b[31mfatal: unable to access 'https://github.com/...': "
+            "Failed to connect to github.com port 443 after 75002 ms\x1b[0m\n"
+            "remote: Authentication failed"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=root / "output.json",
+                invocation=AgentInvocation(provider="codex", command=["false"]),
+            )
+
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["false"], 1, "", stderr)
+                with self.assertRaisesRegex(RuntimeError, "exit 1"):
+                    execute_triage_run(
+                        config=config,
+                        issue_number=4140,
+                        plan=plan,
+                        github=github,  # type: ignore[arg-type]
+                        issue_fields=issue_fields,  # type: ignore[arg-type]
+                    )
+
+        comment = github.comments[-1]
+        self.assertIn("Agent stderr (tail):", comment)
+        self.assertIn("Authentication failed", comment)
+        self.assertIn("Failed to connect to github.com", comment)
+        # ANSI escapes are stripped before surfacing.
+        self.assertNotIn("\x1b[", comment)
+
     def test_execute_triage_run_rejects_unmanaged_issue_before_writes(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGithub(issue_body="legacy issue")

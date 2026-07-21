@@ -14,7 +14,12 @@ from bugpatrol.lease import FileLease, LeaseHeldError
 from bugpatrol.lark import LarkMessage, LarkOpenApiError
 from bugpatrol.testing.fakes import FakeGitHubIssuesClient, FakeLarkMessengerClient
 from bugpatrol.triage_queue import TriageRequest, TriageRequestQueue
-from bugpatrol.watcher import MAX_CONSECUTIVE_SCAN_FAILURES, dispatch_due_triage, run_polling_watcher
+from bugpatrol.watcher import (
+    MAX_CONSECUTIVE_SCAN_FAILURES,
+    dispatch_due_triage,
+    render_topic_outage_alert,
+    run_polling_watcher,
+)
 
 
 MAIN_CHAT_ID = "oc_d371f022f168b567a141ced142691894"
@@ -156,6 +161,112 @@ class WatcherTest(unittest.TestCase):
         self.assertIs(process.call_args.kwargs["store"], store)
         self.assertIs(process.call_args.kwargs["resource_describer"], describer)
         self.assertIs(process.call_args.kwargs["resource_transformer"], transformer)
+
+    def test_run_polling_watcher_alerts_lark_after_repeated_topic_failures(self) -> None:
+        # A topic that keeps failing (e.g. the fived-assets push 403) is never
+        # ledgered, so it silently re-processes every poll. After the threshold
+        # the watcher must ping Lark once instead of retrying quietly forever.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeHistoryLark()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        errored = TopicResult(
+            root_key="om_1",
+            outcomes=(),
+            events=(BackfillEvent(message_id="om_1", action="error", reason="push 403"),),
+            processed_message_ids=(),
+            error="GitHubCliError: fived-assets push failed with 403",
+        )
+        # Patch the harvest step so each poll yields the failing topic
+        # deterministically (real futures complete across polls, not within one).
+        with patch("bugpatrol.watcher._harvest_topic_results", return_value=[errored]):
+            run_polling_watcher(
+                config=config,
+                lark=lark,  # type: ignore[arg-type]
+                workflow=workflow,
+                max_iterations=3,
+                interval_seconds=0,
+                topic_failure_alert_threshold=3,
+            )
+
+        # Exactly one alert for the whole outage, sent to the main chat.
+        self.assertEqual(len(lark.chat_messages), 1)
+        alert = lark.chat_messages[0]
+        self.assertEqual(alert.chat_id, MAIN_CHAT_ID)
+        self.assertIn("fived-assets push failed with 403", alert.text)
+        self.assertIn("om_1", alert.text)
+
+    def test_run_polling_watcher_resets_topic_alert_after_recovery(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeHistoryLark()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        errored = TopicResult(
+            root_key="om_1",
+            outcomes=(),
+            events=(BackfillEvent(message_id="om_1", action="error", reason="boom"),),
+            processed_message_ids=(),
+            error="boom",
+        )
+        healthy = TopicResult(
+            root_key="om_1",
+            outcomes=(),
+            events=(BackfillEvent(message_id="om_1", action="processed", reason=""),),
+            processed_message_ids=("om_1",),
+        )
+        # fail x3 (alert once) -> recover (reset) -> fail x3 (alert again).
+        harvests = [[errored], [errored], [errored], [healthy], [errored], [errored], [errored]]
+        with patch("bugpatrol.watcher._harvest_topic_results", side_effect=harvests):
+            run_polling_watcher(
+                config=config,
+                lark=lark,  # type: ignore[arg-type]
+                workflow=workflow,
+                max_iterations=len(harvests),
+                interval_seconds=0,
+                topic_failure_alert_threshold=3,
+            )
+
+        self.assertEqual(len(lark.chat_messages), 2)
+
+    def test_run_polling_watcher_does_not_alert_in_dry_run(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeHistoryLark()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        errored = TopicResult(
+            root_key="om_1",
+            outcomes=(),
+            events=(BackfillEvent(message_id="om_1", action="error", reason="boom"),),
+            processed_message_ids=(),
+            error="boom",
+        )
+        with patch("bugpatrol.watcher._harvest_topic_results", return_value=[errored]):
+            run_polling_watcher(
+                config=config,
+                lark=lark,  # type: ignore[arg-type]
+                workflow=workflow,
+                max_iterations=5,
+                interval_seconds=0,
+                dry_run=True,
+                topic_failure_alert_threshold=3,
+            )
+
+        self.assertEqual(lark.chat_messages, [])
+
+    def test_render_topic_outage_alert_truncates_topic_list(self) -> None:
+        results = tuple(
+            TopicResult(root_key=f"om_{i}", outcomes=(), events=(), processed_message_ids=(), error=f"err{i}")
+            for i in range(8)
+        )
+        text = render_topic_outage_alert(errored_results=results, consecutive_iterations=4, max_topics=5)
+        self.assertIn("连续 4 轮", text)
+        self.assertIn("om_0", text)
+        self.assertIn("om_4", text)
+        self.assertNotIn("om_5", text)
+        self.assertIn("另外 3 个", text)
 
     def test_run_polling_watcher_can_enqueue_and_dispatch_triage(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

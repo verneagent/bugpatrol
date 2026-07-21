@@ -144,6 +144,54 @@ class GitHubIssueFieldsTest(unittest.TestCase):
         )
 
 
+class GitHubIssueFieldsRetryTest(unittest.TestCase):
+    def test_retries_transient_tls_timeout_then_succeeds(self) -> None:
+        # The TLS handshake timeout that crashed the watcher mid-poll (a
+        # `get_issue_field_values` in `triage_status`) must retry, not raise.
+        client = GitHubIssueFieldsClient(sleep=lambda _s: None)
+        tls = 'Get "https://api.github.com/...": net/http: TLS handshake timeout'
+
+        with patch("subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh"], 1, "", tls),
+                subprocess.CompletedProcess(["gh"], 0, "[]", ""),
+            ]
+            values = client.get_issue_field_values(repo="o/r", issue_number=4057)
+
+        self.assertEqual(values, {})
+        self.assertEqual(run.call_count, 2)
+
+    def test_does_not_retry_non_transient_error(self) -> None:
+        client = GitHubIssueFieldsClient(sleep=lambda _s: None)
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 1, "", "bad auth")
+            with self.assertRaisesRegex(GitHubIssueFieldsError, "bad auth"):
+                client.get_issue_field_values(repo="o/r", issue_number=1)
+        run.assert_called_once()
+
+    def test_raises_after_exhausting_transient_retries(self) -> None:
+        client = GitHubIssueFieldsClient(transient_retries=3, sleep=lambda _s: None)
+        tls = "net/http: TLS handshake timeout"
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 1, "", tls)
+            with self.assertRaisesRegex(GitHubIssueFieldsError, "TLS handshake timeout"):
+                client.get_issue_field_values(repo="o/r", issue_number=1)
+        self.assertEqual(run.call_count, 3)
+
+    def test_missing_issue_fields_error_is_not_retried(self) -> None:
+        # A repo without Issue Fields enabled fails deterministically; retrying
+        # would only delay the actionable error.
+        client = GitHubIssueFieldsClient(transient_retries=3, sleep=lambda _s: None)
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 1, "", "Not Found")
+            with self.assertRaisesRegex(GitHubIssueFieldsError, "organization-owned"):
+                client.list_org_fields(org="o")
+        run.assert_called_once()
+
+
 class FieldOptionDriftTest(unittest.TestCase):
     def _live(self, name: str, options: tuple[str, ...], data_type: str = "single_select") -> dict[str, IssueField]:
         return {name: IssueField(id=1, name=name, data_type=data_type, options=options)}

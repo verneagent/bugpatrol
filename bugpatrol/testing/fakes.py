@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment, GitHubPullRequest
+from bugpatrol.lark import SentLarkMessage
 
 
 @dataclass
@@ -139,9 +140,20 @@ class LarkReply:
     text: str
 
 
+@dataclass(frozen=True)
+class LarkChatMessage:
+    chat_id: str
+    text: str
+
+
 class FakeLarkMessengerClient:
     def __init__(self) -> None:
         self.replies: list[LarkReply] = []
+        self.chat_messages: list[LarkChatMessage] = []
 
     def reply_to_message(self, *, chat_id: str, message_id: str, text: str) -> None:
         self.replies.append(LarkReply(chat_id=chat_id, message_id=message_id, text=text))
+
+    def send_chat_message(self, *, chat_id: str, text: str) -> SentLarkMessage:
+        self.chat_messages.append(LarkChatMessage(chat_id=chat_id, text=text))
+        return SentLarkMessage(message_id=f"om_sent_{len(self.chat_messages)}")
