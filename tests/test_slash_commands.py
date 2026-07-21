@@ -42,6 +42,7 @@ class _StubIssueClient:
         self._issue = issue
         self.assigned: list[tuple[int, str]] = []
         self.reopened: list[int] = []
+        self.comments: list[tuple[int, str]] = []
 
     def find_issue_by_intake_root(
         self, *, repo: str, chat_id: str, root_id: str
@@ -53,6 +54,9 @@ class _StubIssueClient:
 
     def set_assignee(self, *, repo: str, issue_number: int, assignee: str) -> None:
         self.assigned.append((issue_number, assignee))
+
+    def add_issue_comment(self, *, repo: str, issue_number: int, body: str) -> None:
+        self.comments.append((issue_number, body))
 
 
 class _StubReplyClient:
@@ -83,8 +87,11 @@ class ParseSlashCommandTest(unittest.TestCase):
     def test_fix_with_trailing_whitespace(self) -> None:
         self.assertEqual(parse_slash_command("  /fix  "), SlashCommand(kind="fix"))
 
-    def test_fix_with_arg_is_not_a_command(self) -> None:
-        self.assertIsNone(parse_slash_command("/fix now"))
+    def test_fix_with_trailing_text_is_captured_as_body(self) -> None:
+        self.assertEqual(
+            parse_slash_command("/fix keep the delete button single"),
+            SlashCommand(kind="fix", body="keep the delete button single"),
+        )
 
     def test_fix_mentioned_in_sentence_is_not_a_command(self) -> None:
         self.assertIsNone(parse_slash_command("please run /fix on this"))
@@ -95,8 +102,11 @@ class ParseSlashCommandTest(unittest.TestCase):
     def test_retriage_case_insensitive(self) -> None:
         self.assertEqual(parse_slash_command("  /RETRIAGE  "), SlashCommand(kind="retriage"))
 
-    def test_retriage_with_arg_is_not_a_command(self) -> None:
-        self.assertIsNone(parse_slash_command("/retriage now"))
+    def test_retriage_with_trailing_text_is_captured_as_body(self) -> None:
+        self.assertEqual(
+            parse_slash_command("/retriage repro is intermittent"),
+            SlashCommand(kind="retriage", body="repro is intermittent"),
+        )
 
     def test_reopen_exact(self) -> None:
         self.assertEqual(parse_slash_command("/reopen"), SlashCommand(kind="reopen"))
@@ -104,8 +114,11 @@ class ParseSlashCommandTest(unittest.TestCase):
     def test_reopen_case_insensitive(self) -> None:
         self.assertEqual(parse_slash_command("  /REOPEN  "), SlashCommand(kind="reopen"))
 
-    def test_reopen_with_arg_is_not_a_command(self) -> None:
-        self.assertIsNone(parse_slash_command("/reopen now"))
+    def test_reopen_with_trailing_text_is_captured_as_body(self) -> None:
+        self.assertEqual(
+            parse_slash_command("/reopen the delete button still shows twice"),
+            SlashCommand(kind="reopen", body="the delete button still shows twice"),
+        )
 
     def test_assign_with_target(self) -> None:
         self.assertEqual(
@@ -296,6 +309,72 @@ class SlashCommandHandlerTest(unittest.TestCase):
         self.assertEqual(result.reason, "slash_reopen_unconfigured")
         self.assertEqual(github.reopened, [])
         self.assertIn("未配置", lark.replies[0])
+
+    def test_reopen_with_body_records_reporter_input(self) -> None:
+        calls: list[int] = []
+        github = _StubIssueClient(_issue(42, state="closed"))
+        lark = _StubReplyClient()
+        handler = SlashCommandHandler(
+            config=_config(), github=github, lark=lark, retriage_dispatch=calls.append
+        )
+        result = handler.handle(
+            _message(text="/reopen 每次左滑会把上一次的 Cancel 掉")
+        )
+        assert result is not None
+        self.assertEqual(result.reason, "slash_reopen")
+        self.assertEqual(github.reopened, [42])
+        self.assertEqual(calls, [42])
+        self.assertEqual(len(github.comments), 1)
+        issue_number, body = github.comments[0]
+        self.assertEqual(issue_number, 42)
+        self.assertIn("每次左滑会把上一次的 Cancel 掉", body)
+
+    def test_fix_with_body_records_reporter_input(self) -> None:
+        github = _StubIssueClient(_issue(42))
+        lark = _StubReplyClient()
+        handler = SlashCommandHandler(
+            config=_config(), github=github, lark=lark, fix_dispatch=lambda n: None
+        )
+        result = handler.handle(_message(text="/fix 保持删除按钮唯一"))
+        assert result is not None
+        self.assertEqual(result.reason, "slash_fix")
+        self.assertEqual(len(github.comments), 1)
+        self.assertIn("保持删除按钮唯一", github.comments[0][1])
+
+    def test_retriage_with_body_records_reporter_input(self) -> None:
+        github = _StubIssueClient(_issue(42))
+        lark = _StubReplyClient()
+        handler = SlashCommandHandler(
+            config=_config(), github=github, lark=lark, retriage_dispatch=lambda n: None
+        )
+        result = handler.handle(_message(text="/retriage 滚动也应该取消左滑"))
+        assert result is not None
+        self.assertEqual(result.reason, "slash_retriage")
+        self.assertEqual(len(github.comments), 1)
+        self.assertIn("滚动也应该取消左滑", github.comments[0][1])
+
+    def test_bare_command_records_no_reporter_input(self) -> None:
+        github = _StubIssueClient(_issue(42))
+        lark = _StubReplyClient()
+        handler = SlashCommandHandler(
+            config=_config(), github=github, lark=lark, fix_dispatch=lambda n: None
+        )
+        handler.handle(_message(text="/fix"))
+        self.assertEqual(github.comments, [])
+
+    def test_assign_on_closed_issue_does_not_assign(self) -> None:
+        github = _StubIssueClient(_issue(42, state="closed"))
+        lark = _StubReplyClient()
+        handler = SlashCommandHandler(
+            config=_config({"naohn42": "ou_naohn"}), github=github, lark=lark
+        )
+        message = _message(text="/assign @_user_1", mention_open_ids=("ou_naohn",))
+        result = handler.handle(message)
+        assert result is not None
+        self.assertEqual(result.reason, "slash_assign_closed")
+        self.assertEqual(github.assigned, [])
+        self.assertIn("已关闭", lark.replies[0])
+        self.assertIn("reopen", lark.replies[0])
 
     def test_no_issue_reports(self) -> None:
         github = _StubIssueClient(None)

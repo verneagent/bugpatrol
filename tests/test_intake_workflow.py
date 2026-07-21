@@ -141,6 +141,34 @@ class IntakeWorkflowTest(unittest.TestCase):
         self.assertEqual(len(lark.replies), 2)
         self.assertIn("已追加到 GitHub issue [#1](", lark.replies[1].text)
 
+    def test_followup_on_closed_issue_is_ignored(self) -> None:
+        # A closed issue is a decided issue: a plain reporter reply must not
+        # append a comment or re-enqueue triage. Only /reopen (handled before
+        # intake) un-closes it. The reporter gets one "already closed" notice.
+        from dataclasses import replace
+
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        workflow.process(make_record(message_id="om_first", original_text="首次上报"))
+        github.created[0].issue = replace(github.created[0].issue, state="closed")
+
+        outcome = workflow.process(
+            make_record(message_id="om_second", original_text="补充：还是有问题")
+        )
+
+        self.assertEqual(outcome.action, "ignored_closed")
+        self.assertFalse(outcome.triage_signal.should_enqueue)
+        self.assertEqual(outcome.triage_signal.reason, "issue_closed")
+        # No follow-up comment appended.
+        self.assertEqual(len(github.created[0].comments), 0)
+        # Exactly one extra Lark reply (the create receipt + the closed notice).
+        self.assertEqual(len(lark.replies), 2)
+        self.assertIn("已关闭", lark.replies[1].text)
+        self.assertIn("/reopen", lark.replies[1].text)
+
     def test_followup_reply_meta_records_material_signal_reason(self) -> None:
         # A later fix-revise reads signal_reason to tell a material correction
         # apart from an ack without re-parsing the text.

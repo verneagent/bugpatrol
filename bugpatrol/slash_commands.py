@@ -4,8 +4,10 @@ These bypass the LLM triage path entirely: a reply in an existing bug topic
 that starts with a known slash command is executed literally. `/fix` dispatches
 the fix workflow for the topic's issue; `/retriage` re-dispatches the triage
 workflow for it; `/reopen` reopens a closed issue and re-dispatches triage;
-`/assign <who>` sets the GitHub issue assignee. Anything that is not an exact
-slash command is left untouched so it flows into normal intake/triage.
+`/assign <who>` sets the GitHub issue assignee. Text typed after `/fix`,
+`/retriage` or `/reopen` on the same line is captured and recorded as reporter
+input so the dispatched workflow reads it. Anything that is not a slash command
+is left untouched so it flows into normal intake/triage.
 """
 
 from __future__ import annotations
@@ -18,6 +20,8 @@ from typing import Callable, Protocol, Sequence
 
 from bugpatrol.clients import GitHubIssue
 from bugpatrol.config import ProjectConfig
+from bugpatrol.intake import IntakeRecord
+from bugpatrol.intake_workflow import render_followup_comment
 from bugpatrol.lark import LarkMessage, is_message_withdrawn_error
 
 FIX_COMMAND = "/fix"
@@ -30,6 +34,7 @@ ASSIGN_COMMAND = "/assign"
 class SlashCommand:
     kind: str  # "fix" | "retriage" | "reopen" | "assign"
     target: str = ""  # raw assignee text for /assign
+    body: str = ""  # text typed after /fix, /retriage, /reopen (reporter input)
 
     def render(self) -> str:
         if self.kind == "assign":
@@ -52,9 +57,11 @@ def parse_slash_command(text: str | None) -> SlashCommand | None:
     """Parse an exact slash command; return None for anything else.
 
     Deterministic on purpose — no natural-language matching. The command must be
-    the FIRST whitespace-delimited token. `/fix` takes no arguments; `/assign`
-    requires an assignee argument. A message that merely mentions `/fix` inside a
-    sentence does not trigger.
+    the FIRST whitespace-delimited token; a message that merely mentions `/fix`
+    inside a sentence ("can you /fix this") does not trigger. Text after the
+    command token is captured as `body` for `/fix`/`/retriage`/`/reopen` (extra
+    detail the reporter typed, fed to the dispatched workflow as input) and as the
+    required `target` for `/assign`.
     """
     if not text:
         return None
@@ -63,20 +70,15 @@ def parse_slash_command(text: str | None) -> SlashCommand | None:
         return None
     tokens = stripped.split()
     head = tokens[0].lower()
+    rest = stripped[len(tokens[0]):].strip()
     if head == FIX_COMMAND:
-        if len(tokens) != 1:
-            return None
-        return SlashCommand(kind="fix")
+        return SlashCommand(kind="fix", body=rest)
     if head == RETRIAGE_COMMAND:
-        if len(tokens) != 1:
-            return None
-        return SlashCommand(kind="retriage")
+        return SlashCommand(kind="retriage", body=rest)
     if head == REOPEN_COMMAND:
-        if len(tokens) != 1:
-            return None
-        return SlashCommand(kind="reopen")
+        return SlashCommand(kind="reopen", body=rest)
     if head == ASSIGN_COMMAND:
-        target = stripped[len(tokens[0]):].strip()
+        target = rest
         if not target:
             return None
         return SlashCommand(kind="assign", target=target)
@@ -118,6 +120,8 @@ class _IssueLookupClient(Protocol):
     def reopen_issue(self, *, repo: str, issue_number: int) -> None: ...
 
     def set_assignee(self, *, repo: str, issue_number: int, assignee: str) -> None: ...
+
+    def add_issue_comment(self, *, repo: str, issue_number: int, body: str) -> None: ...
 
 
 class _ReplyClient(Protocol):
@@ -198,14 +202,49 @@ class SlashCommandHandler:
             self._reply(message, f"⚠️ 本话题还没有对应的 issue，无法执行 `{command.render()}`")
             return SlashResult(command=command.kind, issue_number=None, reason="slash_no_issue")
         if command.kind == "fix":
-            return self._handle_fix(message, issue)
+            return self._handle_fix(message, issue, command)
         if command.kind == "retriage":
-            return self._handle_retriage(message, issue)
+            return self._handle_retriage(message, issue, command)
         if command.kind == "reopen":
-            return self._handle_reopen(message, issue)
+            return self._handle_reopen(message, issue, command)
         return self._handle_assign(message, issue, command)
 
-    def _handle_fix(self, message: LarkMessage, issue: GitHubIssue) -> SlashResult:
+    def _record_reporter_input(
+        self, message: LarkMessage, issue: GitHubIssue, body: str
+    ) -> None:
+        """Persist text typed after the command as a reporter follow-up comment.
+
+        A reopen/retriage/fix often carries new detail ("/reopen the delete
+        button shows twice ...") that must reach the triage or fix agent.
+        Recording it as a `material_followup` comment -- the same shape intake
+        writes -- means the dispatched workflow reads it as reporter input, and a
+        later fix-revise recognizes it as a material correction. Idempotent by
+        message_id via the intake reply meta, so a re-scan never double-appends.
+        """
+        text = body.strip()
+        if not text:
+            return
+        record = IntakeRecord(
+            reporter_name=message.sender_open_id or "Lark reporter",
+            reporter_open_id=message.sender_open_id,
+            created_at=message.create_time,
+            chat_id=message.chat_id,
+            root_id=message.root_id,
+            message_id=message.message_id,
+            original_text=text,
+        )
+        comment = render_followup_comment(
+            record,
+            language=self._config.intake.language,
+            signal_reason="material_followup",
+        )
+        self._github.add_issue_comment(
+            repo=self._config.github_repo, issue_number=issue.number, body=comment
+        )
+
+    def _handle_fix(
+        self, message: LarkMessage, issue: GitHubIssue, command: SlashCommand
+    ) -> SlashResult:
         if issue.state == "closed":
             self._reply(
                 message,
@@ -216,6 +255,7 @@ class SlashCommandHandler:
         if self._fix_dispatch is None:
             self._reply(message, "⚠️ 未配置修复触发命令，无法从 Lark 启动修复")
             return SlashResult(command="fix", issue_number=issue.number, reason="slash_fix_unconfigured")
+        self._record_reporter_input(message, issue, command.body)
         self._fix_dispatch(issue.number)
         self._reply(
             message,
@@ -223,7 +263,9 @@ class SlashCommandHandler:
         )
         return SlashResult(command="fix", issue_number=issue.number, reason="slash_fix")
 
-    def _handle_retriage(self, message: LarkMessage, issue: GitHubIssue) -> SlashResult:
+    def _handle_retriage(
+        self, message: LarkMessage, issue: GitHubIssue, command: SlashCommand
+    ) -> SlashResult:
         if issue.state == "closed":
             self._reply(
                 message,
@@ -236,11 +278,14 @@ class SlashCommandHandler:
             return SlashResult(
                 command="retriage", issue_number=issue.number, reason="slash_retriage_unconfigured"
             )
+        self._record_reporter_input(message, issue, command.body)
         self._retriage_dispatch(issue.number)
         self._reply(message, f"🔁 已重新触发分诊 [#{issue.number}]({issue.url})")
         return SlashResult(command="retriage", issue_number=issue.number, reason="slash_retriage")
 
-    def _handle_reopen(self, message: LarkMessage, issue: GitHubIssue) -> SlashResult:
+    def _handle_reopen(
+        self, message: LarkMessage, issue: GitHubIssue, command: SlashCommand
+    ) -> SlashResult:
         # Reopening exists to un-close an issue and re-run triage on it, so it
         # shares the triage dispatch. Without a triage trigger, reopening alone
         # would leave the issue open but un-triaged, so refuse up front.
@@ -249,6 +294,9 @@ class SlashCommandHandler:
             return SlashResult(
                 command="reopen", issue_number=issue.number, reason="slash_reopen_unconfigured"
             )
+        # Record any extra detail BEFORE dispatching triage so the re-triage reads
+        # it as reporter input.
+        self._record_reporter_input(message, issue, command.body)
         if issue.state != "closed":
             self._retriage_dispatch(issue.number)
             self._reply(
@@ -264,6 +312,13 @@ class SlashCommandHandler:
     def _handle_assign(
         self, message: LarkMessage, issue: GitHubIssue, command: SlashCommand
     ) -> SlashResult:
+        if issue.state == "closed":
+            self._reply(
+                message,
+                f"⚠️ [#{issue.number}]({issue.url}) 已关闭，未指派。"
+                f"如需处理请先发 `/reopen` 重新打开。",
+            )
+            return SlashResult(command="assign", issue_number=issue.number, reason="slash_assign_closed")
         login = resolve_assignee_login(
             target=command.target,
             mention_open_ids=message.mention_open_ids,

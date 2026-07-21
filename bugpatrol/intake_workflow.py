@@ -117,6 +117,8 @@ class IntakeWorkflow:
             root_id=first.root_id,
         )
         if existing is not None:
+            if existing.state == "closed":
+                return self._closed_outcome(record=records[-1], issue=existing)
             healed = self._heal_missing_intake_fields(record=first, issue_number=existing.number)
             recorded = self._recorded_message_ids(existing)
             new_records = [record for record in records if record.message_id not in recorded]
@@ -224,6 +226,8 @@ class IntakeWorkflow:
             root_id=record.root_id,
         )
         if existing is not None:
+            if existing.state == "closed":
+                return self._closed_outcome(record=record, issue=existing)
             healed = self._heal_missing_intake_fields(record=record, issue_number=existing.number)
             if record.message_id in self._recorded_message_ids(existing):
                 # This message was already captured (a watcher replay or a
@@ -341,6 +345,30 @@ class IntakeWorkflow:
             if reply_meta is not None:
                 _collect_message_ids(reply_meta, recorded)
         return recorded
+
+    def _closed_outcome(
+        self, *, record: IntakeRecord, issue: GitHubIssue
+    ) -> IntakeOutcome:
+        """A follow-up arrived on a closed issue: ignore it.
+
+        A closed issue is a decided issue -- a plain reporter reply must not
+        re-append comments or re-trigger triage on it. Only the explicit
+        ``/reopen`` slash command (handled before intake) un-closes an issue. Tell
+        the reporter once how to proceed and record nothing else.
+        """
+        reply = self._reply_best_effort(
+            record=record,
+            text=(
+                f"该 issue [#{issue.number}]({issue.url}) 已关闭，本条回复未处理。"
+                "如需重新处理，请在话题里发 /reopen（可在其后补充说明）。"
+            ),
+        )
+        return IntakeOutcome(
+            action="ignored_closed",
+            issue=issue,
+            lark_reply=reply,
+            triage_signal=TriageSignal(should_enqueue=False, reason="issue_closed"),
+        )
 
     def _duplicate_outcome(
         self, *, record: IntakeRecord, issue: GitHubIssue, healed: bool
