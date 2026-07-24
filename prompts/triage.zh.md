@@ -14,8 +14,14 @@
    - 如果有人提供了线索或猜测（如「怀疑是 XX 模块 / 某次改动引入的」），把它当作重要输入：顺着线索查代码和 Git 历史验证，并在分析里明确说明该线索被证实还是被排除。
 6. 跨库核实后端契约（当 context 里有 `## Reference Repos` 时）：这些 reference repo 是前端所调用的后端（如 weaver）的只读检出。当 bug 涉及**数据字段、时间戳、排序、计数、状态/时序、权限、错误码或任何前后端接口契约**（例如「列表缺少某字段」「时间不对」「拿不到某数据」）时，你**必须先进到对应 reference repo 里实际 grep/读代码**（proto / API handler / 响应结构），核实该字段/行为**是否已经由后端提供**，再判断根因落在前端还是后端。**不要**在没查后端的情况下就默认「前端没存/没传」或「后端没给」——先去 reference repo 求证。并在分析里明确写出你查了哪个后端仓库、结论是「后端已提供 X / 后端未提供 X / 未能确认」。若 context 没有 `## Reference Repos` 段，跳过本条。
 7. 检查是否与已有 issue 重复：用 `gh issue list` / `gh search issues` 搜索同仓库的相似 issue（含已关闭的）。只有确认是同一问题时，才把 `triage_verdict` 填 `重复`、`duplicate_of` 填已有 issue 编号（会自动 close as duplicate）；拿不准就不要标重复，`duplicate_of` 保持 0。多个重复时 `duplicate_of` 指向最早/信息最全的那个。
-8. 归因（与 assignee 完全独立）：
+8. 判定优先级（`priority` 字段，枚举 `Urgent` / `High` / `Medium` / `Low`），按**影响面 + 是否有 workaround**判断，别默认给低：
+   - `Urgent`：崩溃 / 数据丢失 / 无法登录 / 核心流程完全不可用，影响大量用户且无 workaround。
+   - `High`：核心功能失效或明显错误，卡住主流程，无好的 workaround（如**关键按钮点击无效**、支付 / 发布 / 发送失败、关键数据加载不出来）。
+   - `Medium`：非核心功能失效或有可接受的 workaround；次要交互失效；偶发但影响体验的问题。多数功能性 bug 落这里。
+   - `Low`：视觉 / 文案 / 边缘场景的小瑕疵，不影响功能（如间距、错别字、极少复现的小问题）。
+   - 拿不准时，**功能性失效**（点了没反应、报错、拿不到数据）不要判 `Low`——先看它卡住的是不是主流程 / 关键操作，是就往 `High`/`Medium` 走。
+9. 归因（与 assignee 完全独立）：
    - `blame_suggestion` 是 best-effort 归因线索（自由文本），用于后续修复时追溯哪个 PR/哪个 commit/哪个代码区域可能引入了问题；证据不足时输出空字符串。
    - `suspected_owner` 是「疑似引入人」，只有当 git 历史/PR 证据明确指向某人时才填其 GitHub login；证据不足输出空字符串，绝不强行猜人。它不是 assignee，不影响谁跟进。
-9. 不要修改代码，不要创建 PR，不要自动修复。
-10. 最终只输出符合 `triage.schema.json` 的 JSON。
+10. 不要修改代码，不要创建 PR，不要自动修复。
+11. 最终只输出符合 `triage.schema.json` 的 JSON。

@@ -749,5 +749,19 @@ def managed_issue_body() -> str:
     )
 
 
+class TriagePromptRubricTest(unittest.TestCase):
+    def test_prompt_carries_priority_rubric(self) -> None:
+        # Without an explicit rubric the agent guesses priority from the bare
+        # enum and mislabels functional failures as Low. Guard that every
+        # priority level plus the "don't default a functional failure to Low"
+        # rule stays in the prompt so a future edit can't silently drop it.
+        prompt = Path("prompts/triage.zh.md").read_text(encoding="utf-8")
+        for level in ("Urgent", "High", "Medium", "Low"):
+            self.assertIn(f"`{level}`", prompt)
+        self.assertIn("关键按钮点击无效", prompt)
+        self.assertIn("功能性失效", prompt)
+        self.assertIn("不要判 `Low`", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()
