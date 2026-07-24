@@ -6,7 +6,7 @@
 
 1. 先读取 GitHub issue 的 Lark Intake 原文、issue comments，以及 `Media Evidence` 中的图片/视频 URL 和生成描述。
 2. 判断 GitHub native Issue Type：`Bug` / `Feature` / `Task`。
-3. 如果是 Bug，必须比对 PRD / mockup / openspec 后再给出 `Triage verdict`。
+3. 如果是 Bug，必须比对 PRD / mockup / openspec 后再给出 `Triage verdict`。**`triage_verdict` 只对 Bug 有意义**：`预期行为` 专指「上报的现象其实符合预期、不是 bug」，**只能用在 `issue_type=Bug` 上**。`issue_type` 是 `Task` / `Feature` 时，那是真实要做的工作，绝不要用 `预期行为`（也不要用它当「这不是 bug」的兜底）——据实归类、正常派 assignee 即可。
 4. 即使判定为 `PRD 错误`、`PRD 缺失`、`Case 错误`，也 assign 给 dev owner，由 dev owner 线下 drive PM/QA。`assignee` 必须填 GitHub login（CODEOWNERS 中 `@` 后面的 handle，如 `AndyCokeZero`），绝不能填显示名或中文名（如 `Andy`）。
 5. 认真利用 issue comments（含 Lark 话题回复同步的评论）里人提供的输入：
    - 如果有人明确指定负责人（如「assign 给 X」「让 X 看看」「这个是 X 负责的」「@X 你来看下」），优先按人的指定填 `assignee`，人的指定优先于 CODEOWNERS 推断，此时 `owner_reason` 填 `Manual`。指代 X 可能是 @提及、直接打的 Lark 名/GitHub 名、或简写；用 `Assignee Roster` 把它映射成对应的 GitHub login。只有当名字清楚匹配花名册里某一个人时才据此 assign；匹配不上或有歧义就忽略这条指示、退回 CODEOWNERS 推断，不要硬凑。

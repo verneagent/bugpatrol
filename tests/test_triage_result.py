@@ -587,6 +587,72 @@ class TriageResultTest(unittest.TestCase):
         self.assertIn("not planned", message)
         self.assertNotIn("负责人", message)
 
+    def test_apply_expected_behavior_on_task_does_not_close(self) -> None:
+        # "预期行为" is Bug-only. On a Task/Feature the agent is misusing it as a
+        # catch-all for "not a bug"; the issue is real work and must NOT be
+        # auto-closed -- assign it normally instead (#4219 regression).
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        data = dict(VALID)
+        data["issue_type"] = "Task"
+        data["triage_verdict"] = "预期行为"
+        result = parse_triage_result(data)
+
+        summary = apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+        )
+
+        call_names = [name for name, _ in github.calls]
+        self.assertNotIn("close_issue_as_not_planned", call_names)
+        self.assertIn("add_assignee", call_names)
+        self.assertFalse(summary.closed_not_planned)
+        self.assertTrue(summary.assignee_written)
+
+    def test_apply_expected_behavior_on_feature_does_not_close(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        data = dict(VALID)
+        data["issue_type"] = "Feature"
+        data["triage_verdict"] = "预期行为"
+        result = parse_triage_result(data)
+
+        summary = apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+        )
+
+        call_names = [name for name, _ in github.calls]
+        self.assertNotIn("close_issue_as_not_planned", call_names)
+        self.assertIn("add_assignee", call_names)
+        self.assertFalse(summary.closed_not_planned)
+        self.assertTrue(summary.assignee_written)
+
+    def test_render_triage_summary_lark_message_task_no_expected_behavior(self) -> None:
+        data = dict(VALID)
+        data["issue_type"] = "Task"
+        data["triage_verdict"] = "预期行为"
+        result = parse_triage_result(data)
+
+        message = render_triage_summary_lark_message(
+            issue_number=9,
+            issue_url="https://github.test/o/r/issues/9",
+            result=result,
+        )
+
+        # A Task never renders the "closed as not planned" line.
+        self.assertNotIn("not planned", message)
+
     def test_render_triage_summary_lark_message_for_duplicate(self) -> None:
         data = dict(VALID)
         data["triage_verdict"] = "重复"

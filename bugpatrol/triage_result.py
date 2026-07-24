@@ -19,7 +19,9 @@ from bugpatrol.lark import is_message_withdrawn_error
 
 # Terminal no-action verdict: triage decided the reported behavior is expected
 # (not a bug). Like 重复, this closes the issue automatically -- as not planned.
+# Only meaningful for a Bug; a Task/Feature is real work and is never auto-closed.
 VERDICT_EXPECTED_BEHAVIOR = "预期行为"
+ISSUE_TYPE_BUG = "Bug"
 
 
 @dataclass(frozen=True)
@@ -260,10 +262,14 @@ def apply_triage_result(
             duplicate_of=result.duplicate_of,
         )
         closed_as_duplicate = True
-    elif verdict == VERDICT_EXPECTED_BEHAVIOR:
-        # Expected behavior is a terminal no-action verdict: no assignee, close
-        # the issue as not planned. close_audit skips its own not_planned ping
-        # because this run's triage summary already announced the closure.
+    elif verdict == VERDICT_EXPECTED_BEHAVIOR and result.issue_type == ISSUE_TYPE_BUG:
+        # "Expected behavior" only makes sense for a Bug report (the reported
+        # symptom is actually intended). It is a terminal no-action verdict: no
+        # assignee, close the issue as not planned. close_audit skips its own
+        # not_planned ping because this run's triage summary already announced
+        # the closure. For a Task/Feature this verdict is a category error (the
+        # agent using it as a catch-all for "not a bug"), so never auto-close a
+        # Task/Feature -- it is real work; fall through to add_assignee.
         github.close_issue_as_not_planned(repo=repo, issue_number=issue_number)
         closed_not_planned = True
     else:
@@ -615,7 +621,10 @@ def render_triage_summary_lark_message(
     if result.duplicate_of:
         duplicate_url = f"{issue_url.rsplit('/', 1)[0]}/{result.duplicate_of}"
         lines.append(f"结论：重复，已关闭。重复于 [#{result.duplicate_of}]({duplicate_url})")
-    elif result.fields.get("Triage verdict", "") == VERDICT_EXPECTED_BEHAVIOR:
+    elif (
+        result.fields.get("Triage verdict", "") == VERDICT_EXPECTED_BEHAVIOR
+        and result.issue_type == ISSUE_TYPE_BUG
+    ):
         lines.append("结论：预期行为（非 bug），已关闭（not planned）。")
     else:
         assignee = result.assignee
