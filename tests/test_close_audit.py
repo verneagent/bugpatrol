@@ -336,6 +336,37 @@ class CloseAuditTest(unittest.TestCase):
         self.assertEqual(len(github.comments), 2)
         self.assertIn("已修复（completed）", github.comments[1])
 
+    def test_cited_sha_survives_bot_metadata_hex_noise(self) -> None:
+        # fived #4268: a long thread of bugpatrol metadata comments (triage run
+        # UUIDs, Lark epoch-millis, numeric comment ids) all match the hex-run
+        # shape. When they were collected as candidates they exhausted the
+        # resolution cap before the dev's cited SHA, so a genuinely fixed issue
+        # was reopened.
+        config = self._notify_config()
+        github = FakeGithub(
+            issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)),
+            known_commits=("a431709f5",),
+        )
+        for index in range(6):
+            github.comments.append(
+                "<!-- BUGPATROL_TRIAGE_RUN_META\n"
+                '{"context_comment_ids": ["508785341%d", "508792318%d"],'
+                ' "run_id": "fc3b879a-e9a4-47b2-b8d0-683ff507ec0%d"}\n'
+                "BUGPATROL_TRIAGE_RUN_META -->" % (index, index, index)
+            )
+            github.comments.append(
+                f"## Lark 话题更新\n\n- 创建时间: 178513292240{index}\n\n## 消息\n\n看下这个"
+            )
+        github.comments.append("Fixed in a431709f5.")
+        lark = FakeLarkMessengerClient()
+
+        summary = audit_issue_close(
+            repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
+        )
+
+        self.assertEqual(summary.evidence, "commit a431709f5 (cited in a comment)")
+        self.assertFalse(summary.reopened)
+
     def test_completed_close_with_cited_fix_dedupes_on_rerun(self) -> None:
         config = self._notify_config()
         github = FakeGithub(

@@ -222,6 +222,17 @@ _COMMIT_URL_RE = re.compile(
 # against the repo before it counts, so decimal timestamps / issue numbers that
 # happen to match the shape are discarded when they don't resolve.
 _COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
+# Same shape, but with at least one a-f digit. Decimal noise that happens to fit
+# the hex alphabet (Lark epoch-millis timestamps, GitHub comment ids) can never
+# match it, so these candidates are resolved first and a genuinely cited SHA is
+# not crowded out past the cap by digits-only noise.
+_COMMIT_SHA_WITH_LETTER_RE = re.compile(
+    r"\b(?=[0-9a-f]{7,40}\b)[0-9a-f]*[a-f][0-9a-f]*\b", re.IGNORECASE
+)
+# Bugpatrol's own metadata blocks (triage run ids, intake/close-audit markers) are
+# HTML comments dense with hex noise. A human never cites a fix inside one, so
+# they are stripped before scanning.
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 # A github PR URL, e.g. https://github.com/TheCloverLab/weaver/pull/1000
 _PR_URL_RE = re.compile(
     r"https?://github\.com/(?P<repo>[\w.-]+/[\w.-]+)/pull/(?P<num>\d+)", re.IGNORECASE
@@ -268,16 +279,20 @@ def commit_evidence_from_comments(
     # comments are dense with hex noise (Lark chat/message ids, triage run_id UUID
     # fragments, numeric comment ids). The URL names the repo, so verify only
     # against that repo when it is on the allowlist.
-    for comment in comments:
-        for match in _COMMIT_URL_RE.finditer(comment.body or ""):
+    bodies = tuple(_HTML_COMMENT_RE.sub(" ", comment.body or "") for comment in comments)
+    for body in bodies:
+        for match in _COMMIT_URL_RE.finditer(body):
             url_repo = allowed.get(match.group("repo").lower())
             if url_repo:
                 _collect(match.group("sha"), (url_repo,))
     # Fallback: bare hex runs (a dev who writes "Fixed in <sha>" without a link).
-    # No repo hint, so try each allowed repo (this repo first).
-    for comment in comments:
-        for match in _COMMIT_SHA_RE.findall(comment.body or ""):
-            _collect(match, verify_order)
+    # No repo hint, so try each allowed repo (this repo first). Hex runs carrying
+    # an a-f digit go first; digits-only runs (almost never a SHA, usually a
+    # timestamp or id) are only resolved if cap budget is left.
+    for pattern in (_COMMIT_SHA_WITH_LETTER_RE, _COMMIT_SHA_RE):
+        for body in bodies:
+            for match in pattern.findall(body):
+                _collect(match, verify_order)
     for sha, repos in candidates:
         for candidate_repo in repos:
             if github.commit_exists(repo=candidate_repo, sha=sha):
