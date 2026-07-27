@@ -28,7 +28,7 @@ def render_triage_metadata_comment(*, duplicate_of: int) -> str:
 
 def render_expected_behavior_triage_comment() -> str:
     return append_triage_metadata(
-        "结论：预期行为，已关闭。",
+        "结论：预期行为。",
         {"version": 1, "issue": 7, "duplicate_of": 0, "verdict": "预期行为"},
     )
 
@@ -274,7 +274,9 @@ class CloseAuditTest(unittest.TestCase):
         self.assertEqual(summary.skipped_reason, "triage already announced duplicate")
         self.assertEqual(len(lark.replies), 0)
 
-    def test_skips_not_planned_when_triage_announced_expected_behavior(self) -> None:
+    def test_notifies_not_planned_even_after_expected_behavior_triage(self) -> None:
+        # Triage no longer auto-closes 预期行为, so a not_planned close is always
+        # an owner's own decision and must be announced.
         config = self._notify_config()
         github = FakeGithub(
             issue=_closed_issue(state_reason="not_planned", body=_managed_body(chat_id=config.lark.chat_id))
@@ -286,10 +288,9 @@ class CloseAuditTest(unittest.TestCase):
             repo="o/r", issue_number=7, config=config, github=github, lark=lark, dry_run=False
         )
 
-        self.assertTrue(summary.audited)
-        self.assertFalse(summary.notified)
-        self.assertEqual(summary.skipped_reason, "triage already announced expected behavior")
-        self.assertEqual(len(lark.replies), 0)
+        self.assertTrue(summary.notified)
+        self.assertEqual(summary.kind, "closed_not_planned")
+        self.assertEqual(len(lark.replies), 1)
 
     def test_passes_when_evidence_exists(self) -> None:
         github = FakeGithub(

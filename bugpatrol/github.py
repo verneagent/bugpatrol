@@ -518,42 +518,6 @@ class GitHubCliIssuesClient:
     def reopen_issue(self, *, repo: str, issue_number: int) -> None:
         self._run(["issue", "reopen", str(issue_number), "--repo", repo])
 
-    def close_issue_as_not_planned(self, *, repo: str, issue_number: int) -> None:
-        owner, name = repo.split("/", 1)
-        result = self._run(
-            [
-                "api",
-                "graphql",
-                "-f",
-                "query=query($owner: String!, $name: String!, $issue: Int!) {"
-                " repository(owner: $owner, name: $name) {"
-                " issue(number: $issue) { id } } }",
-                "-f",
-                f"owner={owner}",
-                "-f",
-                f"name={name}",
-                "-F",
-                f"issue={issue_number}",
-            ]
-        )
-        data = json.loads(result.stdout)
-        repository = data.get("data", {}).get("repository") or {}
-        issue_id = (repository.get("issue") or {}).get("id")
-        if not isinstance(issue_id, str):
-            raise GitHubCliError(f"cannot resolve issue node id for {repo}#{issue_number}")
-        self._run(
-            [
-                "api",
-                "graphql",
-                "-f",
-                "query=mutation($issue: ID!) {"
-                " closeIssue(input: {issueId: $issue, stateReason: NOT_PLANNED}) {"
-                " issue { number state } } }",
-                "-f",
-                f"issue={issue_id}",
-            ]
-        )
-
     def remote_branch_tip_sha(self, *, repo: str, branch: str) -> str:
         """Best-effort current tip SHA of a remote branch; "" if unavailable.
 
