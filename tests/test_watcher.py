@@ -16,8 +16,10 @@ from bugpatrol.testing.fakes import FakeGitHubIssuesClient, FakeLarkMessengerCli
 from bugpatrol.triage_queue import TriageRequest, TriageRequestQueue
 from bugpatrol.watcher import (
     MAX_CONSECUTIVE_SCAN_FAILURES,
+    TOPIC_OUTAGE_CHAT_SUMMARY_TOPICS,
     dispatch_due_triage,
     render_topic_outage_alert,
+    render_topic_outage_reply,
     run_polling_watcher,
 )
 
@@ -60,6 +62,21 @@ class FakeTwoTopicLark(FakeLarkMessengerClient):
             )
             for message_id in ("om_t1", "om_t2")
         ]
+
+
+class UnreplyableTopicLark(FakeHistoryLark):
+    def __init__(self, *, unreplyable: str) -> None:
+        super().__init__()
+        self._unreplyable = unreplyable
+
+    def reply_to_message(self, *, chat_id: str, message_id: str, text: str) -> None:
+        if message_id == self._unreplyable:
+            raise LarkOpenApiError("Lark request failed: message not found")
+        super().reply_to_message(chat_id=chat_id, message_id=message_id, text=text)
+
+
+def _outage_alert_replies(lark: FakeHistoryLark) -> list:
+    return [reply for reply in lark.replies if "未能建成 GitHub issue" in reply.text]
 
 
 class FlakyThenHealthyLark(FakeHistoryLark):
@@ -190,12 +207,70 @@ class WatcherTest(unittest.TestCase):
                 topic_failure_alert_threshold=3,
             )
 
-        # Exactly one alert for the whole outage, sent to the main chat.
+        # Exactly one alert for the whole outage, delivered inside the failing
+        # topic (where the reporter is waiting), not broadcast to the chat.
+        alerts = _outage_alert_replies(lark)
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0].message_id, "om_1")
+        self.assertIn("fived-assets push failed with 403", alerts[0].text)
+        self.assertEqual(lark.chat_messages, [])
+
+    def test_run_polling_watcher_broadcasts_chat_summary_for_fleet_wide_outage(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeHistoryLark()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        errored = [
+            TopicResult(
+                root_key=f"om_{index}",
+                outcomes=(),
+                events=(BackfillEvent(message_id=f"om_{index}", action="error", reason="boom"),),
+                processed_message_ids=(),
+                error="boom",
+            )
+            for index in range(TOPIC_OUTAGE_CHAT_SUMMARY_TOPICS)
+        ]
+        with patch("bugpatrol.watcher._harvest_topic_results", return_value=errored):
+            run_polling_watcher(
+                config=config,
+                lark=lark,  # type: ignore[arg-type]
+                workflow=workflow,
+                max_iterations=3,
+                interval_seconds=0,
+                topic_failure_alert_threshold=3,
+            )
+
+        self.assertEqual(len(_outage_alert_replies(lark)), TOPIC_OUTAGE_CHAT_SUMMARY_TOPICS)
         self.assertEqual(len(lark.chat_messages), 1)
-        alert = lark.chat_messages[0]
-        self.assertEqual(alert.chat_id, MAIN_CHAT_ID)
-        self.assertIn("fived-assets push failed with 403", alert.text)
-        self.assertIn("om_1", alert.text)
+        self.assertEqual(lark.chat_messages[0].chat_id, MAIN_CHAT_ID)
+
+    def test_run_polling_watcher_falls_back_to_chat_when_topic_reply_fails(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = UnreplyableTopicLark(unreplyable="om_1")
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        errored = TopicResult(
+            root_key="om_1",
+            outcomes=(),
+            events=(BackfillEvent(message_id="om_1", action="error", reason="boom"),),
+            processed_message_ids=(),
+            error="boom",
+        )
+        with patch("bugpatrol.watcher._harvest_topic_results", return_value=[errored]):
+            run_polling_watcher(
+                config=config,
+                lark=lark,  # type: ignore[arg-type]
+                workflow=workflow,
+                max_iterations=3,
+                interval_seconds=0,
+                topic_failure_alert_threshold=3,
+            )
+
+        # The reply could not be delivered, so the alert must not be lost.
+        self.assertEqual(len(lark.chat_messages), 1)
+        self.assertIn("om_1", lark.chat_messages[0].text)
 
     def test_run_polling_watcher_resets_topic_alert_after_recovery(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
@@ -228,7 +303,7 @@ class WatcherTest(unittest.TestCase):
                 topic_failure_alert_threshold=3,
             )
 
-        self.assertEqual(len(lark.chat_messages), 2)
+        self.assertEqual(len(_outage_alert_replies(lark)), 2)
 
     def test_run_polling_watcher_does_not_alert_in_dry_run(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
@@ -255,6 +330,12 @@ class WatcherTest(unittest.TestCase):
             )
 
         self.assertEqual(lark.chat_messages, [])
+        self.assertEqual(_outage_alert_replies(lark), [])
+
+    def test_render_topic_outage_reply_states_error_and_retry(self) -> None:
+        text = render_topic_outage_reply(error="boom: push 403", consecutive_iterations=3)
+        self.assertIn("连续 3 轮未能建成 GitHub issue", text)
+        self.assertIn("boom: push 403", text)
 
     def test_render_topic_outage_alert_truncates_topic_list(self) -> None:
         results = tuple(

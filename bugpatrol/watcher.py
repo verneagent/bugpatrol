@@ -46,6 +46,11 @@ MAX_CONSECUTIVE_SCAN_FAILURES = 10
 # admit the repeated failure instead of retrying quietly.
 TOPIC_FAILURE_ALERT_THRESHOLD = 3
 
+# Failing topics in one poll before the alert is also broadcast to the group
+# chat: a single stuck topic belongs in that topic, but a fleet-wide outage
+# would otherwise only be visible to whoever happens to open each topic.
+TOPIC_OUTAGE_CHAT_SUMMARY_TOPICS = 3
+
 
 @dataclass(frozen=True)
 class WatchResult:
@@ -393,6 +398,14 @@ def dispatch_due_triage(
     return dispatched
 
 
+def render_topic_outage_reply(*, error: str, consecutive_iterations: int) -> str:
+    return (
+        f"⚠️ 这条上报连续 {consecutive_iterations} 轮未能建成 GitHub issue，"
+        "watcher 正在自动重试，维护者需检查凭据/网络。\n"
+        f"失败原因：{error}"
+    )
+
+
 def render_topic_outage_alert(
     *,
     errored_results: Sequence[TopicResult],
@@ -419,20 +432,48 @@ def _alert_topic_outage(
     consecutive_iterations: int,
     logger: JsonlEventLog | None,
 ) -> None:
-    text = render_topic_outage_alert(
-        errored_results=errored_results,
-        consecutive_iterations=consecutive_iterations,
+    # Tell each reporter inside their own topic: that is where they are waiting
+    # for an intake reply. The chat-level summary is reserved for a fleet-wide
+    # outage (many topics failing) or as a fallback when replying failed.
+    undelivered: list[TopicResult] = []
+    for result in errored_results:
+        try:
+            lark.reply_to_message(
+                chat_id=config.lark.chat_id,
+                message_id=result.root_key,
+                text=render_topic_outage_reply(
+                    error=result.error,
+                    consecutive_iterations=consecutive_iterations,
+                ),
+            )
+        except Exception as error:  # noqa: BLE001 — alerting must never crash the watcher
+            print(
+                f"watch-lark: failed to reply topic-outage alert to {result.root_key}: {error}",
+                file=sys.stderr,
+            )
+            undelivered.append(result)
+    chat_results = (
+        errored_results
+        if len(errored_results) >= TOPIC_OUTAGE_CHAT_SUMMARY_TOPICS
+        else undelivered
     )
-    try:
-        lark.send_chat_message(chat_id=config.lark.chat_id, text=text)
-    except Exception as error:  # noqa: BLE001 — alerting must never crash the watcher
-        # Best-effort: log so the failed alert is visible, but keep polling.
-        print(f"watch-lark: failed to send topic-outage alert: {error}", file=sys.stderr)
+    if chat_results:
+        text = render_topic_outage_alert(
+            errored_results=chat_results,
+            consecutive_iterations=consecutive_iterations,
+        )
+        try:
+            lark.send_chat_message(chat_id=config.lark.chat_id, text=text)
+        except Exception as error:  # noqa: BLE001 — alerting must never crash the watcher
+            # Best-effort: log so the failed alert is visible, but keep polling.
+            print(f"watch-lark: failed to send topic-outage alert: {error}", file=sys.stderr)
     if logger is not None:
         logger.write(
             {
                 "event": "watch_topic_outage_alert",
                 "consecutive_iterations": consecutive_iterations,
                 "failing_topics": [result.root_key for result in errored_results],
+                "undelivered_topics": [result.root_key for result in undelivered],
+                "chat_summary": bool(chat_results),
             }
         )
