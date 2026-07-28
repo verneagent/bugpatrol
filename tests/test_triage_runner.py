@@ -726,6 +726,7 @@ class ReportWorkflowFailureTest(unittest.TestCase):
         outcome = report_workflow_failure(
             config=config,
             issue_number=7,
+            job="triage",
             github=github,  # type: ignore[arg-type]
             issue_fields=issue_fields,  # type: ignore[arg-type]
             lark=lark,
@@ -752,6 +753,7 @@ class ReportWorkflowFailureTest(unittest.TestCase):
         outcome = report_workflow_failure(
             config=config,
             issue_number=7,
+            job="triage",
             github=github,  # type: ignore[arg-type]
             issue_fields=issue_fields,  # type: ignore[arg-type]
             lark=lark,
@@ -760,6 +762,55 @@ class ReportWorkflowFailureTest(unittest.TestCase):
         self.assertEqual(outcome, "already_reported")
         self.assertEqual(github.comments, before)
         self.assertEqual(issue_fields.writes, [])
+        self.assertEqual(lark.replies, [])
+
+    def test_non_triage_job_reports_without_touching_triage_status(self) -> None:
+        from bugpatrol.testing.fakes import FakeLarkMessengerClient
+
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        lark = FakeLarkMessengerClient()
+
+        outcome = report_workflow_failure(
+            config=config,
+            issue_number=7,
+            job="fix",
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+            lark=lark,
+            run_url="https://github.test/runs/2",
+        )
+
+        self.assertEqual(outcome, "reported")
+        self.assertEqual(issue_fields.writes, [])
+        self.assertIn("BugPatrol fix failed", github.comments[-1])
+        self.assertIn("https://github.test/runs/2", github.comments[-1])
+        self.assertEqual(len(lark.replies), 1)
+        self.assertIn("自动修复运行失败", lark.replies[0].text)
+
+    def test_dedupes_on_the_run_url_already_cited_in_a_comment(self) -> None:
+        from bugpatrol.testing.fakes import FakeLarkMessengerClient
+
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.comments.append("## BugPatrol fix failed\n\nhttps://github.test/runs/2")
+        issue_fields = FakeIssueFields()
+        lark = FakeLarkMessengerClient()
+        before = list(github.comments)
+
+        outcome = report_workflow_failure(
+            config=config,
+            issue_number=7,
+            job="fix",
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+            lark=lark,
+            run_url="https://github.test/runs/2",
+        )
+
+        self.assertEqual(outcome, "already_reported")
+        self.assertEqual(github.comments, before)
         self.assertEqual(lark.replies, [])
 
 
@@ -807,7 +858,7 @@ class TriageWorkflowTemplateTest(unittest.TestCase):
         # keeps the failure-reporting step, since deployments are copied from it.
         workflow = Path("examples/github-actions/bugpatrol-triage.yml").read_text(encoding="utf-8")
         self.assertIn("if: failure()", workflow)
-        self.assertIn("report-triage-failure", workflow)
+        self.assertIn("report-job-failure", workflow)
 
 
 class TriagePromptRubricTest(unittest.TestCase):

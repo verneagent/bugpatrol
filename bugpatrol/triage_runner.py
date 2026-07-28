@@ -527,43 +527,80 @@ def mark_triage_failed(
         )
 
 
+JOB_LABELS = {
+    "triage": "分诊",
+    "fix": "自动修复",
+    "fix-revise": "修复更新",
+    "ci-fix": "CI 反馈",
+    "close-audit": "关闭审计",
+    "notify-fix": "修复通知",
+}
+
+
 def report_workflow_failure(
     *,
     config: ProjectConfig,
     issue_number: int,
+    job: str,
     github: GitHubCliIssuesClient,
     issue_fields: GitHubIssueFieldsClient,
     lark: LarkMessengerClient | None = None,
     run_url: str = "",
     detail: str = "",
 ) -> str:
-    """Report a triage job that died without bugpatrol reporting it itself.
+    """Report a bugpatrol job that died without reporting the failure itself.
 
-    A triage job can fail before bugpatrol ever starts (provisioning: tool
-    clone fetch, venv install) or crash outside the paths that call
-    ``mark_triage_failed``. Those failures leave no comment and no Lark ping, so
-    the issue just silently never gets triaged. Dedup anchors on the ``Triage
-    status`` field: ``mark_triage_failed`` already set it to ``Failed`` whenever
-    bugpatrol surfaced the failure on its own.
+    Any of these jobs can fail before bugpatrol starts (provisioning: tool clone
+    fetch, venv install) or crash outside the paths that report on their own.
+    Those failures leave no comment and no Lark ping, so the issue silently
+    stalls. Dedup on the run URL cited in an existing comment, so re-running the
+    reporter for one job is idempotent; triage additionally skips when it
+    already marked the issue ``Failed`` on its own.
     """
-    status = issue_fields.get_issue_field_values(
-        repo=config.github_repo, issue_number=issue_number
-    ).get(config.issue_field_names["Triage status"], "")
-    if status == "Failed":
+    comments = github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)
+    if run_url and any(run_url in comment.body for comment in comments):
         return "already_reported"
-    lines = ["分诊运行失败，本次没有产生分诊结论。"]
+    label = JOB_LABELS.get(job, job)
+    lines = [f"{label}运行失败，本次没有产生结果。"]
     if detail:
         lines.append(detail)
     if run_url:
         lines.append(f"运行日志：[{run_url}]({run_url})")
-    mark_triage_failed(
-        config=config,
+    reason = "\n\n".join(lines)
+
+    if job == "triage":
+        # Triage owns the "Triage status" field, and the watcher re-dispatches
+        # off it, so a failed triage must land there too.
+        status = issue_fields.get_issue_field_values(
+            repo=config.github_repo, issue_number=issue_number
+        ).get(config.issue_field_names["Triage status"], "")
+        if status == "Failed":
+            return "already_reported"
+        mark_triage_failed(
+            config=config,
+            issue_number=issue_number,
+            exit_code=1,
+            github=github,
+            issue_fields=issue_fields,
+            lark=lark,
+            reason=reason,
+        )
+        return "reported"
+
+    # Lark first, comment last: the comment is the dedup marker, so writing it
+    # before a failed Lark send would suppress the ping forever.
+    if lark is not None:
+        send_intake_topic_message(
+            repo=config.github_repo,
+            issue_number=issue_number,
+            github=github,
+            lark=lark,
+            text=f"{label}运行失败，GitHub issue #{issue_number} 需要人工跟进。\n{reason}",
+        )
+    github.add_issue_comment(
+        repo=config.github_repo,
         issue_number=issue_number,
-        exit_code=1,
-        github=github,
-        issue_fields=issue_fields,
-        lark=lark,
-        reason="\n\n".join(lines),
+        body=f"## BugPatrol {job} failed\n\n{reason}",
     )
     return "reported"
 

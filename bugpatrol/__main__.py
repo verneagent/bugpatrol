@@ -56,6 +56,7 @@ from bugpatrol.fix_runner import (
     run_fix_revise,
 )
 from bugpatrol.triage_runner import (
+    JOB_LABELS,
     execute_triage_run,
     prepare_triage_run,
     report_workflow_failure,
@@ -367,11 +368,12 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     report_failure = sub.add_parser(
-        "report-triage-failure",
-        help="surface a triage job that died without bugpatrol reporting it",
+        "report-job-failure",
+        help="surface a bugpatrol job that died without reporting the failure itself",
     )
     report_failure.add_argument("project_config", type=Path)
     report_failure.add_argument("--issue", type=int, required=True)
+    report_failure.add_argument("--job", default="triage", choices=sorted(JOB_LABELS))
     report_failure.add_argument("--run-url", default="", help="CI run URL to cite")
     report_failure.add_argument("--detail", default="", help="extra context, e.g. the runner name")
 
@@ -977,13 +979,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if args.command == "report-triage-failure":
+    if args.command == "report-job-failure":
         config = load_project_config(args.project_config)
         github = GitHubCliIssuesClient(gh=config.github_cli)
         issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
         outcome = report_workflow_failure(
             config=config,
             issue_number=args.issue,
+            job=args.job,
             github=github,
             issue_fields=issue_fields,
             lark=_optional_lark_client(config),

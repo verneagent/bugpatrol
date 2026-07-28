@@ -134,11 +134,11 @@ jobs:
             fi
           done
           if [ -n "$PY" ] && [ -d "$TOOL" ]; then
-            PYTHONPATH="$TOOL" "$PY" -m bugpatrol report-triage-failure "$BUGPATROL_PROJECT_CONFIG" \
+            PYTHONPATH="$TOOL" "$PY" -m bugpatrol report-job-failure "$BUGPATROL_PROJECT_CONFIG" \
               --issue "${{ inputs.issue_number }}" \
               --run-url "$RUN_URL" \
               --detail "runner: ${{ runner.name }}" && exit 0
-            echo "report-triage-failure failed; falling back to a plain comment" >&2
+            echo "report-job-failure failed; falling back to a plain comment" >&2
           fi
           gh issue comment "${{ inputs.issue_number }}" --repo "$GITHUB_REPOSITORY" \
             --body "$(printf '## BugPatrol triage failed\n\n分诊运行失败，本次没有产生分诊结论。\n\n运行日志：%s\n' "$RUN_URL")"
