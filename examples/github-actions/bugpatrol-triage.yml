@@ -109,3 +109,36 @@ jobs:
             --execute
             # For reference repos, append one flag per declared repo, e.g.
             # --reference-repo "${{ github.repository_owner }}/backend=${{ steps.ref-backend.outputs.path }}"
+
+      # A triage job can die before bugpatrol ever runs (tool checkout, cache
+      # bootstrap, missing interpreter) or crash outside the paths that report
+      # failure themselves. Without this the issue is silently left untriaged:
+      # no comment, no Lark ping, nobody notices until a human asks why. The
+      # command no-ops when triage already marked the issue Failed.
+      - name: Report triage failure
+        if: failure() && steps.app-token.outputs.token != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BUGPATROL_PROJECT_CONFIG: ${{ vars.BUGPATROL_PROJECT_CONFIG }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          TOOL="$GITHUB_WORKSPACE/.bugpatrol/tool"
+          PY=""
+          for c in python3.13 python3.12 python3.11 python3; do
+            if command -v "$c" >/dev/null 2>&1 \
+              && "$c" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+              PY="$c"; break
+            fi
+          done
+          if [ -n "$PY" ] && [ -d "$TOOL" ]; then
+            PYTHONPATH="$TOOL" "$PY" -m bugpatrol report-triage-failure "$BUGPATROL_PROJECT_CONFIG" \
+              --issue "${{ inputs.issue_number }}" \
+              --run-url "$RUN_URL" \
+              --detail "runner: ${{ runner.name }}" && exit 0
+            echo "report-triage-failure failed; falling back to a plain comment" >&2
+          fi
+          gh issue comment "${{ inputs.issue_number }}" --repo "$GITHUB_REPOSITORY" \
+            --body "$(printf '## BugPatrol triage failed\n\n分诊运行失败，本次没有产生分诊结论。\n\n运行日志：%s\n' "$RUN_URL")"

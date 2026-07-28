@@ -527,6 +527,47 @@ def mark_triage_failed(
         )
 
 
+def report_workflow_failure(
+    *,
+    config: ProjectConfig,
+    issue_number: int,
+    github: GitHubCliIssuesClient,
+    issue_fields: GitHubIssueFieldsClient,
+    lark: LarkMessengerClient | None = None,
+    run_url: str = "",
+    detail: str = "",
+) -> str:
+    """Report a triage job that died without bugpatrol reporting it itself.
+
+    A triage job can fail before bugpatrol ever starts (provisioning: tool
+    clone fetch, venv install) or crash outside the paths that call
+    ``mark_triage_failed``. Those failures leave no comment and no Lark ping, so
+    the issue just silently never gets triaged. Dedup anchors on the ``Triage
+    status`` field: ``mark_triage_failed`` already set it to ``Failed`` whenever
+    bugpatrol surfaced the failure on its own.
+    """
+    status = issue_fields.get_issue_field_values(
+        repo=config.github_repo, issue_number=issue_number
+    ).get(config.issue_field_names["Triage status"], "")
+    if status == "Failed":
+        return "already_reported"
+    lines = ["分诊运行失败，本次没有产生分诊结论。"]
+    if detail:
+        lines.append(detail)
+    if run_url:
+        lines.append(f"运行日志：[{run_url}]({run_url})")
+    mark_triage_failed(
+        config=config,
+        issue_number=issue_number,
+        exit_code=1,
+        github=github,
+        issue_fields=issue_fields,
+        lark=lark,
+        reason="\n\n".join(lines),
+    )
+    return "reported"
+
+
 def comment_ids(comments: tuple[GitHubIssueComment, ...]) -> tuple[str, ...]:
     return tuple(comment.id for comment in comments if parse_triage_run_metadata(comment.body) is None)
 

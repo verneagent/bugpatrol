@@ -24,6 +24,7 @@ from bugpatrol.triage_runner import (
     list_known_assignees,
     prepare_triage_run,
     render_triage_failed_comment,
+    report_workflow_failure,
 )
 
 
@@ -59,11 +60,12 @@ class FakeGithub:
 
 
 class FakeIssueFields:
-    def __init__(self) -> None:
+    def __init__(self, values: dict[str, str] | None = None) -> None:
         self.writes: list[dict[str, object]] = []
+        self.values = values or {}
 
     def get_issue_field_values(self, **kwargs: object) -> dict[str, str]:
-        return {}
+        return dict(self.values)
 
     def add_issue_field_values(self, **kwargs: object) -> None:
         self.writes.append(kwargs)
@@ -712,6 +714,55 @@ class TriageRunnerTest(unittest.TestCase):
         self.assertIn("分诊失败", lark.replies[1].text)
 
 
+class ReportWorkflowFailureTest(unittest.TestCase):
+    def test_reports_when_bugpatrol_never_marked_the_issue_failed(self) -> None:
+        from bugpatrol.testing.fakes import FakeLarkMessengerClient
+
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        lark = FakeLarkMessengerClient()
+
+        outcome = report_workflow_failure(
+            config=config,
+            issue_number=7,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+            lark=lark,
+            run_url="https://github.test/runs/1",
+            detail="runner: minici16g-bugpatrol",
+        )
+
+        self.assertEqual(outcome, "reported")
+        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Failed"})
+        self.assertIn("https://github.test/runs/1", github.comments[-1])
+        self.assertIn("minici16g-bugpatrol", github.comments[-1])
+        self.assertEqual(len(lark.replies), 1)
+        self.assertIn("分诊失败", lark.replies[0].text)
+
+    def test_skips_when_triage_already_reported_its_own_failure(self) -> None:
+        from bugpatrol.testing.fakes import FakeLarkMessengerClient
+
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields({"Triage status": "Failed"})
+        lark = FakeLarkMessengerClient()
+        before = list(github.comments)
+
+        outcome = report_workflow_failure(
+            config=config,
+            issue_number=7,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+            lark=lark,
+        )
+
+        self.assertEqual(outcome, "already_reported")
+        self.assertEqual(github.comments, before)
+        self.assertEqual(issue_fields.writes, [])
+        self.assertEqual(lark.replies, [])
+
+
 def valid_triage_output() -> str:
     return """
     {
@@ -747,6 +798,16 @@ def managed_issue_body() -> str:
             original_text="Deleting all todos does not show empty state.",
         )
     )
+
+
+class TriageWorkflowTemplateTest(unittest.TestCase):
+    def test_example_workflow_reports_job_failures(self) -> None:
+        # A triage job that dies during provisioning reports nothing on its own,
+        # leaving the issue silently untriaged. Guard that the shipped template
+        # keeps the failure-reporting step, since deployments are copied from it.
+        workflow = Path("examples/github-actions/bugpatrol-triage.yml").read_text(encoding="utf-8")
+        self.assertIn("if: failure()", workflow)
+        self.assertIn("report-triage-failure", workflow)
 
 
 class TriagePromptRubricTest(unittest.TestCase):

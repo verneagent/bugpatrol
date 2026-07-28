@@ -55,7 +55,12 @@ from bugpatrol.fix_runner import (
     run_fix,
     run_fix_revise,
 )
-from bugpatrol.triage_runner import execute_triage_run, prepare_triage_run, resolve_issue_branch
+from bugpatrol.triage_runner import (
+    execute_triage_run,
+    prepare_triage_run,
+    report_workflow_failure,
+    resolve_issue_branch,
+)
 from bugpatrol.worktree import (
     SubprocessGitDriver,
     resolve_reference_branch,
@@ -360,6 +365,15 @@ def main(argv: list[str] | None = None) -> int:
             "rather than re-triaging to a no-op; supports {issue_number}."
         ),
     )
+
+    report_failure = sub.add_parser(
+        "report-triage-failure",
+        help="surface a triage job that died without bugpatrol reporting it",
+    )
+    report_failure.add_argument("project_config", type=Path)
+    report_failure.add_argument("--issue", type=int, required=True)
+    report_failure.add_argument("--run-url", default="", help="CI run URL to cite")
+    report_failure.add_argument("--detail", default="", help="extra context, e.g. the runner name")
 
     run_fix_parser = sub.add_parser("run-fix", help="auto-fix a triaged code bug and open a PR")
     run_fix_parser.add_argument("project_config", type=Path)
@@ -961,6 +975,22 @@ def main(argv: list[str] | None = None) -> int:
                 ensure_ascii=False,
             )
         )
+        return 0
+
+    if args.command == "report-triage-failure":
+        config = load_project_config(args.project_config)
+        github = GitHubCliIssuesClient(gh=config.github_cli)
+        issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
+        outcome = report_workflow_failure(
+            config=config,
+            issue_number=args.issue,
+            github=github,
+            issue_fields=issue_fields,
+            lark=_optional_lark_client(config),
+            run_url=args.run_url,
+            detail=args.detail,
+        )
+        print(json.dumps({"issue": args.issue, "outcome": outcome}, ensure_ascii=False))
         return 0
 
     if args.command == "run-fix":
