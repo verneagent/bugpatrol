@@ -11,12 +11,45 @@ import time
 from io import BytesIO
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from bugpatrol.intake import Attachment, IntakeRecord
 from bugpatrol.lark import DownloadedLarkResource
 
 LARK_RESOURCE_RE = re.compile(r"^lark://message/([^/]+)/([^/]+)/([^/]+)$")
+
+# Git subcommands that talk to the remote, and therefore can fail on a transport
+# blip that a bounded retry fixes. Local-only commands (add/commit) are excluded
+# so a real failure there is never retried.
+_NETWORK_GIT_SUBCOMMANDS = frozenset({"clone", "fetch", "pull", "push"})
+
+# Transport-layer failures of the git remote helper (TLS/SSH/HTTP), e.g. the
+# `LibreSSL SSL_connect: SSL_ERROR_SYSCALL` that broke an asset push mid-poll and
+# stalled intake. These fail before or while carrying the request, so retrying is
+# safe; auth/permission failures do not match and still fail immediately.
+_TRANSIENT_GIT_RE = re.compile(
+    r"SSL_ERROR_SYSCALL"
+    r"|SSL_connect"
+    r"|GnuTLS recv error"
+    r"|Connection reset by peer"
+    r"|Connection timed out"
+    r"|Operation timed out"
+    r"|Could not resolve host"
+    r"|Failed to connect to"
+    r"|Empty reply from server"
+    r"|The requested URL returned error: 5\d\d"
+    r"|RPC failed"
+    r"|early EOF"
+    r"|unexpected disconnect"
+    r"|remote end hung up unexpectedly"
+    r"|kex_exchange_identification"
+    r"|Broken pipe",
+    re.IGNORECASE,
+)
+
+
+def is_transient_git_error(stderr: str) -> bool:
+    return bool(_TRANSIENT_GIT_RE.search(stderr))
 
 
 class LarkResourceDownloader(Protocol):
@@ -132,6 +165,9 @@ class GitHubAssetRepoStore:
         branch: str = "main",
         remote_url: str = "",
         git: str = "git",
+        transient_retries: int = 3,
+        retry_backoff_seconds: float = 2.0,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._repo = repo
         self._checkout_path = checkout_path.expanduser()
@@ -139,6 +175,9 @@ class GitHubAssetRepoStore:
         self._branch = branch
         self._remote_url = remote_url
         self._git = git
+        self._transient_retries = transient_retries
+        self._retry_backoff_seconds = retry_backoff_seconds
+        self._sleep = sleep
         # Parallel topic workers share one checkout; git mutations must not interleave.
         self._lock = threading.Lock()
 
@@ -192,18 +231,35 @@ class GitHubAssetRepoStore:
         return self._remote_url or f"git@github.com:{self._repo}.git"
 
     def _run(self, args: list[str], *, allow_no_changes: bool = False) -> None:
-        completed = subprocess.run(
-            [self._git, *args],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if completed.returncode == 0:
-            return
-        combined = f"{completed.stdout}\n{completed.stderr}"
-        if allow_no_changes and "nothing to commit" in combined:
-            return
-        raise RuntimeError(f"git {' '.join(args)} failed: {completed.stderr.strip()}")
+        retries = self._transient_retries if self._is_network_command(args) else 1
+        for attempt in range(1, retries + 1):
+            completed = subprocess.run(
+                [self._git, *args],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if completed.returncode == 0:
+                return
+            combined = f"{completed.stdout}\n{completed.stderr}"
+            if allow_no_changes and "nothing to commit" in combined:
+                return
+            stderr = completed.stderr.strip()
+            if attempt < retries and is_transient_git_error(combined):
+                print(
+                    f"git {' '.join(args)} hit a transient failure "
+                    f"({attempt}/{retries}), retrying: {stderr}",
+                    file=sys.stderr,
+                )
+                self._sleep(self._retry_backoff_seconds * attempt)
+                continue
+            raise RuntimeError(f"git {' '.join(args)} failed: {stderr}")
+
+    def _is_network_command(self, args: list[str]) -> bool:
+        index = 0
+        while index < len(args) and args[index] == "-C":
+            index += 2
+        return index < len(args) and args[index] in _NETWORK_GIT_SUBCOMMANDS
 
 
 class CommandResourceDescriber:

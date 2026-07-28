@@ -197,6 +197,89 @@ class ResourcesTest(unittest.TestCase):
             self.assertTrue((checkout / ".github" / "issue-assets" / "om_1" / "img_v2_abc.png").exists())
             self.assertTrue(url.endswith("/img_v2_abc.png"))
 
+    def test_github_asset_repo_store_retries_transient_git_transport_failure(self) -> None:
+        # A TLS blip on `git pull` used to abort intake for the whole topic, so
+        # the reporter's message never became an issue until the next poll.
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout = Path(tmp) / "example-assets"
+            (checkout / ".git").mkdir(parents=True)
+            failure = Mock(returncode=1, stdout="", stderr="fatal: unable to access: LibreSSL SSL_connect: SSL_ERROR_SYSCALL")
+            success = Mock(returncode=0, stdout="", stderr="")
+            run = Mock(side_effect=[failure, success, success, success, success])
+            slept: list[float] = []
+            ref = parse_lark_resource_url("lark://message/om_1/image/img_v2_abc")
+            assert ref is not None
+
+            with patch("subprocess.run", run):
+                GitHubAssetRepoStore(
+                    repo="example-org/example-assets",
+                    checkout_path=checkout,
+                    sleep=slept.append,
+                ).write(
+                    ref=ref,
+                    resource=DownloadedLarkResource(
+                        content=b"image-bytes",
+                        content_type="image/png",
+                        filename="shot.png",
+                    ),
+                )
+
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertEqual(commands[0], commands[1])
+            self.assertIn("pull", commands[1])
+            self.assertEqual(slept, [2.0])
+
+    def test_github_asset_repo_store_does_not_retry_permission_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout = Path(tmp) / "example-assets"
+            (checkout / ".git").mkdir(parents=True)
+            run = Mock(return_value=Mock(returncode=1, stdout="", stderr="remote: Permission to repo denied"))
+            ref = parse_lark_resource_url("lark://message/om_1/image/img_v2_abc")
+            assert ref is not None
+
+            with patch("subprocess.run", run), self.assertRaises(RuntimeError) as raised:
+                GitHubAssetRepoStore(
+                    repo="example-org/example-assets",
+                    checkout_path=checkout,
+                    sleep=lambda _seconds: None,
+                ).write(
+                    ref=ref,
+                    resource=DownloadedLarkResource(
+                        content=b"image-bytes",
+                        content_type="image/png",
+                        filename="shot.png",
+                    ),
+                )
+
+            self.assertIn("Permission to repo denied", str(raised.exception))
+            self.assertEqual(run.call_count, 1)
+
+    def test_github_asset_repo_store_does_not_retry_local_git_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout = Path(tmp) / "example-assets"
+            (checkout / ".git").mkdir(parents=True)
+            pull_ok = Mock(returncode=0, stdout="", stderr="")
+            add_broken = Mock(returncode=1, stdout="", stderr="error: Broken pipe")
+            run = Mock(side_effect=[pull_ok, add_broken])
+            ref = parse_lark_resource_url("lark://message/om_1/image/img_v2_abc")
+            assert ref is not None
+
+            with patch("subprocess.run", run), self.assertRaises(RuntimeError):
+                GitHubAssetRepoStore(
+                    repo="example-org/example-assets",
+                    checkout_path=checkout,
+                    sleep=lambda _seconds: None,
+                ).write(
+                    ref=ref,
+                    resource=DownloadedLarkResource(
+                        content=b"image-bytes",
+                        content_type="image/png",
+                        filename="shot.png",
+                    ),
+                )
+
+            self.assertEqual(run.call_count, 2)
+
     def test_materialize_uses_command_description(self) -> None:
         record = IntakeRecord(
             reporter_name="Reporter",
