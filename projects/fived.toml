@@ -12,13 +12,16 @@ platform = "lark"
 
 # Branch-scoped topic groups: bugs reported here are analyzed against the
 # declared feature branch instead of main.
+#
+# `feature-*` groups need no entry: CI creates one per branch named exactly
+# after it (fived `.github/workflows/bugpatrol-feature-topic.yml`) and the
+# watcher discovers them by that name, so a new branch is covered without a
+# config edit or a watcher restart. Only groups that break the convention are
+# listed -- `2026/chat-live` is the one exception, since its branch is not a
+# `feature-*` branch and CI therefore never created a group for it.
 [[lark.branch_chats]]
 chat_id = "oc_a848d65b8d8f25bbbfdfd6dc8e697e51"
 branch = "2026/chat-live"
-
-[[lark.branch_chats]]
-chat_id = "oc_29b55b1560c31cafa9210fd4811cf3e0"
-branch = "feature-community"
 
 # GitHub login -> Lark open_id，用于分诊/追问消息里真正 @ 到人
 [lark.user_open_ids]

@@ -12,6 +12,11 @@ from pathlib import Path
 from bugpatrol.agents import build_triage_agent_invocation
 from bugpatrol.asset_cleanup import cleanup_asset_repo
 from bugpatrol.backfill import run_lark_backfill
+from bugpatrol.chat_discovery import (
+    CachedBranchChatDiscoverer,
+    apply_branch_chats,
+    discover_branch_chats,
+)
 from bugpatrol.close_audit import audit_issue_close
 from bugpatrol.config import load_project_config
 from bugpatrol.doctor import run_doctor
@@ -528,6 +533,12 @@ def main(argv: list[str] | None = None) -> int:
             issue_fields=issue_fields,
             project_config=config,
         )
+        # Same chat set the watcher scans, so a backfill can catch up a branch
+        # topic group that was never listed in config.
+        config = apply_branch_chats(
+            config,
+            discover_branch_chats(lark=lark, github=github, config=config).branch_chats,
+        )
         workflow = IntakeWorkflow(config=config, github=github, lark=lark, issue_fields=issue_fields)
         if args.resource_dir and args.asset_repo:
             print("--resource-dir and --asset-repo are mutually exclusive", file=sys.stderr)
@@ -683,10 +694,15 @@ def main(argv: list[str] | None = None) -> int:
             if args.triage_dispatch_command
             else None,
             parallel_topics=args.parallel_topics,
+            branch_chat_discoverer=CachedBranchChatDiscoverer(
+                lark=lark,
+                github=github,
+                config=config,
+            ),
+            # Branch chats can now appear at runtime via discovery, so the
+            # resolver is always wired: it is only called for a non-main chat.
             branch_tip_resolver=(
-                (lambda branch: github.remote_branch_tip_sha(repo=config.github_repo, branch=branch))
-                if config.lark.branch_chats
-                else None
+                lambda branch: github.remote_branch_tip_sha(repo=config.github_repo, branch=branch)
             ),
             slash_handler=slash_handler,
         )

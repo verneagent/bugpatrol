@@ -80,6 +80,15 @@ class IntakeWorkflow:
         self._lark = lark
         self._issue_fields = issue_fields
 
+    def set_config(self, config: ProjectConfig) -> None:
+        """Adopt a config whose branch chats were refreshed at runtime.
+
+        The watcher discovers branch topic groups while running, and this
+        workflow rejects messages from chats outside `all_chat_ids()` -- so it
+        must see the same chat set as the scanner, not the startup snapshot.
+        """
+        self._config = config
+
     def has_issue_for_root(self, *, chat_id: str, root_id: str) -> bool:
         return (
             self._github.find_issue_by_intake_root(

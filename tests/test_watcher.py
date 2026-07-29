@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bugpatrol.backfill import BackfillEvent, TopicResult
+from bugpatrol.chat_discovery import BranchChatDiscovery
 from bugpatrol.config import load_project_config
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lease import FileLease, LeaseHeldError
@@ -90,6 +91,77 @@ class FlakyThenHealthyLark(FakeHistoryLark):
         if self.scan_calls <= self._failures:
             raise LarkOpenApiError("Lark request failed: <urlopen error [Errno 60] Operation timed out>")
         return super().list_chat_messages(chat_id=chat_id, limit=limit)
+
+
+class DiscoveredChatLark(FakeLarkMessengerClient):
+    """Reports a bug only in a chat that config never listed."""
+
+    def list_chat_messages(self, *, chat_id: str, limit: int = 20) -> list[LarkMessage]:
+        if chat_id != "oc_discovered":
+            return []
+        return [
+            LarkMessage(
+                message_id="om_disc",
+                chat_id=chat_id,
+                root_id="om_disc",
+                sender_open_id="ou_user",
+                sender_type="user",
+                create_time="1000",
+                msg_type="text",
+                text="分支群里报的 bug",
+            )
+        ]
+
+
+class StaticDiscoverer:
+    def __init__(self, branch_chats: dict[str, str]) -> None:
+        self.branch_chats = branch_chats
+
+    def resolve(self) -> BranchChatDiscovery:
+        return BranchChatDiscovery(branch_chats=dict(self.branch_chats), unmatched_chats=())
+
+
+class ExplodingDiscoverer:
+    def resolve(self) -> BranchChatDiscovery:
+        raise RuntimeError("gh api boom")
+
+
+class BranchChatDiscoveryWatcherTest(unittest.TestCase):
+    def test_discovered_chat_is_scanned_and_accepted_by_intake(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = DiscoveredChatLark()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        result = run_polling_watcher(
+            config=config,
+            lark=lark,  # type: ignore[arg-type]
+            workflow=workflow,
+            once=True,
+            interval_seconds=0,
+            branch_chat_discoverer=StaticDiscoverer({"oc_discovered": "feature-moments"}),
+            branch_tip_resolver=lambda branch: "deadbeef",
+        )
+
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(len(github.created), 1)
+
+    def test_discovery_failure_keeps_scanning_the_configured_chats(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeHistoryLark()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        result = run_polling_watcher(
+            config=config,
+            lark=lark,  # type: ignore[arg-type]
+            workflow=workflow,
+            once=True,
+            interval_seconds=0,
+            branch_chat_discoverer=ExplodingDiscoverer(),
+        )
+
+        self.assertEqual(result.processed, 1)
 
 
 class WatcherTest(unittest.TestCase):

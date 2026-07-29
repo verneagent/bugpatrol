@@ -16,6 +16,7 @@ from bugpatrol.backfill import (
     process_topic_batch,
     scan_topic_batches,
 )
+from bugpatrol.chat_discovery import BranchChatDiscovery, apply_branch_chats
 from bugpatrol.config import ProjectConfig
 from bugpatrol.event_log import JsonlEventLog
 from bugpatrol.github_fields import GitHubIssueFieldsClient
@@ -65,6 +66,60 @@ class WatchResult:
 class TriageDispatcher(Protocol):
     def dispatch(self, request: TriageRequest) -> object:
         """Dispatch a due triage request."""
+
+
+class BranchChatDiscoverer(Protocol):
+    def resolve(self) -> BranchChatDiscovery:
+        """Return the branch topic chats currently discoverable."""
+
+
+def _apply_discovered_chats(
+    *,
+    config: ProjectConfig,
+    discoverer: BranchChatDiscoverer,
+    base_config: ProjectConfig,
+    workflow: IntakeWorkflow,
+    iteration: int,
+    logger: JsonlEventLog | None,
+) -> ProjectConfig:
+    """Refresh the scanned chat set from discovery, keeping the last one on error.
+
+    A discovery outage must not silently shrink the watcher's scan set (bugs
+    reported in a branch group would just vanish), so the previous mapping is
+    kept and the failure is reported rather than swallowed.
+    """
+    try:
+        discovery = discoverer.resolve()
+    except Exception as error:  # noqa: BLE001 - reported, never swallowed
+        print(
+            f"watch-lark: branch chat discovery failed, keeping previous chats: {error}",
+            file=sys.stderr,
+        )
+        if logger is not None:
+            logger.write(
+                {
+                    "event": "watch_chat_discovery_error",
+                    "iteration": iteration,
+                    "error": str(error),
+                }
+            )
+        return config
+    updated = apply_branch_chats(base_config, discovery.branch_chats)
+    if updated.lark.branch_chats != config.lark.branch_chats:
+        workflow.set_config(updated)
+        print(
+            f"watch-lark: branch chats now {updated.lark.branch_chats or {}}",
+            file=sys.stderr,
+        )
+        if logger is not None:
+            logger.write(
+                {
+                    "event": "watch_branch_chats_changed",
+                    "iteration": iteration,
+                    "branch_chats": updated.lark.branch_chats or {},
+                }
+            )
+    return updated
 
 
 class TriageStatusReader(Protocol):
@@ -118,7 +173,12 @@ def run_polling_watcher(
     branch_tip_resolver: BranchTipResolver | None = None,
     slash_handler: SlashCommandHandler | None = None,
     topic_failure_alert_threshold: int = TOPIC_FAILURE_ALERT_THRESHOLD,
+    branch_chat_discoverer: BranchChatDiscoverer | None = None,
 ) -> WatchResult:
+    # Discovery is re-applied to the pristine config every poll, so a group that
+    # stops matching (renamed, or its branch deleted) actually drops out instead
+    # of sticking around from an earlier iteration.
+    base_config = config
     if event_log is not None and event_log_path is not None:
         raise ValueError("event_log and event_log_path are mutually exclusive")
     if processed_ledger is not None and processed_ledger_path is not None:
@@ -163,6 +223,15 @@ def run_polling_watcher(
             topic_outage_alerted = False
             while True:
                 iterations += 1
+                if branch_chat_discoverer is not None:
+                    config = _apply_discovered_chats(
+                        config=config,
+                        discoverer=branch_chat_discoverer,
+                        base_config=base_config,
+                        workflow=workflow,
+                        iteration=iterations,
+                        logger=logger,
+                    )
                 try:
                     scan = _scan_all_chats(
                         config=config,

@@ -218,6 +218,29 @@ class LarkOpenApiMessengerClient:
                 break
         return messages
 
+    def list_bot_chats(self) -> tuple[tuple[str, str], ...]:
+        """(chat_id, name) for every chat the bot belongs to.
+
+        Used to discover branch topic groups by name, so a group created for a
+        new feature branch is scanned without a config change.
+        """
+        chats: list[tuple[str, str]] = []
+        page_token = ""
+        while True:
+            params = {"page_size": "100"}
+            if page_token:
+                params["page_token"] = page_token
+            data = self._request("GET", f"/im/v1/chats?{urlencode(params)}")
+            payload = data.get("data", {})
+            for item in payload.get("items", ()):
+                chat_id = item.get("chat_id")
+                if isinstance(chat_id, str) and chat_id:
+                    chats.append((chat_id, str(item.get("name") or "")))
+            page_token = payload.get("page_token") or ""
+            if not payload.get("has_more") or not page_token:
+                break
+        return tuple(chats)
+
     def get_message(self, *, message_id: str, default_chat_id: str) -> LarkMessage:
         data = self._request("GET", f"/im/v1/messages/{message_id}")
         item = data.get("data", {}).get("items")

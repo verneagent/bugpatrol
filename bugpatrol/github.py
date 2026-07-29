@@ -537,6 +537,23 @@ class GitHubCliIssuesClient:
             return ""
         return result.stdout.strip()
 
+    def list_remote_branch_names(self, *, repo: str) -> tuple[str, ...]:
+        """Every branch name on the remote repo.
+
+        Anchors branch-chat discovery: a Lark group is only adopted as a branch
+        topic when its name is an actually existing branch.
+        """
+        result = self._run(
+            [
+                "api",
+                f"repos/{repo}/branches",
+                "--paginate",
+                "--jq",
+                ".[].name",
+            ]
+        )
+        return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+
     def find_open_pull_request_by_head(self, *, repo: str, head: str) -> str:
         """URL of an open PR whose head branch is `head`, or "" if none.
 
