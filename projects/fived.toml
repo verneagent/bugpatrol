@@ -16,12 +16,9 @@ platform = "lark"
 # `feature-*` groups need no entry: CI creates one per branch named exactly
 # after it (fived `.github/workflows/bugpatrol-feature-topic.yml`) and the
 # watcher discovers them by that name, so a new branch is covered without a
-# config edit or a watcher restart. Only groups that break the convention are
-# listed -- `2026/chat-live` is the one exception, since its branch is not a
-# `feature-*` branch and CI therefore never created a group for it.
-[[lark.branch_chats]]
-chat_id = "oc_a848d65b8d8f25bbbfdfd6dc8e697e51"
-branch = "2026/chat-live"
+# config edit or a watcher restart. List a group here only when it breaks that
+# convention -- and remove it once its branch is gone, since an entry pins the
+# group into the scan set and would have bugs analyzed against a dead branch.
 
 # GitHub login -> Lark open_id，用于分诊/追问消息里真正 @ 到人
 [lark.user_open_ids]
