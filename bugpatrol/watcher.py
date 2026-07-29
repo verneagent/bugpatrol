@@ -221,6 +221,7 @@ def run_polling_watcher(
             consecutive_scan_failures = 0
             consecutive_topic_failures = 0
             topic_outage_alerted = False
+            logged_skips: set[tuple[str, str]] = set()
             while True:
                 iterations += 1
                 if branch_chat_discoverer is not None:
@@ -328,7 +329,12 @@ def run_polling_watcher(
                             "skipped": iteration_skipped,
                         }
                     )
-                    write_backfill_events(logger=logger, iteration=iterations, events=iteration_events)
+                    write_backfill_events(
+                        logger=logger,
+                        iteration=iterations,
+                        events=iteration_events,
+                        logged_skips=logged_skips,
+                    )
                 if queue is not None:
                     queued_triage += enqueue_triage_outcomes(
                         outcomes=iteration_outcomes,
@@ -417,8 +423,33 @@ def _harvest_topic_results(
     return results
 
 
-def write_backfill_events(*, logger: JsonlEventLog, iteration: int, events) -> None:  # type: ignore[no-untyped-def]
+def write_backfill_events(  # type: ignore[no-untyped-def]
+    *,
+    logger: JsonlEventLog,
+    iteration: int,
+    events,
+    logged_skips: set[tuple[str, str]] | None = None,
+) -> None:
+    """Write one `lark_message` event per message outcome.
+
+    Each poll re-reads the same recent messages, and a message that was skipped
+    stays skipped, so without `logged_skips` every skip is re-written each round
+    forever -- that is what grew the fived event log to 2GB of near-duplicates.
+    When the caller passes a `logged_skips` set, a skip is written only the first
+    time that (message_id, reason) is seen; a message whose reason changes is
+    still written, and `processed`/`error` are always written. Per-round volume
+    stays visible in the `watch_scan` event, which counts the skips.
+
+    The set is replaced with the skips seen this round, so it stays the size of
+    the poll window instead of growing for the life of the process.
+    """
+    current_skips: set[tuple[str, str]] = set()
     for event in events:
+        if logged_skips is not None and event.action == "skipped":
+            key = (event.message_id, event.reason or "")
+            current_skips.add(key)
+            if key in logged_skips:
+                continue
         logger.write(
             {
                 "event": "lark_message",
@@ -429,6 +460,9 @@ def write_backfill_events(*, logger: JsonlEventLog, iteration: int, events) -> N
                 "issue_number": event.issue_number,
             }
         )
+    if logged_skips is not None:
+        logged_skips.clear()
+        logged_skips.update(current_skips)
 
 
 def enqueue_triage_outcomes(

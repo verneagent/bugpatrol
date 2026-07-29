@@ -22,6 +22,7 @@ from bugpatrol.watcher import (
     render_topic_outage_alert,
     render_topic_outage_reply,
     run_polling_watcher,
+    write_backfill_events,
 )
 
 
@@ -547,6 +548,94 @@ class WatcherTest(unittest.TestCase):
         self.assertEqual(events[1]["event"], "lark_message")
         self.assertEqual(events[1]["action"], "processed")
         self.assertEqual(events[1]["reason"], "created")
+
+    def test_repeated_skips_are_written_once_per_poll_window(self) -> None:
+        """A poll re-reads the same messages, so re-logging every skip each
+        round buried the event log in near-duplicates."""
+
+        class RecordingLogger:
+            def __init__(self) -> None:
+                self.written: list[dict] = []
+
+            def write(self, event: dict) -> None:
+                self.written.append(event)
+
+        logger = RecordingLogger()
+        logged_skips: set[tuple[str, str]] = set()
+        skip = BackfillEvent(message_id="om_1", action="skipped", reason="bot_message")
+
+        for iteration in (1, 2, 3):
+            write_backfill_events(
+                logger=logger,  # type: ignore[arg-type]
+                iteration=iteration,
+                events=[skip],
+                logged_skips=logged_skips,
+            )
+
+        self.assertEqual(len(logger.written), 1)
+        self.assertEqual(logger.written[0]["message_id"], "om_1")
+
+        # A skip that stops being reported drops out of the window, so if the
+        # message comes back it is reported again rather than staying invisible.
+        write_backfill_events(
+            logger=logger,  # type: ignore[arg-type]
+            iteration=4,
+            events=[],
+            logged_skips=logged_skips,
+        )
+        write_backfill_events(
+            logger=logger,  # type: ignore[arg-type]
+            iteration=5,
+            events=[skip],
+            logged_skips=logged_skips,
+        )
+        self.assertEqual(len(logger.written), 2)
+
+    def test_a_skip_whose_reason_changes_is_written_again(self) -> None:
+        class RecordingLogger:
+            def __init__(self) -> None:
+                self.written: list[dict] = []
+
+            def write(self, event: dict) -> None:
+                self.written.append(event)
+
+        logger = RecordingLogger()
+        logged_skips: set[tuple[str, str]] = set()
+
+        for iteration, reason in ((1, "bot_message"), (2, "processed_ledger")):
+            write_backfill_events(
+                logger=logger,  # type: ignore[arg-type]
+                iteration=iteration,
+                events=[BackfillEvent(message_id="om_1", action="skipped", reason=reason)],
+                logged_skips=logged_skips,
+            )
+
+        self.assertEqual([event["reason"] for event in logger.written], ["bot_message", "processed_ledger"])
+
+    def test_processed_and_error_events_are_never_deduped(self) -> None:
+        class RecordingLogger:
+            def __init__(self) -> None:
+                self.written: list[dict] = []
+
+            def write(self, event: dict) -> None:
+                self.written.append(event)
+
+        logger = RecordingLogger()
+        logged_skips: set[tuple[str, str]] = set()
+        events = [
+            BackfillEvent(message_id="om_1", action="processed", reason="created", issue_number=1),
+            BackfillEvent(message_id="om_2", action="error", reason="boom"),
+        ]
+
+        for iteration in (1, 2):
+            write_backfill_events(
+                logger=logger,  # type: ignore[arg-type]
+                iteration=iteration,
+                events=events,
+                logged_skips=logged_skips,
+            )
+
+        self.assertEqual([event["action"] for event in logger.written], ["processed", "error", "processed", "error"])
 
     def test_dispatch_due_triage_defers_when_issue_is_running(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
