@@ -44,14 +44,29 @@ def build_post_content(text: str) -> dict[str, object]:
 # Lark error code returned when acting on a withdrawn/recalled message.
 MESSAGE_WITHDRAWN_CODE = 230011
 
+# Lark error code returned when the target message's thread is gone — the
+# reporter deleted the topic in a topic group, so the message_id can no longer
+# be replied to. Same practical outcome as a withdrawn message: unreachable.
+MESSAGE_THREAD_MISSING_CODE = 230019
+
 # Lark error code for an expired/invalid tenant access token. A long-running
 # process (the watcher) can be holding a token that Lark has since invalidated;
 # on this code we force a re-mint and retry once so it self-heals in place.
 INVALID_ACCESS_TOKEN_CODE = 99991663
 
 
-def is_message_withdrawn_error(error: Exception) -> bool:
-    return isinstance(error, LarkOpenApiError) and f'"code":{MESSAGE_WITHDRAWN_CODE}' in str(error)
+def is_message_unreachable_error(error: Exception) -> bool:
+    """True when the source message can never be replied to again.
+
+    Covers both a withdrawn/recalled message and a deleted thread. Callers use
+    this to swallow best-effort Lark notifications instead of failing the run.
+    """
+    if not isinstance(error, LarkOpenApiError):
+        return False
+    text = str(error)
+    return any(
+        f'"code":{code}' in text for code in (MESSAGE_WITHDRAWN_CODE, MESSAGE_THREAD_MISSING_CODE)
+    )
 
 
 def is_invalid_access_token_error(error: Exception) -> bool:

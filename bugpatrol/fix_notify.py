@@ -12,7 +12,7 @@ from typing import Any
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment, GitHubPullRequest, LarkMessengerClient
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.intake import parse_intake_metadata
-from bugpatrol.lark import LarkOpenApiError, is_message_withdrawn_error
+from bugpatrol.lark import LarkOpenApiError, is_message_unreachable_error
 
 FIX_META_START = "<!-- BUGPATROL_FIX_META"
 FIX_META_END = "BUGPATROL_FIX_META -->"
@@ -150,14 +150,15 @@ def apply_fix_notification(
             text=notification.text,
         )
     except LarkOpenApiError as error:
-        # The Lark thread's root message was recalled — the notification target
-        # is permanently gone, so retrying every reconcile pass is futile and
-        # would abort the whole batch. Record it as handled (write the marker)
-        # and move on; a genuinely transient error still propagates.
-        if not is_message_withdrawn_error(error):
+        # The Lark thread's root message was recalled or its thread deleted —
+        # the notification target is permanently gone, so retrying every
+        # reconcile pass is futile and would abort the whole batch. Record it as
+        # handled (write the marker) and move on; a genuinely transient error
+        # still propagates.
+        if not is_message_unreachable_error(error):
             raise
         print(
-            f"fix notification for {repo}#{issue_number} skipped: Lark message withdrawn",
+            f"fix notification for {repo}#{issue_number} skipped: Lark message unreachable",
             file=sys.stderr,
         )
         lark_sent = False

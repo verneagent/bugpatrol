@@ -15,7 +15,7 @@ from bugpatrol.fields import AGENT_TRIAGE_STATUS_VALUES, NATIVE_ISSUE_TYPES, def
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake import parse_intake_metadata, require_bugpatrol_managed_issue
-from bugpatrol.lark import is_message_withdrawn_error
+from bugpatrol.lark import is_message_unreachable_error
 
 
 @dataclass(frozen=True)
@@ -582,9 +582,10 @@ def _reply_to_intake_topic(
     try:
         lark.reply_to_message(chat_id=chat_id, message_id=message_id, text=text)
     except Exception as error:
-        # The GitHub side of the run is already applied; a withdrawn source
-        # message must not fail the run over a best-effort Lark notification.
-        if not is_message_withdrawn_error(error):
+        # The GitHub side of the run is already applied; a source message that
+        # is gone (recalled, or its thread deleted) must not fail the run over a
+        # best-effort Lark notification.
+        if not is_message_unreachable_error(error):
             raise
 
 

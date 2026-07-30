@@ -22,7 +22,7 @@ from bugpatrol.clients import GitHubIssue
 from bugpatrol.config import ProjectConfig
 from bugpatrol.intake import IntakeRecord
 from bugpatrol.intake_workflow import render_followup_comment
-from bugpatrol.lark import LarkMessage, is_message_withdrawn_error
+from bugpatrol.lark import LarkMessage, is_message_unreachable_error
 
 FIX_COMMAND = "/fix"
 RETRIAGE_COMMAND = "/retriage"
@@ -353,6 +353,6 @@ class SlashCommandHandler:
                 message_id=message.message_id,
                 text=text,
             )
-        except Exception as error:  # noqa: BLE001 - a recalled source message must not abort
-            if not is_message_withdrawn_error(error):
+        except Exception as error:  # noqa: BLE001 - an unreachable source message must not abort
+            if not is_message_unreachable_error(error):
                 raise

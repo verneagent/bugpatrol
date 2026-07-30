@@ -779,6 +779,19 @@ class IntakeTopicReplyTest(unittest.TestCase):
 
         _reply_to_intake_topic(issue_body=self._issue_body(), lark=lark, text="分诊完成")
 
+    def test_tolerates_deleted_source_thread(self) -> None:
+        from bugpatrol.lark import LarkOpenApiError
+        from bugpatrol.triage_result import _reply_to_intake_topic
+
+        lark = FakeLarkMessengerClient()
+
+        def failing_reply(**kwargs: object) -> None:
+            raise LarkOpenApiError('Lark HTTP 400: {"code":230019,"msg":"The thread does NOT exist."}')
+
+        lark.reply_to_message = failing_reply  # type: ignore[method-assign]
+
+        _reply_to_intake_topic(issue_body=self._issue_body(), lark=lark, text="分诊完成")
+
     def test_reraises_other_lark_errors(self) -> None:
         from bugpatrol.lark import LarkOpenApiError
         from bugpatrol.triage_result import _reply_to_intake_topic

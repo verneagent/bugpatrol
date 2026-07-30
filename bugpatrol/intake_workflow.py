@@ -19,7 +19,7 @@ from bugpatrol.intake import (
     render_batched_issue_body,
     render_issue_body,
 )
-from bugpatrol.lark import is_message_withdrawn_error
+from bugpatrol.lark import is_message_unreachable_error
 from bugpatrol.triage_queue import TriageSignal, classify_triage_signal
 
 INTAKE_REPLY_META_MARKER = "BUGPATROL_INTAKE_REPLY_META"
@@ -316,11 +316,11 @@ class IntakeWorkflow:
         )
 
     def _reply_best_effort(self, *, record: IntakeRecord, text: str) -> str:
-        """Reply in the Lark thread; tolerate a withdrawn target message.
+        """Reply in the Lark thread; tolerate an unreachable target message.
 
         The GitHub write has already happened by this point, so a recalled
-        source message must not abort intake (it would crash-loop the watcher
-        on a message that can never be replied to).
+        message or a deleted thread must not abort intake (it would crash-loop
+        the watcher on a message that can never be replied to).
         """
         try:
             self._lark.reply_to_message(
@@ -329,9 +329,9 @@ class IntakeWorkflow:
                 text=text,
             )
         except Exception as error:
-            if not is_message_withdrawn_error(error):
+            if not is_message_unreachable_error(error):
                 raise
-            return f"{text}（原消息已撤回，未发送 Lark 回执）"
+            return f"{text}（原消息已撤回或话题已删除，未发送 Lark 回执）"
         return text
 
     def _recorded_message_ids(self, issue: GitHubIssue) -> set[str]:

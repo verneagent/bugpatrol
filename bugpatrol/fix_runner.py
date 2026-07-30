@@ -81,7 +81,7 @@ from bugpatrol.intake import (
     require_bugpatrol_managed_issue,
 )
 from bugpatrol.intake_workflow import parse_intake_reply_metadata
-from bugpatrol.lark import is_message_withdrawn_error
+from bugpatrol.lark import is_message_unreachable_error
 from bugpatrol.progress import ProgressReporter
 from bugpatrol.triage_result import (
     TriageRunStats,
@@ -1442,7 +1442,7 @@ def _build_progress_reporter(
         issue_number=issue.number,
         interval_seconds=float(fix.progress_heartbeat_seconds),
         runner=triage_runner_name(),
-        swallow=is_message_withdrawn_error,
+        swallow=is_message_unreachable_error,
     )
 
 
