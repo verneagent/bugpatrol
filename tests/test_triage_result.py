@@ -48,6 +48,9 @@ class FakeGithub:
         self.calls: list[tuple[str, object]] = []
         self.comments: list[str] = []
         self.issue_body = managed_issue_body()
+        # Issues other than the one under triage, keyed by number: tests seed
+        # these to exercise duplicates pointing at a closed original.
+        self.issues: dict[int, GitHubIssue] = {}
 
     def set_issue_type(self, **kwargs: object) -> None:
         self.calls.append(("set_issue_type", kwargs))
@@ -71,12 +74,18 @@ class FakeGithub:
 
     def get_issue(self, **kwargs: object) -> GitHubIssue:
         self.calls.append(("get_issue", kwargs))
+        number = int(kwargs["issue_number"])
+        if number in self.issues:
+            return self.issues[number]
         return GitHubIssue(
-            number=int(kwargs["issue_number"]),
-            url=f"https://github.test/o/r/issues/{kwargs['issue_number']}",
+            number=number,
+            url=f"https://github.test/o/r/issues/{number}",
             title="issue",
             body=self.issue_body,
         )
+
+    def reopen_issue(self, **kwargs: object) -> None:
+        self.calls.append(("reopen_issue", kwargs))
 
 
 class FakeIssueFields:
@@ -521,6 +530,134 @@ class TriageResultTest(unittest.TestCase):
         self.assertEqual(close_kwargs["duplicate_of"], 5)
         self.assertTrue(summary.closed_as_duplicate)
         self.assertFalse(summary.assignee_written)
+
+    def _duplicate_result(self, duplicate_of: int = 5) -> TriageResult:
+        data = dict(VALID)
+        data["triage_verdict"] = "重复"
+        data["duplicate_of"] = duplicate_of
+        return parse_triage_result(data)
+
+    def _closed_original(self, *, state_reason: str, number: int = 5) -> GitHubIssue:
+        return GitHubIssue(
+            number=number,
+            url=f"https://github.test/o/r/issues/{number}",
+            title="原 issue",
+            body=managed_issue_body(),
+            state="closed",
+            state_reason=state_reason,
+            closed_at="2026-07-01T00:00:00Z",
+            assignees=("garlanddiego",),
+        )
+
+    def test_duplicate_of_fixed_issue_reopens_original_as_regression(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.issues[5] = self._closed_original(state_reason="completed")
+        issue_fields = FakeIssueFields()
+        lark = FakeLarkMessengerClient()
+
+        summary = apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=self._duplicate_result(),
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+            lark=lark,
+        )
+
+        self.assertEqual(summary.regression_reopened, 5)
+        self.assertTrue(summary.closed_as_duplicate)
+        call_names = [name for name, _ in github.calls]
+        self.assertIn("reopen_issue", call_names)
+        reopen_kwargs = dict(github.calls[call_names.index("reopen_issue")][1])
+        self.assertEqual(reopen_kwargs["issue_number"], 5)
+        # The flag lands before the reopen, so a failure in between leaves the
+        # original closed and the regression still detectable on a re-run.
+        flag_index = next(
+            index
+            for index, (name, kwargs) in enumerate(github.calls)
+            if name == "add_issue_comment" and dict(kwargs)["issue_number"] == 5
+        )
+        self.assertLess(flag_index, call_names.index("reopen_issue"))
+        flag_body = str(dict(github.calls[flag_index][1])["body"])
+        self.assertIn("回归", flag_body)
+        self.assertIn("#1", flag_body)
+        # Both the duplicate's triage comment and its Lark summary say it.
+        self.assertIn("疑似回归", github.comments[0])
+        self.assertTrue(any("疑似回归" in reply.text for reply in lark.replies))
+
+    def test_regression_flag_reaches_the_original_topic_with_assignee_mention(self) -> None:
+        base_config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = replace(
+            base_config,
+            lark=replace(base_config.lark, user_open_ids={"garlanddiego": "ou_owner"}),
+        )
+        github = FakeGithub()
+        github.issues[5] = self._closed_original(state_reason="completed")
+        issue_fields = FakeIssueFields()
+        lark = FakeLarkMessengerClient()
+
+        apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=self._duplicate_result(),
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+            lark=lark,
+        )
+
+        original_ping = [
+            reply for reply in lark.replies if reply.text.startswith('<at user_id="ou_owner">')
+        ]
+        self.assertEqual(len(original_ping), 1)
+        self.assertIn("疑似回归", original_ping[0].text)
+        self.assertIn("[#5]", original_ping[0].text)
+
+    def test_duplicate_of_unfixed_close_is_not_a_regression(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        for state_reason in ("not_planned", "duplicate"):
+            with self.subTest(state_reason=state_reason):
+                github = FakeGithub()
+                github.issues[5] = self._closed_original(state_reason=state_reason)
+                issue_fields = FakeIssueFields()
+
+                summary = apply_triage_result(
+                    repo=config.github_repo,
+                    issue_number=1,
+                    config=config,
+                    result=self._duplicate_result(),
+                    github=github,  # type: ignore[arg-type]
+                    issue_fields=issue_fields,  # type: ignore[arg-type]
+                )
+
+                self.assertEqual(summary.regression_reopened, 0)
+                self.assertNotIn("reopen_issue", [name for name, _ in github.calls])
+                self.assertNotIn("疑似回归", github.comments[0])
+
+    def test_duplicate_of_open_issue_is_not_a_regression(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.issues[5] = replace(
+            self._closed_original(state_reason="completed"),
+            state="open",
+            state_reason="",
+            closed_at="",
+        )
+        issue_fields = FakeIssueFields()
+
+        summary = apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=self._duplicate_result(),
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(summary.regression_reopened, 0)
+        self.assertNotIn("reopen_issue", [name for name, _ in github.calls])
 
     def test_apply_duplicate_rejects_self_reference(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

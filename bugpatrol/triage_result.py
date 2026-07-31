@@ -31,6 +31,21 @@ class TriageResult:
 
 
 @dataclass(frozen=True)
+class DuplicateRegression:
+    """The issue a duplicate points at was already closed as fixed.
+
+    The same problem coming back after a fix is a regression, which is more
+    severe than a plain duplicate: the original issue is reopened and flagged
+    instead of being left closed with a silent duplicate pointing at it.
+    """
+
+    issue_number: int
+    issue_url: str
+    closed_at: str = ""
+    assignees: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class TriageApplySummary:
     issue_type_written: bool
     fields_written: bool
@@ -39,6 +54,7 @@ class TriageApplySummary:
     duplicate_comment_skipped: bool
     result_fingerprint: str
     closed_as_duplicate: bool = False
+    regression_reopened: int = 0
 
 
 @dataclass(frozen=True)
@@ -175,6 +191,12 @@ def apply_triage_result(
     require_bugpatrol_managed_issue(issue)
     if result.duplicate_of == issue_number:
         raise ValueError(f"duplicate_of must reference a different issue, got #{result.duplicate_of}")
+    regression = detect_duplicate_regression(
+        repo=repo,
+        duplicate_of=result.duplicate_of,
+        github=github,
+    )
+    regression_note = render_regression_note(regression)
     fingerprint = triage_result_fingerprint(result)
     decision_key = triage_decision_key(result)
     existing_comments = github.list_issue_comments(repo=repo, issue_number=issue_number)
@@ -217,18 +239,23 @@ def apply_triage_result(
                 config=config,
                 run_stats=run_stats,
                 branch_note=branch_note,
+                regression_note=regression_note,
             )
         github.add_issue_comment(
             repo=repo,
             issue_number=issue_number,
             body=append_triage_metadata(
-                _with_runner_attribution(render_triage_comment(result, branch_note=branch_note), run_stats=run_stats),
+                _with_runner_attribution(
+                    render_triage_comment(result, branch_note=branch_note, regression_note=regression_note),
+                    run_stats=run_stats,
+                ),
                 {
                     "version": 1,
                     "issue": issue_number,
                     "result_fingerprint": fingerprint,
                     "decision_key": decision_key,
                     "duplicate_of": result.duplicate_of,
+                    "regression_of": regression.issue_number if regression is not None else 0,
                     "verdict": result.fields.get("Triage verdict", ""),
                     "blame_suggestion": result.blame_suggestion,
                     "suspected_owner": result.suspected_owner,
@@ -246,7 +273,19 @@ def apply_triage_result(
             run_stats=run_stats,
         )
     closed_as_duplicate = False
+    regression_reopened = 0
     if result.duplicate_of:
+        if regression is not None:
+            _flag_duplicate_regression(
+                repo=repo,
+                regression=regression,
+                duplicate_issue_number=issue_number,
+                duplicate_issue_url=issue.url,
+                github=github,
+                lark=lark,
+                config=config,
+            )
+            regression_reopened = regression.issue_number
         # A clear duplicate is the only verdict that auto-closes: the work
         # already lives on the original issue. Everything else -- including
         # 预期行为 -- goes to an owner, who decides whether to close it.
@@ -266,7 +305,50 @@ def apply_triage_result(
         duplicate_comment_skipped=duplicate,
         result_fingerprint=fingerprint,
         closed_as_duplicate=closed_as_duplicate,
+        regression_reopened=regression_reopened,
     )
+
+
+def _flag_duplicate_regression(
+    *,
+    repo: str,
+    regression: DuplicateRegression,
+    duplicate_issue_number: int,
+    duplicate_issue_url: str,
+    github: GitHubCliIssuesClient,
+    lark: LarkMessengerClient | None,
+    config: ProjectConfig,
+) -> None:
+    """Flag the original issue as a regression, then reopen it.
+
+    Reopening is last on purpose: ``detect_duplicate_regression`` keys off the
+    original still being closed, so a failure before the reopen leaves the
+    regression detectable on a re-run instead of silently losing the flag.
+    """
+
+    github.add_issue_comment(
+        repo=repo,
+        issue_number=regression.issue_number,
+        body=render_regression_flag_comment(
+            regression=regression,
+            duplicate_issue_number=duplicate_issue_number,
+            duplicate_issue_url=duplicate_issue_url,
+        ),
+    )
+    if lark is not None:
+        send_intake_topic_message(
+            repo=repo,
+            issue_number=regression.issue_number,
+            github=github,
+            lark=lark,
+            text=render_regression_lark_message(
+                regression=regression,
+                duplicate_issue_number=duplicate_issue_number,
+                duplicate_issue_url=duplicate_issue_url,
+                assignee_open_ids=config.lark.user_open_ids or {},
+            ),
+        )
+    github.reopen_issue(repo=repo, issue_number=regression.issue_number)
 
 
 def build_triage_dry_run_report(
@@ -382,7 +464,95 @@ def codeowners_coverage_caveat(result: TriageResult) -> str:
     )
 
 
-def render_triage_comment(result: TriageResult, *, branch_note: str = "") -> str:
+def detect_duplicate_regression(
+    *,
+    repo: str,
+    duplicate_of: int,
+    github: GitHubCliIssuesClient,
+) -> DuplicateRegression | None:
+    """Return the original issue when a duplicate points at a fixed-and-closed issue.
+
+    Only a close that means "this was fixed" counts: ``not_planned`` and
+    ``duplicate`` closes were never fixes, so a new report of them is not a
+    regression. A missing ``state_reason`` (older closes) is treated as
+    completed, which is how GitHub renders it.
+    """
+
+    if not duplicate_of:
+        return None
+    original = github.get_issue(repo=repo, issue_number=duplicate_of)
+    if original.state != "closed":
+        return None
+    if original.state_reason in ("not_planned", "duplicate"):
+        return None
+    return DuplicateRegression(
+        issue_number=original.number,
+        issue_url=original.url,
+        closed_at=original.closed_at,
+        assignees=original.assignees,
+    )
+
+
+def render_regression_note(regression: DuplicateRegression | None) -> str:
+    if regression is None:
+        return ""
+    return (
+        f"⚠️ 疑似回归（regression）：原 issue #{regression.issue_number} 曾以「已修复」关闭，"
+        "同一问题再次出现，已自动重新打开原 issue 并标记回归。"
+    )
+
+
+def render_regression_flag_comment(
+    *,
+    regression: DuplicateRegression,
+    duplicate_issue_number: int,
+    duplicate_issue_url: str,
+) -> str:
+    closed_note = f"（关闭于 {regression.closed_at}）" if regression.closed_at else ""
+    return "\n".join(
+        [
+            "## ⚠️ 疑似回归（regression）",
+            "",
+            f"本 issue 此前已作为「已修复」关闭{closed_note}，"
+            f"但新上报的 [#{duplicate_issue_number}]({duplicate_issue_url}) 被分诊判定为同一问题。",
+            "同一问题在修复后再次出现，说明修复可能失效、被回退，或存在未覆盖的触发路径，"
+            "因此本 issue 已被自动重新打开。",
+            "",
+            "请确认：修复是否仍在代码里、是否需要补回归测试、还是这是一条新的触发路径。",
+        ]
+    )
+
+
+def render_regression_lark_message(
+    *,
+    regression: DuplicateRegression,
+    duplicate_issue_number: int,
+    duplicate_issue_url: str,
+    assignee_open_ids: dict[str, str] | None = None,
+) -> str:
+    mentions = " ".join(
+        f'<at user_id="{open_id}">{login}</at>'
+        for login in regression.assignees
+        for open_id in ((assignee_open_ids or {}).get(login, ""),)
+        if open_id
+    )
+    head = f"{mentions} " if mentions else ""
+    return "\n".join(
+        [
+            f"{head}⚠️ 疑似回归（regression）：本 issue "
+            f"[#{regression.issue_number}]({regression.issue_url}) 曾以「已修复」关闭，"
+            f"但新上报的 [#{duplicate_issue_number}]({duplicate_issue_url}) 是同一问题。",
+            "已自动重新打开本 issue，请确认修复是否失效或被回退。",
+        ]
+    )
+
+
+def render_triage_comment(
+    result: TriageResult,
+    *,
+    branch_note: str = "",
+    regression_note: str = "",
+) -> str:
     body = result.comment_markdown.rstrip()
     if result.blame_suggestion or result.suspected_owner:
         if "Blame" not in body and "归因" not in body:
@@ -393,6 +563,8 @@ def render_triage_comment(result: TriageResult, *, branch_note: str = "") -> str
                 parts.append(f"归因线索：{result.blame_suggestion}")
             body = f"{body}\n\n" + "\n".join(parts)
     prefix_lines = []
+    if regression_note:
+        prefix_lines.append(f"> {regression_note}")
     if branch_note:
         prefix_lines.append(f"> {branch_note}")
     caveat = codeowners_coverage_caveat(result)
@@ -500,6 +672,7 @@ def _send_lark_triage_summary(
     config: ProjectConfig,
     run_stats: TriageRunStats | None = None,
     branch_note: str = "",
+    regression_note: str = "",
 ) -> None:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
     _reply_to_intake_topic(
@@ -513,6 +686,7 @@ def _send_lark_triage_summary(
             runner_name=triage_runner_name(),
             run_stats=run_stats,
             branch_note=branch_note,
+            regression_note=regression_note,
         ),
     )
 
@@ -598,10 +772,13 @@ def render_triage_summary_lark_message(
     runner_name: str = "",
     run_stats: TriageRunStats | None = None,
     branch_note: str = "",
+    regression_note: str = "",
 ) -> str:
     lines = [f"分诊完成，GitHub issue [#{issue_number}]({issue_url})"]
     if branch_note:
         lines.append(branch_note)
+    if regression_note:
+        lines.append(regression_note)
     if result.duplicate_of:
         duplicate_url = f"{issue_url.rsplit('/', 1)[0]}/{result.duplicate_of}"
         lines.append(f"结论：重复，已关闭。重复于 [#{result.duplicate_of}]({duplicate_url})")

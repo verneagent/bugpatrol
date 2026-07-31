@@ -13,7 +13,7 @@
    - 若 context 里有 `## OpenSpec Owners` 段且该 issue 明确属于其中某个 change，**优先**用那个 change 的 owner 作为 `assignee`，`owner_reason` 填 `OpenSpec`。注意 openspec 里的 owner 是**昵称**（如 `naohn`、`andy`），不是 GitHub login——必须用 `Assignee Roster` 把昵称映射成对应的 GitHub login（和处理人的「assign 给 X」一样）。优先级：人的显式指定（Manual）> OpenSpec > CODEOWNERS 路径推断。匹配不到 change、change 未标注 owner、或昵称在花名册里找不到对应人时，回落 CODEOWNERS 推断，不要硬套无关的 change 或硬凑昵称。
    - 如果有人提供了线索或猜测（如「怀疑是 XX 模块 / 某次改动引入的」），把它当作重要输入：顺着线索查代码和 Git 历史验证，并在分析里明确说明该线索被证实还是被排除。
 6. 跨库核实后端契约（当 context 里有 `## Reference Repos` 时）：这些 reference repo 是前端所调用的后端（如 weaver）的只读检出。当 bug 涉及**数据字段、时间戳、排序、计数、状态/时序、权限、错误码或任何前后端接口契约**（例如「列表缺少某字段」「时间不对」「拿不到某数据」）时，你**必须先进到对应 reference repo 里实际 grep/读代码**（proto / API handler / 响应结构），核实该字段/行为**是否已经由后端提供**，再判断根因落在前端还是后端。**不要**在没查后端的情况下就默认「前端没存/没传」或「后端没给」——先去 reference repo 求证。并在分析里明确写出你查了哪个后端仓库、结论是「后端已提供 X / 后端未提供 X / 未能确认」。若 context 没有 `## Reference Repos` 段，跳过本条。
-7. 检查是否与已有 issue 重复：用 `gh issue list` / `gh search issues` 搜索同仓库的相似 issue（含已关闭的）。只有确认是同一问题时，才把 `triage_verdict` 填 `重复`、`duplicate_of` 填已有 issue 编号（会自动 close as duplicate）；拿不准就不要标重复，`duplicate_of` 保持 0。多个重复时 `duplicate_of` 指向最早/信息最全的那个。
+7. 检查是否与已有 issue 重复：用 `gh issue list` / `gh search issues` 搜索同仓库的相似 issue（含已关闭的）。只有确认是同一问题时，才把 `triage_verdict` 填 `重复`、`duplicate_of` 填已有 issue 编号（会自动 close as duplicate）；拿不准就不要标重复，`duplicate_of` 保持 0。多个重复时 `duplicate_of` 指向最早/信息最全的那个。如果指向的原 issue 已经被修复关闭，照常填 `duplicate_of` 即可——系统会识别为回归（regression），自动重新打开原 issue 并标记；你可以在 `comment_markdown` 里补充回归线索（可能被回退的 commit / PR）。
 8. 判定优先级（`priority` 字段，枚举 `Urgent` / `High` / `Medium` / `Low`），按**影响面 + 是否有 workaround**判断，别默认给低：
    - `Urgent`：崩溃 / 数据丢失 / 无法登录 / 核心流程完全不可用，影响大量用户且无 workaround。
    - `High`：核心功能失效或明显错误，卡住主流程，无好的 workaround（如**关键按钮点击无效**、支付 / 发布 / 发送失败、关键数据加载不出来）。
