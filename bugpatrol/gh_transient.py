@@ -29,7 +29,10 @@ _TRANSIENT_NETWORK_RE = re.compile(
     r"|i/o timeout"
     r"|connection reset by peer"
     r"|connection refused"
-    r"|unexpected EOF"
+    # Go's http client reports a bare `EOF` (not `unexpected EOF`) when the peer
+    # — in CI, the local proxy — closes the connection before any response byte
+    # arrives. This crashed a triage run on its very first `get_issue`.
+    r"|\bEOF\b"
     r"|server misbehaving"
     r"|no such host",
     re.IGNORECASE,

@@ -413,6 +413,7 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
             'dial tcp 140.82.112.5:443: i/o timeout',
             'read tcp 10.0.0.2->140.82.112.5:443: connection reset by peer',
             'Get "https://api.github.com/...": unexpected EOF',
+            'Get "https://api.github.com/repos/o/r/issues/4564": EOF',
         ):
             with self.subTest(stderr=stderr):
                 client = GitHubCliIssuesClient(sleep=lambda _s: None)
