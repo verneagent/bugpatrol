@@ -25,18 +25,19 @@ class ReconcileTriageLoopE2ETest(unittest.TestCase):
 
         # First replay picks up the managed issue that never got a triage result
         # and "runs" triage (which writes the triage-meta comment).
-        def run_triage(issue_number: int) -> None:
+        def run_triage(issue_number: int) -> str:
             github.add_issue_comment(
                 repo=config.github_repo,
                 issue_number=issue_number,
                 body=TRIAGE_META_COMMENT,
             )
+            return "applied"
 
         first = reconcile_triage(
             config=config, github=github, execute=True, run_triage=run_triage
         )
         self.assertIn(
-            (issue.number, "triaged", "executed"),
+            (issue.number, "triaged", "applied"),
             [(e.issue_number, e.action, e.reason) for e in first.events],
         )
 

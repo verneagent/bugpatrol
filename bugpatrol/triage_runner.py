@@ -6,7 +6,7 @@ import json
 import os
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
@@ -61,6 +61,12 @@ from bugpatrol.triage_result import (
 
 TRIAGE_RUN_META_START = "<!-- BUGPATROL_TRIAGE_RUN_META"
 TRIAGE_RUN_META_END = "BUGPATROL_TRIAGE_RUN_META -->"
+TRIAGE_SKIPPED_HEADER = "## BugPatrol triage skipped"
+TRIAGE_FAILED_HEADER = "## BugPatrol triage failed"
+# A run marker older than the triage workflow's own timeout can only belong to a
+# run that died without reporting (cancelled job, runner restart), so it must
+# stop counting as in-flight or the issue would never be re-triaged.
+TRIAGE_RUN_STALE_AFTER = timedelta(minutes=60)
 
 
 @dataclass(frozen=True)
@@ -487,7 +493,7 @@ def mark_triage_superseded(
         repo=config.github_repo,
         issue_number=issue_number,
         body=(
-            "## BugPatrol triage skipped\n\n"
+            f"{TRIAGE_SKIPPED_HEADER}\n\n"
             f"Run `{run_id}` was superseded by a newer triage run. Review the latest context before applying results."
         ),
     )
@@ -605,8 +611,58 @@ def report_workflow_failure(
     return "reported"
 
 
+def is_triage_bookkeeping_comment(body: str) -> bool:
+    """True for comments bugpatrol writes about a triage run rather than about the bug.
+
+    Run markers plus the "skipped"/"failed" audit notes carry no triage-relevant
+    information, so they must not count as context: a run that yields to a newer
+    one posts a skip note, and counting that note as new context made the newer
+    run abort as stale — two runs, zero results.
+    """
+    if parse_triage_run_metadata(body) is not None:
+        return True
+    stripped = body.lstrip()
+    return stripped.startswith(TRIAGE_SKIPPED_HEADER) or stripped.startswith(TRIAGE_FAILED_HEADER)
+
+
 def comment_ids(comments: tuple[GitHubIssueComment, ...]) -> tuple[str, ...]:
-    return tuple(comment.id for comment in comments if parse_triage_run_metadata(comment.body) is None)
+    return tuple(comment.id for comment in comments if not is_triage_bookkeeping_comment(comment.body))
+
+
+def triage_run_in_flight(
+    comments: tuple[GitHubIssueComment, ...],
+    *,
+    now: datetime | None = None,
+    stale_after: timedelta = TRIAGE_RUN_STALE_AFTER,
+) -> bool:
+    """True when a recent triage run claimed this issue and has not reported yet.
+
+    Used to keep the scheduled reconcile from racing a triage the watcher just
+    dispatched: both would run an agent, the older one would yield, and the
+    newer one could still be dropped on stale context.
+    """
+    latest_started_at: datetime | None = None
+    for comment in comments:
+        metadata = parse_triage_run_metadata(comment.body)
+        if metadata is not None:
+            started_at = metadata.get("started_at")
+            latest_started_at = _parse_timestamp(started_at) if isinstance(started_at, str) else None
+            continue
+        stripped = comment.body.lstrip()
+        if stripped.startswith(TRIAGE_SKIPPED_HEADER) or stripped.startswith(TRIAGE_FAILED_HEADER):
+            # The run that owned the newest marker already reported its outcome.
+            latest_started_at = None
+    if latest_started_at is None:
+        return False
+    return (now or datetime.now(timezone.utc)) - latest_started_at < stale_after
+
+
+def _parse_timestamp(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def append_triage_run_metadata(metadata: dict[str, object]) -> str:
@@ -700,7 +756,7 @@ def render_triage_failed_comment(*, exit_code: int, reason: str = "") -> str:
     )
     return "\n".join(
         [
-            "## BugPatrol triage failed",
+            TRIAGE_FAILED_HEADER,
             "",
             detail,
         ]

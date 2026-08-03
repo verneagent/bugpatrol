@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -16,6 +17,8 @@ from bugpatrol.github_fields import IssueField
 from bugpatrol.intake import IntakeRecord, render_issue_body
 from bugpatrol.triage_context import ReferenceRepoContext
 from bugpatrol.triage_runner import (
+    TRIAGE_FAILED_HEADER,
+    TRIAGE_SKIPPED_HEADER,
     TriageRunPlan,
     append_triage_run_metadata,
     build_assignee_roster,
@@ -25,6 +28,7 @@ from bugpatrol.triage_runner import (
     prepare_triage_run,
     render_triage_failed_comment,
     report_workflow_failure,
+    triage_run_in_flight,
 )
 
 
@@ -220,6 +224,38 @@ class TriageRunnerTest(unittest.TestCase):
         )
 
         self.assertEqual(comment_ids(comments), ("1",))
+
+    def test_comment_ids_ignore_triage_bookkeeping_comments(self) -> None:
+        # A run yielding to a newer one posts the "skipped" note; counting it as
+        # context made the newer run abort as stale, so both runs produced nothing.
+        comments = (
+            GitHubIssueComment(id="1", body="Reporter follow-up"),
+            GitHubIssueComment(id="2", body=f"{TRIAGE_SKIPPED_HEADER}\n\nRun `x` was superseded"),
+            GitHubIssueComment(id="3", body=f"{TRIAGE_FAILED_HEADER}\n\n分诊运行失败"),
+        )
+
+        self.assertEqual(comment_ids(comments), ("1",))
+
+    def test_triage_run_in_flight_only_while_a_recent_run_has_not_reported(self) -> None:
+        now = datetime(2026, 8, 3, 4, 0, tzinfo=timezone.utc)
+
+        def marker(minutes_ago: int) -> GitHubIssueComment:
+            started = (now - timedelta(minutes=minutes_ago)).isoformat()
+            return GitHubIssueComment(
+                id="m", body=append_triage_run_metadata({"version": 1, "run_id": "r", "started_at": started})
+            )
+
+        self.assertTrue(triage_run_in_flight((marker(2),), now=now))
+        # Older than the workflow timeout: the run died without reporting.
+        self.assertFalse(triage_run_in_flight((marker(90),), now=now))
+        # The run already reported its outcome.
+        self.assertFalse(
+            triage_run_in_flight(
+                (marker(2), GitHubIssueComment(id="s", body=f"{TRIAGE_SKIPPED_HEADER}\n\nsuperseded")),
+                now=now,
+            )
+        )
+        self.assertFalse(triage_run_in_flight((GitHubIssueComment(id="1", body="hi"),), now=now))
 
     def test_build_assignee_roster_uses_login_and_codeowners_name(self) -> None:
         roster = build_assignee_roster(
