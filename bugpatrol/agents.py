@@ -11,7 +11,7 @@ from typing import Sequence
 from bugpatrol.config import ProjectConfig
 
 DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
-DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-pro[1m]"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash[1m]"
 
 
 @dataclass(frozen=True)

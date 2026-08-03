@@ -175,7 +175,7 @@ class AgentsTest(unittest.TestCase):
         self.assertNotIn("sk-test", " ".join(invocation.command))
 
     def test_deepseek_provider_honors_configured_model(self) -> None:
-        config = _config_with_provider("deepseek", model="deepseek-v4-flash")
+        config = _config_with_provider("deepseek", model="deepseek-v4-pro[1m]")
 
         with mock.patch.dict("os.environ", {"DEEPSEEK_API_KEY": "sk-test"}):
             invocation = build_triage_agent_invocation(
@@ -189,7 +189,7 @@ class AgentsTest(unittest.TestCase):
 
         self.assertEqual(
             invocation.command[invocation.command.index("--model") + 1],
-            "deepseek-v4-flash",
+            "deepseek-v4-pro[1m]",
         )
 
     def test_deepseek_provider_requires_api_key(self) -> None:
