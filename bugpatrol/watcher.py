@@ -19,7 +19,7 @@ from bugpatrol.backfill import (
 from bugpatrol.chat_discovery import BranchChatDiscovery, apply_branch_chats
 from bugpatrol.config import ProjectConfig
 from bugpatrol.event_log import JsonlEventLog
-from bugpatrol.github_fields import GitHubIssueFieldsClient
+from bugpatrol.github_fields import GitHubIssueFieldsClient, GitHubIssueFieldsError
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.ledger import JsonMessageLedger, MessageLedger
 from bugpatrol.lease import FileLease
@@ -492,10 +492,34 @@ def dispatch_due_triage(
 ) -> int:
     dispatched = 0
     for request in queue.due_requests():
-        if status_reader is not None and status_reader.triage_status(request.issue_number) == "Running":
+        if status_reader is not None:
+            try:
+                running = status_reader.triage_status(request.issue_number) == "Running"
+            except GitHubIssueFieldsError as error:
+                # The field-values probe can transiently fail (e.g. api.github.com
+                # EOF) even after its own bounded retries. Crash here and the whole
+                # watcher dies with every blip; defer the request instead and retry
+                # when it comes due again.
+                print(
+                    f"dispatch_due_triage: field-values check failed for #{request.issue_number}: {error}",
+                    file=sys.stderr,
+                )
+                queue.mark_pending_review(request=request, quiet_seconds=triage_quiet_seconds)
+                continue
+            if running:
+                queue.mark_pending_review(request=request, quiet_seconds=triage_quiet_seconds)
+                continue
+        try:
+            dispatcher.dispatch(request)
+        except RuntimeError as error:
+            # The dispatch command (gh workflow run) hits the same flaky network;
+            # leave the request queued and defer instead of killing the watcher.
+            print(
+                f"dispatch_due_triage: dispatch failed for #{request.issue_number}: {error}",
+                file=sys.stderr,
+            )
             queue.mark_pending_review(request=request, quiet_seconds=triage_quiet_seconds)
             continue
-        dispatcher.dispatch(request)
         queue.mark_dispatched(request)
         dispatched += 1
     return dispatched

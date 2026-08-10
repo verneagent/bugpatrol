@@ -10,6 +10,7 @@ from unittest.mock import patch
 from bugpatrol.backfill import BackfillEvent, TopicResult
 from bugpatrol.chat_discovery import BranchChatDiscovery
 from bugpatrol.config import load_project_config
+from bugpatrol.github_fields import GitHubIssueFieldsError
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lease import FileLease, LeaseHeldError
 from bugpatrol.lark import LarkMessage, LarkOpenApiError
@@ -662,6 +663,58 @@ class WatcherTest(unittest.TestCase):
             self.assertTrue(due[0].pending_review)
             self.assertIn("pending_review_running", due[0].reasons)
 
+    def test_dispatch_due_triage_defers_when_field_values_probe_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            queue = TriageRequestQueue(Path(temp) / "triage-queue.json")
+            request = queue.enqueue(
+                issue_number=7,
+                signal=FakeSignal(),
+                quiet_seconds=0,
+                now=100,
+            )
+            self.assertIsNotNone(request)
+            dispatcher = RecordingDispatcher()
+
+            dispatched = dispatch_due_triage(
+                queue=queue,
+                dispatcher=dispatcher,
+                triage_quiet_seconds=60,
+                status_reader=RaisingStatusReader(GitHubIssueFieldsError("api.github.com EOF")),
+            )
+
+            due = queue.due_requests(now=10**20)
+            self.assertEqual(dispatched, 0)
+            self.assertEqual(dispatcher.requests, [])
+            self.assertTrue(due[0].pending_review)
+            self.assertIn("pending_review_running", due[0].reasons)
+
+    def test_dispatch_due_triage_defers_when_dispatch_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            queue = TriageRequestQueue(Path(temp) / "triage-queue.json")
+            request = queue.enqueue(
+                issue_number=7,
+                signal=FakeSignal(),
+                quiet_seconds=0,
+                now=100,
+            )
+            self.assertIsNotNone(request)
+            dispatcher = RaisingDispatcher(RuntimeError("gh workflow run failed"))
+
+            dispatched = dispatch_due_triage(
+                queue=queue,
+                dispatcher=dispatcher,
+                triage_quiet_seconds=60,
+            )
+
+            due = queue.due_requests(now=10**20)
+            self.assertEqual(dispatched, 0)
+            # The dispatcher was invoked (the failure is transient, after it
+            # started), so the request was recorded — but it must be deferred,
+            # not counted as dispatched.
+            self.assertEqual(len(dispatcher.requests), 1)
+            self.assertTrue(due[0].pending_review)
+            self.assertIn("pending_review_running", due[0].reasons)
+
 
 class RecordingDispatcher:
     def __init__(self) -> None:
@@ -685,6 +738,24 @@ class StaticStatusReader:
 
     def triage_status(self, issue_number: int) -> str:
         return self._status
+
+
+class RaisingStatusReader:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def triage_status(self, issue_number: int) -> str:
+        raise self._error
+
+
+class RaisingDispatcher:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+        self.requests: list[TriageRequest] = []
+
+    def dispatch(self, request: TriageRequest) -> object:
+        self.requests.append(request)
+        raise self._error
 
 
 if __name__ == "__main__":
