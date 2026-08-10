@@ -23,6 +23,7 @@ from bugpatrol.fix_notify import (
     resolve_single_issue_from_pr,
 )
 from bugpatrol.lark import LarkOpenApiError
+from bugpatrol.github import GitHubCliError
 from bugpatrol.intake import IntakeRecord
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.testing.fakes import FakeGitHubIssuesClient, FakeLarkMessengerClient
@@ -283,6 +284,54 @@ class FixNotifyTest(unittest.TestCase):
 
         self.assertEqual(result.sent, 1)
         self.assertEqual(result.errors, ())
+
+    def test_reconcile_fix_notifications_isolates_a_gh_failure_per_candidate(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeLarkMessengerClient()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+        issue = workflow.process(
+            IntakeRecord(
+                reporter_name="Reporter",
+                reporter_open_id="ou_1",
+                created_at="2026-07-01T00:00:00Z",
+                chat_id=config.lark.chat_id,
+                root_id="om_root",
+                message_id="om_1",
+                original_text="bug",
+            )
+        ).issue
+        intake_replies = len(lark.replies)
+        # A transient gh/network failure on ONE issue must defer only that issue
+        # (retried next pass — no marker is written) instead of aborting the
+        # whole batch, so the other candidates still notify.
+        bad_number = 999999
+        original_get_issue = github.get_issue
+
+        def get_issue(*, repo: str, issue_number: int):
+            if issue_number == bad_number:
+                raise GitHubCliError("gh api .../issues: EOF")
+            return original_get_issue(repo=repo, issue_number=issue_number)
+
+        github.get_issue = get_issue  # type: ignore[method-assign]
+
+        result = reconcile_fix_notifications(
+            repo=config.github_repo,
+            candidates=(
+                FixEventCandidate(event="issue_fixed", issue_number=issue.number),
+                FixEventCandidate(event="issue_fixed", issue_number=bad_number),
+            ),
+            dry_run=False,
+            github=github,  # type: ignore[arg-type]
+            lark=lark,
+        )
+
+        self.assertEqual(result.attempted, 2)
+        self.assertEqual(result.sent, 1)
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(len(lark.replies), intake_replies + 1)
+        self.assertEqual(len(github.created[0].comments), 1)
+        self.assertTrue(any(str(bad_number) in error and "EOF" in error for error in result.errors))
 
     def test_fix_event_candidates_from_json_accepts_issue_alias(self) -> None:
         candidates = fix_event_candidates_from_json(

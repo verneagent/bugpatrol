@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment, GitHubPullRequest, LarkMessengerClient
-from bugpatrol.github import GitHubCliIssuesClient
+from bugpatrol.github import GitHubCliError, GitHubCliIssuesClient
 from bugpatrol.intake import parse_intake_metadata
 from bugpatrol.lark import LarkOpenApiError, is_message_unreachable_error
 
@@ -385,10 +385,11 @@ def reconcile_fix_notifications(
                 resend=resend,
                 user_open_ids=user_open_ids,
             )
-        except (ValueError, LarkOpenApiError) as error:
-            # Isolate a bad candidate (unresolvable issue, transient Lark/API
-            # error) so it can't abort the whole batch; no marker is written, so
-            # a transient failure is retried on the next reconcile pass.
+        except (ValueError, LarkOpenApiError, GitHubCliError) as error:
+            # Isolate a bad candidate (unresolvable issue, transient Lark/gh
+            # network or API error) so it can't abort the whole batch; no marker
+            # is written, so a transient failure is retried on the next reconcile
+            # pass while the rest of the batch still notifies.
             skipped += 1
             errors.append(f"{candidate.event} #{issue_number}: {error}")
             continue
