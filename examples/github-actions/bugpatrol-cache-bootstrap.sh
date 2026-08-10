@@ -43,8 +43,12 @@ clone="$cache_root/$runner_ns/$repo"
 # expects for token auth.
 helper='!f() { echo "username=x-access-token"; echo "password=$GH_TOKEN"; }; f'
 
-# Bounded fetch/clone retry — never loop unbounded on a flaky network.
-max_attempts=3
+# Bounded fetch/clone retry — never loop unbounded on a flaky network. The
+# proxy on some runners intermittently drops github.com:443 for minutes at a
+# time (frpc tunnels, SSL_ERROR_SYSCALL), and git fails fast on each attempt,
+# so retries are cheap. 15 attempts with a capped backoff covers a ~5min blip;
+# a genuinely dead network still gives up and reports instead of hanging.
+max_attempts=15
 
 # On terminal git failure, print an actionable network diagnostic. A restricted
 # network (e.g. a home ISP) can silently drop github's HTTPS *pack* transfer
@@ -81,7 +85,12 @@ run_git_with_retry() {
     fi
     echo "git $* failed (attempt $attempt/$max_attempts); retrying" >&2
     attempt=$(( attempt + 1 ))
-    sleep $(( attempt * 2 ))
+    # Backoff grows but caps at 20s so a long blip doesn't mean long sleeps.
+    delay=$(( attempt * 2 ))
+    if (( delay > 20 )); then
+      delay=20
+    fi
+    sleep "$delay"
   done
 }
 
