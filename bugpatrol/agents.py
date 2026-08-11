@@ -10,8 +10,10 @@ from typing import Sequence
 
 from bugpatrol.config import ProjectConfig
 
-DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
-DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash[1m]"
+# DeepSeek via the OpenCode Go subscription gateway (Anthropic-compatible
+# endpoint). Host root WITHOUT /v1: the claude CLI appends /v1/messages itself.
+DEEPSEEK_ANTHROPIC_BASE_URL = "https://opencode.ai/zen/go"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
 
 
 @dataclass(frozen=True)

@@ -32,7 +32,7 @@ TristinMax = "ou_620062e9f017860d0e9676a5268c578b"
 SoxiaLiSA = "ou_a1c691f849e65bf147d32c912bc96345"
 
 [triage_agent]
-# deepseek: claude CLI + DeepSeek Anthropic 端点（需 DEEPSEEK_API_KEY）
+# deepseek: claude CLI + OpenCode Go 订阅 Anthropic 端点（DEEPSEEK_API_KEY=OpenCode Go key）
 provider = "deepseek"
 runner_labels = ["self-hosted", "bugpatrol-fived-triage"]
 model = ""
