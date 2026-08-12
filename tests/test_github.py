@@ -429,6 +429,7 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
         # backfill get_issue) must retry, not fail the run.
         for stderr in (
             'Get "https://api.github.com/...": net/http: TLS handshake timeout',
+            'Post "https://api.github.com/graphql": tls: failed to verify certificate: x509: certificate signed by unknown authority',
             'dial tcp 140.82.112.5:443: i/o timeout',
             'read tcp 10.0.0.2->140.82.112.5:443: connection reset by peer',
             'Get "https://api.github.com/...": unexpected EOF',

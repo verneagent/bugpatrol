@@ -149,7 +149,10 @@ class GitHubIssueFieldsRetryTest(unittest.TestCase):
         # The TLS handshake timeout that crashed the watcher mid-poll (a
         # `get_issue_field_values` in `triage_status`) must retry, not raise.
         client = GitHubIssueFieldsClient(sleep=lambda _s: None)
-        tls = 'Get "https://api.github.com/...": net/http: TLS handshake timeout'
+        tls = (
+            'Post "https://api.github.com/graphql": tls: failed to verify certificate: '
+            "x509: certificate signed by unknown authority"
+        )
 
         with patch("subprocess.run") as run:
             run.side_effect = [

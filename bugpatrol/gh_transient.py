@@ -29,6 +29,7 @@ _TRANSIENT_NETWORK_RE = re.compile(
     r"TLS handshake timeout"
     r"|net/http: request canceled"
     r"|Client\.Timeout exceeded"
+    r"|failed to verify certificate: x509: certificate signed by unknown authority"
     r"|(?:dial|read|write) tcp\b"
     r"|i/o timeout"
     r"|connection reset by peer"
