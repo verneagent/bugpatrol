@@ -386,6 +386,25 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
 
         self.assertEqual(run.call_count, 2)
 
+    def test_retries_empty_499_gateway_error_then_succeeds(self) -> None:
+        # Self-hosted runner proxies can return a 499 with no response body.
+        # Treat it like the 5xx gateway blips: the GitHub mutation did not land,
+        # so a bounded retry prevents a completed triage from being marked failed.
+        client = GitHubCliIssuesClient(sleep=lambda _s: None)
+        gateway = (
+            'failed to update https://github.com/o/r/issues/4746: '
+            'non-200 OK status code: 499  body: ""'
+        )
+
+        with patch("subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh"], 1, "", gateway),
+                subprocess.CompletedProcess(["gh"], 0, "", ""),
+            ]
+            client.add_assignee(repo="o/r", issue_number=4746, assignee="Sobit-Riki")
+
+        self.assertEqual(run.call_count, 2)
+
     def test_does_not_retry_non_transient_error(self) -> None:
         client = GitHubCliIssuesClient(sleep=lambda _s: None)
 
