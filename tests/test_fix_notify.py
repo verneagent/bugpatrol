@@ -437,6 +437,96 @@ class FixNotifyTest(unittest.TestCase):
         self.assertFalse(any(c.issue_number == 9 for c in candidates))
         self.assertFalse(any(c.event == "issue_fixed" for c in candidates))
 
+    def test_collect_fix_candidates_skips_failed_pr_issue_lookup(self) -> None:
+        class FlakyLookupFake:
+            def list_merged_pull_requests(self, *, repo: str, limit: int = 30):
+                recent = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                return (
+                    GitHubPullRequest(
+                        number=50,
+                        url="https://github.test/o/r/pull/50",
+                        title="Fix",
+                        body="Closes #1",
+                        closing_issue_numbers=(1,),
+                        merged_at=recent,
+                    ),
+                    GitHubPullRequest(
+                        number=51,
+                        url="https://github.test/o/r/pull/51",
+                        title="Fix",
+                        body="Closes #2",
+                        closing_issue_numbers=(2,),
+                        merged_at=recent,
+                    ),
+                )
+
+            def get_issue(self, *, repo: str, issue_number: int) -> GitHubIssue:
+                if issue_number == 1:
+                    raise GitHubCliError("gh api .../issues/1: EOF")
+                return GitHubIssue(
+                    number=issue_number,
+                    url=f"https://github.test/o/r/issues/{issue_number}",
+                    title="bug",
+                    body='<!-- BUGPATROL_INTAKE_META:{"chat_id":"oc_1","root_id":"om_1"} -->',
+                )
+
+            def list_issues(self, *, repo: str, state: str = "open"):
+                return ()
+
+        errors: list[str] = []
+        candidates = collect_fix_candidates_from_github(
+            repo="o/r",
+            github=FlakyLookupFake(),  # type: ignore[arg-type]
+            errors=errors,
+        )
+
+        self.assertEqual(candidates, (FixEventCandidate(event="pr_merged", issue_number=2, pr="51"),))
+        self.assertTrue(any("issue #1" in error and "EOF" in error for error in errors))
+
+    def test_collect_fix_candidates_skips_failed_timeline_lookup(self) -> None:
+        class FlakyTimelineFake:
+            def list_merged_pull_requests(self, *, repo: str, limit: int = 30):
+                return ()
+
+            def list_issues(self, *, repo: str, state: str = "open"):
+                recent = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                meta = '<!-- BUGPATROL_INTAKE_META:{"chat_id":"oc_1","root_id":"om_1"} -->'
+                return (
+                    GitHubIssue(
+                        1,
+                        "https://github.test/o/r/issues/1",
+                        "bug",
+                        meta,
+                        state="closed",
+                        state_reason="completed",
+                        closed_at=recent,
+                    ),
+                    GitHubIssue(
+                        2,
+                        "https://github.test/o/r/issues/2",
+                        "bug",
+                        meta,
+                        state="closed",
+                        state_reason="completed",
+                        closed_at=recent,
+                    ),
+                )
+
+            def list_issue_timeline(self, *, repo: str, issue_number: int):
+                if issue_number == 1:
+                    raise GitHubCliError("gh api .../issues/1/timeline: EOF")
+                return ({"event": "referenced", "commit_id": "deadbeef"},)
+
+        errors: list[str] = []
+        candidates = collect_fix_candidates_from_github(
+            repo="o/r",
+            github=FlakyTimelineFake(),  # type: ignore[arg-type]
+            errors=errors,
+        )
+
+        self.assertEqual(candidates, (FixEventCandidate(event="commit_linked", issue_number=2, commit="deadbeef"),))
+        self.assertTrue(any("issue #1 timeline" in error and "EOF" in error for error in errors))
+
     def test_collect_fix_candidates_since_days_window(self) -> None:
         candidates = collect_fix_candidates_from_github(
             repo="o/r",

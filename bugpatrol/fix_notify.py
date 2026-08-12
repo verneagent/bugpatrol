@@ -411,6 +411,7 @@ def collect_fix_candidates_from_github(
     pr_limit: int = 30,
     closed_issue_limit: int = 100,
     since_days: int = 0,
+    errors: list[str] | None = None,
 ) -> tuple[FixEventCandidate, ...]:
     """Gather fix candidates from GitHub instead of a hand-authored JSON file.
 
@@ -437,10 +438,19 @@ def collect_fix_candidates_from_github(
     managed_cache: dict[int, bool] = {}
     pr_covered: set[int] = set()
 
+    def _record_error(message: str) -> None:
+        if errors is not None:
+            errors.append(message)
+
     def _managed(issue_number: int) -> bool:
         if issue_number not in managed_cache:
-            issue = github.get_issue(repo=repo, issue_number=issue_number)
-            managed_cache[issue_number] = parse_intake_metadata(issue.body or "") is not None
+            try:
+                issue = github.get_issue(repo=repo, issue_number=issue_number)
+            except GitHubCliError as error:
+                _record_error(f"issue #{issue_number}: {error}")
+                managed_cache[issue_number] = False
+            else:
+                managed_cache[issue_number] = parse_intake_metadata(issue.body or "") is not None
         return managed_cache[issue_number]
 
     def _add(candidate: FixEventCandidate) -> None:
@@ -475,7 +485,11 @@ def collect_fix_candidates_from_github(
             continue
         if issue.number in pr_covered:
             continue
-        timeline = github.list_issue_timeline(repo=repo, issue_number=issue.number)
+        try:
+            timeline = github.list_issue_timeline(repo=repo, issue_number=issue.number)
+        except GitHubCliError as error:
+            _record_error(f"issue #{issue.number} timeline: {error}")
+            continue
         for commit in linked_commits_from_timeline(timeline):
             _add(
                 FixEventCandidate(

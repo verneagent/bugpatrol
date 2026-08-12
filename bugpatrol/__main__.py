@@ -603,10 +603,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
                 return 2
             lark = LarkOpenApiMessengerClient(
-            app_id=config.lark.app_id,
-            app_secret=app_secret,
-            base_url=config.lark.api_base_url,
-        )
+                app_id=config.lark.app_id,
+                app_secret=app_secret,
+                base_url=config.lark.api_base_url,
+            )
         checks = run_doctor(
             config=config,
             github=GitHubCliIssuesClient(gh=config.github_cli),
@@ -873,7 +873,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run-triage":
         config = load_project_config(args.project_config)
-        github = GitHubCliIssuesClient(gh=config.github_cli)
+        github = GitHubCliIssuesClient(gh=config.github_cli, transient_retries=8)
         issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
 
         # When the issue already has an open bugpatrol fix PR, a reporter's
@@ -1151,7 +1151,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.execute and args.repo_path is None:
             print("--repo-path is required with --execute", file=sys.stderr)
             return 2
-        github = GitHubCliIssuesClient(gh=config.github_cli)
+        github = GitHubCliIssuesClient(gh=config.github_cli, transient_retries=8)
         issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
         result = reconcile_triage(
             config=config,
@@ -1265,7 +1265,8 @@ def main(argv: list[str] | None = None) -> int:
         if bool(args.from_github) == bool(args.input):
             print("provide exactly one of --input or --from-github", file=sys.stderr)
             return 2
-        github = GitHubCliIssuesClient(gh=config.github_cli)
+        github = GitHubCliIssuesClient(gh=config.github_cli, transient_retries=8)
+        collection_errors: list[str] = []
         if args.from_github:
             candidates = collect_fix_candidates_from_github(
                 repo=config.github_repo,
@@ -1273,6 +1274,7 @@ def main(argv: list[str] | None = None) -> int:
                 pr_limit=args.pr_limit,
                 closed_issue_limit=args.closed_issue_limit,
                 since_days=args.since_days,
+                errors=collection_errors,
             )
         else:
             candidates = fix_event_candidates_from_json(json.loads(args.input.read_text()))
@@ -1304,7 +1306,7 @@ def main(argv: list[str] | None = None) -> int:
                     "duplicate_skipped": result.duplicate_skipped,
                     "skipped": result.skipped,
                     "summaries": [summary.__dict__ for summary in result.summaries],
-                    "errors": result.errors,
+                    "errors": (*collection_errors, *result.errors),
                 },
                 ensure_ascii=False,
             )
