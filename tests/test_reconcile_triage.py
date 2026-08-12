@@ -31,6 +31,21 @@ def seeded_github(repo: str) -> FakeGitHubIssuesClient:
     return github
 
 
+class FakeIssueFields:
+    def __init__(self, values: dict[str, str] | None = None, *, fail_writes: bool = False) -> None:
+        self.values = values or {}
+        self.fail_writes = fail_writes
+        self.writes: list[dict[str, object]] = []
+
+    def get_issue_field_values(self, **kwargs: object) -> dict[str, str]:
+        return dict(self.values)
+
+    def add_issue_field_values(self, **kwargs: object) -> None:
+        if self.fail_writes:
+            raise RuntimeError("field write failed")
+        self.writes.append(kwargs)
+
+
 class ReconcileTriageTest(unittest.TestCase):
     def setUp(self) -> None:
         self.config = load_project_config(Path("projects/todo-sandbox.toml"))
@@ -141,6 +156,39 @@ class ReconcileTriageTest(unittest.TestCase):
         self.assertEqual(actions[1], ("failed", "agent exploded"))
         self.assertEqual(actions[4], ("triaged", "applied"))
         self.assertEqual(len(result.failed), 1)
+
+    def test_execute_marks_failed_issue_when_reconcile_retry_raises(self) -> None:
+        issue_fields = FakeIssueFields()
+
+        result = reconcile_triage(
+            config=self.config,
+            github=self.github,
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+            execute=True,
+            run_triage=lambda issue_number: (_ for _ in ()).throw(RuntimeError("agent exploded")),
+        )
+
+        comments = self.github.list_issue_comments(repo=self.config.github_repo, issue_number=1)
+        self.assertEqual(result.failed[0].reason, "agent exploded")
+        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Failed"})
+        self.assertIn("## BugPatrol triage failed", comments[-1].body)
+        self.assertIn("reconcile retry failed: agent exploded", comments[-1].body)
+
+    def test_execute_leaves_last_resort_comment_when_failure_reporter_breaks(self) -> None:
+        issue_fields = FakeIssueFields(fail_writes=True)
+
+        result = reconcile_triage(
+            config=self.config,
+            github=self.github,
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+            execute=True,
+            run_triage=lambda issue_number: (_ for _ in ()).throw(RuntimeError("agent exploded")),
+        )
+
+        comments = self.github.list_issue_comments(repo=self.config.github_repo, issue_number=1)
+        self.assertEqual(result.failed[0].reason, "agent exploded")
+        self.assertIn("## BugPatrol triage failed", comments[-1].body)
+        self.assertIn("Failure reporting also failed: field write failed", comments[-1].body)
 
     def test_default_runner_retries_stale_context_with_fresh_context(self) -> None:
         statuses = iter(["stale_context", "applied"])

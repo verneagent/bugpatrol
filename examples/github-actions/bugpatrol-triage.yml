@@ -122,6 +122,8 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BUGPATROL_PROJECT_CONFIG: ${{ vars.BUGPATROL_PROJECT_CONFIG }}
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          REPOSITORY: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -uo pipefail
@@ -140,5 +142,5 @@ jobs:
               --detail "runner: ${{ runner.name }}" && exit 0
             echo "report-job-failure failed; falling back to a plain comment" >&2
           fi
-          gh issue comment "${{ inputs.issue_number }}" --repo "$GITHUB_REPOSITORY" \
+          gh issue comment "${ISSUE_NUMBER:?}" --repo "${REPOSITORY:?}" \
             --body "$(printf '## BugPatrol triage failed\n\n分诊运行失败，本次没有产生分诊结论。\n\n运行日志：%s\n' "$RUN_URL")"

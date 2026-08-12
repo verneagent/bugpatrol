@@ -15,6 +15,7 @@ from bugpatrol.triage_result import TRIAGE_META_START
 from bugpatrol.triage_runner import (
     execute_triage_run,
     prepare_triage_run,
+    report_workflow_failure,
     triage_run_in_flight,
 )
 
@@ -138,6 +139,15 @@ def reconcile_triage(
         try:
             status = run_triage(candidate.issue_number)
         except Exception as error:  # noqa: BLE001 - one bad issue must not abort the batch; failure is surfaced in events
+            if issue_fields is not None:
+                _report_reconcile_triage_failure(
+                    config=config,
+                    github=github,
+                    issue_fields=issue_fields,
+                    lark=lark,
+                    issue_number=candidate.issue_number,
+                    error=error,
+                )
             events.append(
                 ReconcileTriageEvent(issue_number=candidate.issue_number, action="failed", reason=str(error))
             )
@@ -153,3 +163,46 @@ def reconcile_triage(
         candidates=candidates,
         events=tuple(events),
     )
+
+
+def _report_reconcile_triage_failure(
+    *,
+    config: ProjectConfig,
+    github: GitHubCliIssuesClient,
+    issue_fields: GitHubIssueFieldsClient,
+    lark: LarkMessengerClient | None,
+    issue_number: int,
+    error: Exception,
+) -> None:
+    """Make reconcile-discovered triage failures visible on the issue.
+
+    Reconcile is the recovery path for jobs that died before writing a terminal
+    triage result. If the retry also fails, an internal JSON event is not enough:
+    the issue must carry a durable Failed status/comment so humans and later
+    automation can see that it is no longer just "running".
+    """
+    try:
+        report_workflow_failure(
+            config=config,
+            issue_number=issue_number,
+            job="triage",
+            github=github,
+            issue_fields=issue_fields,
+            lark=lark,
+            detail=f"reconcile retry failed: {error}",
+        )
+    except Exception as report_error:  # noqa: BLE001 - last-resort issue comment is better than silence
+        try:
+            github.add_issue_comment(
+                repo=config.github_repo,
+                issue_number=issue_number,
+                body=(
+                    "## BugPatrol triage failed\n\n"
+                    f"Reconcile retried triage but it failed before producing a result: {error}\n\n"
+                    f"Failure reporting also failed: {report_error}"
+                ),
+            )
+        except Exception:
+            # The batch event still records the original failure. Do not let a
+            # broken last-resort comment abort reconciliation for other issues.
+            return
