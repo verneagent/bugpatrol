@@ -663,6 +663,29 @@ class WatcherTest(unittest.TestCase):
             self.assertTrue(due[0].pending_review)
             self.assertIn("pending_review_running", due[0].reasons)
 
+    def test_dispatch_due_triage_discards_stale_request_when_issue_is_done(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            queue = TriageRequestQueue(Path(temp) / "triage-queue.json")
+            request = queue.enqueue(
+                issue_number=7,
+                signal=FakeSignal(),
+                quiet_seconds=0,
+                now=100,
+            )
+            self.assertIsNotNone(request)
+            dispatcher = RecordingDispatcher()
+
+            dispatched = dispatch_due_triage(
+                queue=queue,
+                dispatcher=dispatcher,
+                triage_quiet_seconds=60,
+                status_reader=StaticStatusReader("Done"),
+            )
+
+            self.assertEqual(dispatched, 0)
+            self.assertEqual(dispatcher.requests, [])
+            self.assertEqual(queue.due_requests(now=10**20), ())
+
     def test_dispatch_due_triage_defers_when_field_values_probe_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             queue = TriageRequestQueue(Path(temp) / "triage-queue.json")

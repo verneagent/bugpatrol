@@ -402,6 +402,70 @@ class TriageRunnerTest(unittest.TestCase):
         self.assertEqual(issue_fields.writes, [])
         self.assertEqual(github.comments, ["Follow-up comment"])
 
+    def test_execute_triage_run_skips_when_already_triaged_without_new_material(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.comments.append(
+            '<!-- BUGPATROL_TRIAGE_META\n{"result_fingerprint":"abc","version":1}\nBUGPATROL_TRIAGE_META -->'
+        )
+        issue_fields = FakeIssueFields()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=root / "output.json",
+                invocation=AgentInvocation(provider="codex", command=["true"]),
+            )
+
+            with patch("subprocess.run") as run:
+                status = execute_triage_run(
+                    config=config,
+                    issue_number=7,
+                    plan=plan,
+                    github=github,  # type: ignore[arg-type]
+                    issue_fields=issue_fields,  # type: ignore[arg-type]
+                )
+
+        self.assertEqual(status, "already_triaged")
+        run.assert_not_called()
+        self.assertEqual(issue_fields.writes, [])
+        self.assertEqual(len(github.comments), 2)
+
+    def test_execute_triage_run_does_not_skip_when_new_material_follows_triage(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.comments.append(
+            '<!-- BUGPATROL_TRIAGE_META\n{"result_fingerprint":"abc","version":1}\nBUGPATROL_TRIAGE_META -->'
+        )
+        github.comments.append("New material after the previous triage")
+        issue_fields = FakeIssueFields()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "output.json"
+            output.write_text(valid_triage_output())
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=output,
+                invocation=AgentInvocation(provider="codex", command=["true"]),
+                context_comment_ids=("1", "2"),
+            )
+
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["true"], 0)
+                status = execute_triage_run(
+                    config=config,
+                    issue_number=7,
+                    plan=plan,
+                    github=github,  # type: ignore[arg-type]
+                    issue_fields=issue_fields,  # type: ignore[arg-type]
+                )
+
+        self.assertEqual(status, "stale_context")
+        run.assert_called_once()
+        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Running"})
+
     def test_execute_triage_run_reports_stale_context_when_comments_changed(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGithub()

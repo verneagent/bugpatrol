@@ -141,6 +141,9 @@ class GitHubTriageStatusReader:
         return values.get(github_name, "")
 
 
+STALE_QUEUE_TERMINAL_TRIAGE_STATUSES = frozenset({"Done", "Skipped", "Needs info"})
+
+
 def run_polling_watcher(
     *,
     config: ProjectConfig,
@@ -494,7 +497,7 @@ def dispatch_due_triage(
     for request in queue.due_requests():
         if status_reader is not None:
             try:
-                running = status_reader.triage_status(request.issue_number) == "Running"
+                status = status_reader.triage_status(request.issue_number)
             except GitHubIssueFieldsError as error:
                 # The field-values probe can transiently fail (e.g. api.github.com
                 # EOF) even after its own bounded retries. Crash here and the whole
@@ -506,8 +509,11 @@ def dispatch_due_triage(
                 )
                 queue.mark_pending_review(request=request, quiet_seconds=triage_quiet_seconds)
                 continue
-            if running:
+            if status == "Running":
                 queue.mark_pending_review(request=request, quiet_seconds=triage_quiet_seconds)
+                continue
+            if status in STALE_QUEUE_TERMINAL_TRIAGE_STATUSES:
+                queue.discard(request)
                 continue
         try:
             dispatcher.dispatch(request)

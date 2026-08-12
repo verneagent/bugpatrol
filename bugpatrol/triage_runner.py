@@ -53,6 +53,7 @@ from bugpatrol.triage_result import (
     TriageResult,
     TriageRunStats,
     apply_triage_result,
+    parse_triage_metadata,
     parse_triage_result,
     send_intake_topic_message,
     triage_runner_name,
@@ -263,6 +264,9 @@ def execute_triage_run(
 ) -> str:
     issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
     require_bugpatrol_managed_issue(issue)
+    existing_comments = github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)
+    if triage_already_applied_without_new_material(existing_comments):
+        return "already_triaged"
     # Fail fast if the canonical field specs declare an option the live org
     # field is missing. Without this, a triage would run the agent to completion
     # and only crash at write time (add_issue_field_values), leaving the issue
@@ -465,6 +469,23 @@ def record_triage_run_start(
         issue_number=issue_number,
         body=append_triage_run_metadata(metadata),
     )
+
+
+def triage_already_applied_without_new_material(comments: tuple[GitHubIssueComment, ...]) -> bool:
+    """True when the newest applied triage result has no later material comments."""
+    latest_triage_index: int | None = None
+    for index, comment in enumerate(comments):
+        if parse_triage_metadata(comment.body) is not None:
+            latest_triage_index = index
+    if latest_triage_index is None:
+        return False
+    for comment in comments[latest_triage_index + 1 :]:
+        if is_triage_bookkeeping_comment(comment.body):
+            continue
+        if parse_triage_metadata(comment.body) is not None:
+            continue
+        return False
+    return True
 
 
 def mark_triage_running(

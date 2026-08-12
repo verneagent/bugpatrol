@@ -221,6 +221,12 @@ class TriageRequestQueue:
             del self._requests[request.issue_number]
             self.save()
 
+    def discard(self, request: TriageRequest) -> None:
+        current = self._requests.get(request.issue_number)
+        if current and current.trigger_fingerprint == request.trigger_fingerprint:
+            del self._requests[request.issue_number]
+            self.save()
+
     def save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
