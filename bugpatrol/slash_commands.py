@@ -15,6 +15,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from typing import Callable, Protocol, Sequence
 
@@ -128,13 +129,34 @@ class _ReplyClient(Protocol):
     def reply_to_message(self, *, chat_id: str, message_id: str, text: str) -> None: ...
 
 
-def make_dispatch(command_template: str | Sequence[str]) -> Callable[[int], None]:
+def _summarize_completed_process(completed: subprocess.CompletedProcess[str]) -> str:
+    detail = "\n".join(
+        part.strip()
+        for part in (completed.stderr or "", completed.stdout or "")
+        if part and part.strip()
+    )
+    if not detail:
+        return f"dispatch command failed with exit {completed.returncode}"
+    detail = detail.replace("\r", "")
+    if len(detail) > 800:
+        detail = f"{detail[-800:]}"
+    return f"dispatch command failed with exit {completed.returncode}: {detail}"
+
+
+def make_dispatch(
+    command_template: str | Sequence[str],
+    *,
+    attempts: int = 3,
+    retry_delay_seconds: float = 2.0,
+) -> Callable[[int], None]:
     """Build a callable that runs a workflow-dispatch command for an issue number.
 
     Mirrors CommandTriageDispatcher: the template supports `{issue_number}` and
     is run via subprocess (e.g. `gh workflow run bugpatrol-fix.yml ... -f
     issue_number={issue_number}`). Used for both `/fix` and `/retriage`.
     """
+    if attempts < 1:
+        raise ValueError("dispatch attempts must be >= 1")
     if isinstance(command_template, str):
         template = tuple(shlex.split(command_template))
     elif len(command_template) == 1 and isinstance(command_template[0], str):
@@ -146,9 +168,20 @@ def make_dispatch(command_template: str | Sequence[str]) -> Callable[[int], None
 
     def dispatch(issue_number: int) -> None:
         command = [part.format(issue_number=issue_number) for part in template]
-        completed = subprocess.run(command, check=False)
-        if completed.returncode != 0:
-            raise RuntimeError(f"dispatch command failed with exit {completed.returncode}")
+        completed: subprocess.CompletedProcess[str] | None = None
+        for attempt in range(1, attempts + 1):
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode == 0:
+                return
+            if attempt < attempts:
+                time.sleep(retry_delay_seconds * attempt)
+        assert completed is not None
+        raise RuntimeError(_summarize_completed_process(completed))
 
     return dispatch
 

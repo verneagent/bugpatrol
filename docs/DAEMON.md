@@ -16,10 +16,15 @@ python -m bugpatrol watch-lark projects/example.toml \
   --triage-queue .bugpatrol/triage-queue.json \
   --triage-dispatch-command \
     gh workflow run bugpatrol-triage.yml \
+      --ref main \
       -f issue_number={issue_number} \
       -f trigger_fingerprint={trigger_fingerprint} \
       -f reason={reason}
 ```
+
+`--ref main` selects the stable production workflow definition. It does not force
+the triage result to analyze `main`; branch selection still comes from the
+project config and issue context.
 
 Run exactly one active watcher writer per Lark group. Use `--lease-file` to
 prevent accidental duplicate writers on one host.

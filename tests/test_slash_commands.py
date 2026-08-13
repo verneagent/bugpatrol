@@ -3,6 +3,8 @@ from __future__ import annotations
 import dataclasses
 import unittest
 from pathlib import Path
+from subprocess import CompletedProcess
+from unittest.mock import patch
 
 from bugpatrol.clients import GitHubIssue
 from bugpatrol.config import load_project_config
@@ -184,9 +186,46 @@ class MakeDispatchTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             dispatch(1)
 
+    def test_retries_transient_dispatch_failure(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> CompletedProcess[str]:
+            calls.append(command)
+            if len(calls) == 1:
+                return CompletedProcess(command, 1, "", "Post https://api.github.com/graphql: EOF")
+            return CompletedProcess(command, 0, "", "")
+
+        with patch("bugpatrol.slash_commands.subprocess.run", side_effect=fake_run), \
+            patch("bugpatrol.slash_commands.time.sleep") as sleep:
+            dispatch = make_dispatch(
+                ["gh", "workflow", "run", "bugpatrol-triage.yml", "-f", "issue_number={issue_number}"],
+                retry_delay_seconds=0,
+            )
+            dispatch(42)
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][-1], "issue_number=42")
+        sleep.assert_called_once()
+
+    def test_raises_with_last_stderr_after_retries(self) -> None:
+        command = ["gh", "workflow", "run", "bugpatrol-triage.yml"]
+
+        def fake_run(args: list[str], **_: object) -> CompletedProcess[str]:
+            return CompletedProcess(args, 1, "", "unable to determine default branch: EOF")
+
+        with patch("bugpatrol.slash_commands.subprocess.run", side_effect=fake_run), \
+            patch("bugpatrol.slash_commands.time.sleep"):
+            dispatch = make_dispatch(command, attempts=2, retry_delay_seconds=0)
+            with self.assertRaisesRegex(RuntimeError, "unable to determine default branch: EOF"):
+                dispatch(42)
+
     def test_empty_template_rejected(self) -> None:
         with self.assertRaises(ValueError):
             make_dispatch([])
+
+    def test_attempt_count_must_be_positive(self) -> None:
+        with self.assertRaises(ValueError):
+            make_dispatch(["true"], attempts=0)
 
 
 class SlashCommandHandlerTest(unittest.TestCase):
