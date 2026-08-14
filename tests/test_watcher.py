@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import tempfile
 import threading
@@ -19,6 +20,7 @@ from bugpatrol.triage_queue import TriageRequest, TriageRequestQueue
 from bugpatrol.watcher import (
     MAX_CONSECUTIVE_SCAN_FAILURES,
     TOPIC_OUTAGE_CHAT_SUMMARY_TOPICS,
+    _harvest_topic_results,
     dispatch_due_triage,
     render_topic_outage_alert,
     render_topic_outage_reply,
@@ -422,6 +424,25 @@ class WatcherTest(unittest.TestCase):
         self.assertIn("om_4", text)
         self.assertNotIn("om_5", text)
         self.assertIn("另外 3 个", text)
+
+    def test_harvest_topic_results_folds_raising_future_into_error_result(self) -> None:
+        # A topic processor that raises (instead of reporting its error in the
+        # result) must never kill the watcher: fold the exception into an errored
+        # TopicResult so the topic retries and the outage alerting still fires.
+        def _boom() -> TopicResult:
+            raise RuntimeError("boom")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            in_flight = {"om_a1": pool.submit(_boom)}
+            results = _harvest_topic_results(in_flight, wait_all=True)
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].root_key, "om_a1")
+        self.assertEqual(results[0].outcomes, ())
+        self.assertEqual(results[0].events, ())
+        self.assertEqual(results[0].processed_message_ids, ())
+        self.assertIn("RuntimeError: boom", results[0].error)
+        self.assertEqual(in_flight, {})
 
     def test_run_polling_watcher_can_enqueue_and_dispatch_triage(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

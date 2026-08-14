@@ -412,7 +412,10 @@ def _harvest_topic_results(
 ) -> list[TopicResult]:
     """Collect finished topic results; optionally block for the stragglers.
 
-    `process_topic_batch` never raises, so `future.result()` is safe.
+    A topic processor is supposed to report its error in the result and never
+    raise, but one that does must not kill the whole watcher: fold the exception
+    into an errored TopicResult so the topic retries next scan and the outage
+    alerting still fires.
     """
     if wait_all:
         for future in list(in_flight.values()):
@@ -421,7 +424,18 @@ def _harvest_topic_results(
     for root_key, future in list(in_flight.items()):
         if not future.done():
             continue
-        results.append(future.result())
+        try:
+            results.append(future.result())
+        except Exception as exc:  # noqa: BLE001 - a raising topic must never kill the watcher
+            results.append(
+                TopicResult(
+                    root_key=root_key,
+                    outcomes=(),
+                    events=(),
+                    processed_message_ids=(),
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            )
         del in_flight[root_key]
     return results
 

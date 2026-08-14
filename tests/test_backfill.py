@@ -686,6 +686,38 @@ class TopicBatchTest(unittest.TestCase):
         self.assertIn("boom", result.error)
         self.assertEqual([e.action for e in result.events], ["error"])
 
+    def test_process_topic_batch_orphan_probe_gh_failure_does_not_raise(self) -> None:
+        # A transient gh failure (api.github.com EOF) inside the orphan-check's
+        # has_issue_for_root probe must become a topic error, not crash the whole
+        # watcher; nothing is marked processed so the topic retries next scan.
+        from bugpatrol.github import GitHubCliError
+
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        config = dataclasses.replace(
+            config, intake=dataclasses.replace(config.intake, skip_orphan_replies=True)
+        )
+
+        class ExplodingOrphanProbe:
+            def has_issue_for_root(self, *, chat_id: str, root_id: str) -> bool:
+                raise GitHubCliError("gh issue list ...: EOF")
+
+        batch = TopicBatch(
+            root_key="om_a1",
+            messages=(message(message_id="om_b1", root_id="om_a1", text="An orphan reply"),),
+        )
+
+        result = process_topic_batch(
+            batch,
+            config=config,
+            lark=FakeLarkHistory([]),
+            workflow=ExplodingOrphanProbe(),  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(result.processed_message_ids, ())
+        self.assertEqual(result.outcomes, ())
+        self.assertIn("GitHubCliError", result.error)
+        self.assertEqual([e.action for e in result.events], ["error"])
+
     def test_process_topic_batch_build_failure_keeps_prefix(self) -> None:
         # A per-message build failure (e.g. attachment materialization) writes
         # the successfully-built prefix and leaves the rest to retry.

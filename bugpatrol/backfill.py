@@ -270,7 +270,17 @@ def _process_message_group(
     root_key = messages[0].root_id or messages[0].message_id
     if config.intake.skip_orphan_replies:
         contains_root = any(message.message_id == root_key for message in messages)
-        if not contains_root and not workflow.has_issue_for_root(chat_id=chat_id, root_id=root_key):
+        try:
+            has_issue = workflow.has_issue_for_root(chat_id=chat_id, root_id=root_key)
+        except Exception as exc:  # noqa: BLE001 - a transient gh failure (e.g. api.github.com
+            # EOF) inside the orphan probe must not kill the watcher: report it as
+            # a topic error and retry the whole topic on the next scan.
+            error = f"{type(exc).__name__}: {exc}"
+            events.append(
+                BackfillEvent(message_id=messages[0].message_id, action="error", reason=error)
+            )
+            return None, events, processed_command_ids, error
+        if not contains_root and not has_issue:
             # Replies in a topic BugPatrol never intook and whose root is not in
             # this batch: appending is impossible and a fragment issue would be
             # misleading.
