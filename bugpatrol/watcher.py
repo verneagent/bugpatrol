@@ -123,6 +123,9 @@ def _apply_discovered_chats(
 
 
 class TriageStatusReader(Protocol):
+    def issue_state(self, issue_number: int) -> str:
+        """Return the GitHub issue state, "open" or "closed"."""
+
     def triage_status(self, issue_number: int) -> str:
         """Return the current triage status for an issue."""
 
@@ -131,6 +134,12 @@ class GitHubTriageStatusReader:
     def __init__(self, *, config: ProjectConfig, issue_fields: GitHubIssueFieldsClient) -> None:
         self._config = config
         self._issue_fields = issue_fields
+
+    def issue_state(self, issue_number: int) -> str:
+        return self._issue_fields.get_issue_state(
+            repo=self._config.github_repo,
+            issue_number=issue_number,
+        )
 
     def triage_status(self, issue_number: int) -> str:
         values = self._issue_fields.get_issue_field_values(
@@ -510,6 +519,26 @@ def dispatch_due_triage(
     dispatched = 0
     for request in queue.due_requests():
         if status_reader is not None:
+            try:
+                state = status_reader.issue_state(request.issue_number)
+            except GitHubIssueFieldsError as error:
+                # The state probe can transiently fail (e.g. api.github.com
+                # EOF) even after its own bounded retries. Crash here and the
+                # whole watcher dies with every blip; defer the request instead
+                # and retry when it comes due again.
+                print(
+                    f"dispatch_due_triage: state check failed for #{request.issue_number}: {error}",
+                    file=sys.stderr,
+                )
+                queue.mark_pending_review(request=request, quiet_seconds=triage_quiet_seconds)
+                continue
+            if state == "closed":
+                # A closed issue never needs triage. Drop the stale queue entry
+                # (its field may be stuck on "Running" from an old run) instead
+                # of deferring it forever — otherwise the watcher cycles it every
+                # poll and a later reopen would never re-dispatch.
+                queue.discard(request)
+                continue
             try:
                 status = status_reader.triage_status(request.issue_number)
             except GitHubIssueFieldsError as error:

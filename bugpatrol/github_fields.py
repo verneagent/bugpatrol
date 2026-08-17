@@ -111,6 +111,19 @@ class GitHubIssueFieldsClient:
                 values[field_name] = str(item["value"])
         return values
 
+    def get_issue_state(self, *, repo: str, issue_number: int) -> str:
+        owner, name = split_repo(repo)
+        data = json.loads(
+            self._run_api(
+                [
+                    "-H",
+                    f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                    f"/repos/{owner}/{name}/issues/{issue_number}",
+                ]
+            )
+        )
+        return str(data.get("state", ""))
+
     def _run_api(self, args: Sequence[str], *, stdin: str | None = None) -> str:
         # Bounded retry on transient gateway/transport blips (e.g. a
         # `net/http: TLS handshake timeout` mid-poll) so a single flaky call

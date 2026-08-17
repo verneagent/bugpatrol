@@ -143,6 +143,20 @@ class GitHubIssueFieldsTest(unittest.TestCase):
             run.call_args.args[0],
         )
 
+    def test_client_reads_issue_state(self) -> None:
+        client = GitHubIssueFieldsClient()
+        response = json.dumps({"number": 9, "state": "closed"})
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 0, response, "")
+            state = client.get_issue_state(repo="TheCloverLab/example", issue_number=9)
+
+        self.assertEqual(state, "closed")
+        self.assertIn(
+            "/repos/TheCloverLab/example/issues/9",
+            run.call_args.args[0],
+        )
+
 
 class GitHubIssueFieldsRetryTest(unittest.TestCase):
     def test_retries_transient_tls_timeout_then_succeeds(self) -> None:

@@ -732,6 +732,57 @@ class WatcherTest(unittest.TestCase):
             self.assertTrue(due[0].pending_review)
             self.assertIn("pending_review_running", due[0].reasons)
 
+    def test_dispatch_due_triage_discards_closed_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            queue = TriageRequestQueue(Path(temp) / "triage-queue.json")
+            request = queue.enqueue(
+                issue_number=7,
+                signal=FakeSignal(),
+                quiet_seconds=0,
+                now=100,
+            )
+            self.assertIsNotNone(request)
+            dispatcher = RecordingDispatcher()
+
+            # A closed issue must be dropped from the queue even though its
+            # field reads "Running" (stale from an old run) — otherwise it
+            # would defer forever and never re-dispatch if reopened.
+            dispatched = dispatch_due_triage(
+                queue=queue,
+                dispatcher=dispatcher,
+                triage_quiet_seconds=60,
+                status_reader=StaticStatusReader("Running", state="closed"),
+            )
+
+            self.assertEqual(dispatched, 0)
+            self.assertEqual(dispatcher.requests, [])
+            self.assertEqual(queue.due_requests(now=10**20), ())
+
+    def test_dispatch_due_triage_defers_when_state_probe_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            queue = TriageRequestQueue(Path(temp) / "triage-queue.json")
+            request = queue.enqueue(
+                issue_number=7,
+                signal=FakeSignal(),
+                quiet_seconds=0,
+                now=100,
+            )
+            self.assertIsNotNone(request)
+            dispatcher = RecordingDispatcher()
+
+            dispatched = dispatch_due_triage(
+                queue=queue,
+                dispatcher=dispatcher,
+                triage_quiet_seconds=60,
+                status_reader=RaisingStateReader(GitHubIssueFieldsError("api.github.com EOF")),
+            )
+
+            due = queue.due_requests(now=10**20)
+            self.assertEqual(dispatched, 0)
+            self.assertEqual(dispatcher.requests, [])
+            self.assertTrue(due[0].pending_review)
+            self.assertIn("pending_review_running", due[0].reasons)
+
     def test_dispatch_due_triage_defers_when_dispatch_raises(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             queue = TriageRequestQueue(Path(temp) / "triage-queue.json")
@@ -777,8 +828,12 @@ class FakeSignal:
 
 
 class StaticStatusReader:
-    def __init__(self, status: str) -> None:
+    def __init__(self, status: str, *, state: str = "open") -> None:
         self._status = status
+        self._state = state
+
+    def issue_state(self, issue_number: int) -> str:
+        return self._state
 
     def triage_status(self, issue_number: int) -> str:
         return self._status
@@ -788,8 +843,22 @@ class RaisingStatusReader:
     def __init__(self, error: Exception) -> None:
         self._error = error
 
+    def issue_state(self, issue_number: int) -> str:
+        return "open"
+
     def triage_status(self, issue_number: int) -> str:
         raise self._error
+
+
+class RaisingStateReader:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def issue_state(self, issue_number: int) -> str:
+        raise self._error
+
+    def triage_status(self, issue_number: int) -> str:
+        return "Pending"
 
 
 class RaisingDispatcher:
