@@ -615,15 +615,28 @@ def _run_followup_classifier(
     command = ["claude", "-p", prompt]
     if invocation.model:
         command += ["--model", invocation.model]
+    # Same merge as the main agent: invocation.env carries only the provider
+    # endpoint overrides; replacing the whole env would drop PATH/HOME and the
+    # claude CLI would lose its config/cache.
+    agent_env = {
+        **os.environ,
+        **(invocation.env or {}),
+        # One-word completion; the unknown-model window enforcement only adds
+        # startup noise to the classifier and never matters for it.
+        "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT": "1",
+    }
     try:
         completed = subprocess.run(
             command,
             check=False,
-            env=invocation.env or None,
+            env=agent_env,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
-            timeout=120,
+            # The classifier is a tiny single-turn completion; seconds is plenty.
+            # The 120s budget would only ever be consumed by provider retries on
+            # a bad key, where failing fast is better than stalling the followup.
+            timeout=60,
         )
     except (OSError, subprocess.SubprocessError) as error:
         print(f"followup classifier failed: {error}", file=sys.stderr)

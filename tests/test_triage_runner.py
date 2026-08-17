@@ -504,6 +504,11 @@ class TriageRunnerTest(unittest.TestCase):
         self.assertEqual(status, "no_change_followup")
         # Only the classifier ran; the expensive agent never did.
         self.assertEqual(run.call_count, 1)
+        # The classifier env is the process env merged over the provider
+        # endpoint override (replacing it wholesale would drop PATH/HOME).
+        classifier_env = run.call_args.kwargs["env"]
+        self.assertEqual(classifier_env["ANTHROPIC_BASE_URL"], "https://example.invalid")
+        self.assertIn("HOME", classifier_env)
         self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Done"})
         self.assertEqual(len(github.comments), 3)
 
