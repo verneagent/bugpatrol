@@ -21,6 +21,7 @@ from bugpatrol.config import load_project_config
 from bugpatrol.fix_runner import (
     FixRunPlan,
     _closing_issue_candidates,
+    _run_fix_agent,
     execute_fix_revise,
     execute_fix_run,
     latest_reporter_correction,
@@ -618,6 +619,33 @@ class RunFixReviseGuardsTest(unittest.TestCase):
             )
         self.assertEqual(status, "issue_closed")
         self.assertFalse(github.resolved_threads)
+
+
+class RunFixAgentTimeoutTest(unittest.TestCase):
+    def test_run_fix_agent_fails_fast_when_llm_call_hangs(self) -> None:
+        # Same latent gap as the triage agent (#4938): a hung provider call used
+        # to burn the whole fix workflow job timeout silently. The subprocess
+        # timeout must fail fast with a clear error instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = FixRunPlan(
+                context_path=root / "fix-context.md",
+                schema_path=root / "fix.schema.json",
+                output_path=root / "fix-output.json",
+                invocation=AgentInvocation(provider="deepseek", command=["claude"], env={}, model="m"),
+                agent_cwd=root,
+                verdict="代码 Bug",
+                base_branch="main",
+                head_branch="bugpatrol/fix-issue-7",
+                reviewer="dev1",
+                reviewer_open_id="",
+                branch_note="",
+            )
+            timeout = subprocess.TimeoutExpired(cmd=["claude"], timeout=1200, output="", stderr="")
+            timeout.stdout = ""
+            with patch("bugpatrol.fix_runner.subprocess.run", side_effect=timeout):
+                with self.assertRaisesRegex(RuntimeError, "fix agent timed out after 1200s"):
+                    _run_fix_agent(plan)
 
 
 def _followup_reply(text: str, reason: str, message_id: str = "om_x") -> str:

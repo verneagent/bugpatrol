@@ -89,7 +89,7 @@ from bugpatrol.triage_result import (
     send_intake_topic_message,
     triage_runner_name,
 )
-from bugpatrol.triage_runner import resolve_issue_branch
+from bugpatrol.triage_runner import AGENT_TIMEOUT_SECONDS, resolve_issue_branch
 from bugpatrol.worktree import (
     fix_revise_worktree,
     fix_worktree,
@@ -1225,15 +1225,24 @@ def _run_fix_agent(plan: FixRunPlan) -> TriageRunStats:
     """
     agent_env = {**os.environ, **plan.invocation.env} if plan.invocation.env else None
     started = time.monotonic()
-    completed = subprocess.run(
-        plan.invocation.command,
-        check=False,
-        env=agent_env,
-        cwd=str(plan.agent_cwd),
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        completed = subprocess.run(
+            plan.invocation.command,
+            check=False,
+            env=agent_env,
+            cwd=str(plan.agent_cwd),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            # Same guard as the triage agent: a hung LLM call must fail fast
+            # instead of burning the whole workflow job timeout silently.
+            timeout=AGENT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        _write_turn_log(plan.output_path.parent, error.stdout or "", error.stderr or "")
+        raise RuntimeError(
+            f"fix agent timed out after {AGENT_TIMEOUT_SECONDS}s"
+        ) from error
     duration_seconds = time.monotonic() - started
     _write_turn_log(plan.output_path.parent, completed.stdout, completed.stderr)
     input_tokens, cached_input_tokens, output_tokens = parse_claude_token_usage(completed.stdout or "")
