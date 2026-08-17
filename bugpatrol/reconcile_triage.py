@@ -1,29 +1,15 @@
-"""Find intook-but-untriaged issues and optionally run triage on them."""
+"""Find intook-but-untriaged issues and dispatch triage for them."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 
-from bugpatrol.clients import LarkMessengerClient
 from bugpatrol.config import ProjectConfig
 from bugpatrol.github import GitHubCliIssuesClient
-from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake import parse_intake_metadata
 from bugpatrol.triage_result import TRIAGE_META_START
-from bugpatrol.triage_runner import (
-    execute_triage_run,
-    prepare_triage_run,
-    report_workflow_failure,
-    triage_run_in_flight,
-)
-
-# Statuses execute_triage_run returns instead of applying a result; each is
-# recoverable by re-running with fresh context, and the last attempt forces a
-# result rather than returning one of these.
-RETRYABLE_TRIAGE_STATUSES = frozenset({"no_output", "invalid_output", "stale_context"})
-MAX_TRIAGE_ATTEMPTS = 3
+from bugpatrol.triage_runner import triage_run_in_flight
 
 
 @dataclass(frozen=True)
@@ -86,48 +72,24 @@ def reconcile_triage(
     *,
     config: ProjectConfig,
     github: GitHubCliIssuesClient,
-    issue_fields: GitHubIssueFieldsClient | None = None,
-    repo_path: Path | None = None,
-    output_dir: Path = Path(".bugpatrol/triage-run"),
     execute: bool = False,
-    run_triage: Callable[[int], str] | None = None,
-    lark: LarkMessengerClient | None = None,
+    dispatch: Callable[[int], None] | None = None,
 ) -> ReconcileTriageResult:
     candidates, events_tuple, scanned = find_untriaged_issues(config=config, github=github)
     events = list(events_tuple)
 
-    if execute and run_triage is None:
-        if repo_path is None or issue_fields is None:
-            raise ValueError("repo_path and issue_fields are required when execute=True")
+    if execute and dispatch is None:
+        # Each candidate is dispatched through its own bugpatrol-triage workflow
+        # run, which mints a fresh GitHub App token for the job's lifetime.
+        # Running triage in-process here used a single token minted at job start,
+        # so a batch of more than ~7 candidates outlived its 1h validity and the
+        # tail 401'd while their agents had already paid the cost (run
+        # 32005198092). Dispatching also keeps reconcile consistent with the
+        # watcher, which fire-and-forgets the same workflow.
+        def _dispatch(issue_number: int) -> None:
+            github.dispatch_triage_run(repo=config.github_repo, issue_number=issue_number)
 
-        def _run_triage(issue_number: int) -> str:
-            # Same retry contract as the run-triage CLI: a run that ends without
-            # applying a result must be retried with fresh context, and the last
-            # attempt must produce a result instead of returning silently.
-            for attempt in range(1, MAX_TRIAGE_ATTEMPTS + 1):
-                final_attempt = attempt == MAX_TRIAGE_ATTEMPTS
-                plan = prepare_triage_run(
-                    config=config,
-                    issue_number=issue_number,
-                    repo_path=repo_path,
-                    output_dir=output_dir / str(issue_number),
-                    github=github,
-                )
-                status = execute_triage_run(
-                    config=config,
-                    issue_number=issue_number,
-                    plan=plan,
-                    github=github,
-                    issue_fields=issue_fields,
-                    lark=lark,
-                    accept_stale_context=final_attempt,
-                    final_attempt=final_attempt,
-                )
-                if final_attempt or status not in RETRYABLE_TRIAGE_STATUSES:
-                    return status
-            raise AssertionError("unreachable: the final attempt always returns")
-
-        run_triage = _run_triage
+        dispatch = _dispatch
 
     for candidate in candidates:
         if not execute:
@@ -135,27 +97,16 @@ def reconcile_triage(
                 ReconcileTriageEvent(issue_number=candidate.issue_number, action="candidate", reason="dry_run")
             )
             continue
-        assert run_triage is not None
+        assert dispatch is not None
         try:
-            status = run_triage(candidate.issue_number)
-        except Exception as error:  # noqa: BLE001 - one bad issue must not abort the batch; failure is surfaced in events
-            if issue_fields is not None:
-                _report_reconcile_triage_failure(
-                    config=config,
-                    github=github,
-                    issue_fields=issue_fields,
-                    lark=lark,
-                    issue_number=candidate.issue_number,
-                    error=error,
-                )
+            dispatch(candidate.issue_number)
+        except Exception as error:  # noqa: BLE001 - one bad dispatch must not abort the batch
             events.append(
                 ReconcileTriageEvent(issue_number=candidate.issue_number, action="failed", reason=str(error))
             )
             continue
-        # Report the run's own status: "triaged/executed" for every non-raising
-        # run once hid runs that ended without applying anything.
         events.append(
-            ReconcileTriageEvent(issue_number=candidate.issue_number, action="triaged", reason=status)
+            ReconcileTriageEvent(issue_number=candidate.issue_number, action="dispatched", reason="triage_workflow")
         )
 
     return ReconcileTriageResult(
@@ -163,46 +114,3 @@ def reconcile_triage(
         candidates=candidates,
         events=tuple(events),
     )
-
-
-def _report_reconcile_triage_failure(
-    *,
-    config: ProjectConfig,
-    github: GitHubCliIssuesClient,
-    issue_fields: GitHubIssueFieldsClient,
-    lark: LarkMessengerClient | None,
-    issue_number: int,
-    error: Exception,
-) -> None:
-    """Make reconcile-discovered triage failures visible on the issue.
-
-    Reconcile is the recovery path for jobs that died before writing a terminal
-    triage result. If the retry also fails, an internal JSON event is not enough:
-    the issue must carry a durable Failed status/comment so humans and later
-    automation can see that it is no longer just "running".
-    """
-    try:
-        report_workflow_failure(
-            config=config,
-            issue_number=issue_number,
-            job="triage",
-            github=github,
-            issue_fields=issue_fields,
-            lark=lark,
-            detail=f"reconcile retry failed: {error}",
-        )
-    except Exception as report_error:  # noqa: BLE001 - last-resort issue comment is better than silence
-        try:
-            github.add_issue_comment(
-                repo=config.github_repo,
-                issue_number=issue_number,
-                body=(
-                    "## BugPatrol triage failed\n\n"
-                    f"Reconcile retried triage but it failed before producing a result: {error}\n\n"
-                    f"Failure reporting also failed: {report_error}"
-                ),
-            )
-        except Exception:
-            # The batch event still records the original failure. Do not let a
-            # broken last-resort comment abort reconciliation for other issues.
-            return

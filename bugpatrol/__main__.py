@@ -422,7 +422,10 @@ def main(argv: list[str] | None = None) -> int:
         "reconcile-triage", help="triage intook issues that never got a triage result"
     )
     reconcile_triage_parser.add_argument("project_config", type=Path)
-    reconcile_triage_parser.add_argument("--repo-path", type=Path, help="required with --execute")
+    # --repo-path / --output-dir are accepted for backward compatibility with
+    # deployed workflows but no longer used: reconcile dispatches the triage
+    # workflow per candidate instead of running triage in-process.
+    reconcile_triage_parser.add_argument("--repo-path", type=Path)
     reconcile_triage_parser.add_argument("--output-dir", type=Path, default=Path(".bugpatrol/triage-run"))
     reconcile_triage_parser.add_argument("--execute", action="store_true")
 
@@ -1148,19 +1151,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "reconcile-triage":
         config = load_project_config(args.project_config)
-        if args.execute and args.repo_path is None:
-            print("--repo-path is required with --execute", file=sys.stderr)
-            return 2
         github = GitHubCliIssuesClient(gh=config.github_cli, transient_retries=8)
-        issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
         result = reconcile_triage(
             config=config,
             github=github,
-            issue_fields=issue_fields,
-            repo_path=args.repo_path,
-            output_dir=args.output_dir,
             execute=args.execute,
-            lark=_optional_lark_client(config),
         )
         print(
             json.dumps(

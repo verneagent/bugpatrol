@@ -24,6 +24,7 @@ class FakeGitHubIssuesClient:
     def __init__(self) -> None:
         self.created: list[CreatedIssue] = []
         self._next_number = 1
+        self.dispatched: list[tuple[str, int]] = []
         # Optional fix-author lookups: tests seed these to exercise the
         # 修复人 attribution; defaults yield no author (empty login).
         self.pull_requests: dict[str, GitHubPullRequest] = {}
@@ -94,6 +95,9 @@ class FakeGitHubIssuesClient:
                     for index, body in enumerate(item.comments)
                 )
         raise ValueError(f"issue not found: {repo}#{issue_number}")
+
+    def dispatch_triage_run(self, *, repo: str, issue_number: int) -> None:
+        self.dispatched.append((repo, issue_number))
 
     def set_issue_type(self, *, repo: str, issue_number: int, issue_type: str) -> None:
         for item in self.created:

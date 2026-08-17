@@ -145,6 +145,26 @@ class GitHubCliIssuesClient:
             stdin=body,
         )
 
+    def dispatch_triage_run(self, *, repo: str, issue_number: int) -> None:
+        """Dispatch the standard bugpatrol-triage workflow for one issue.
+
+        Each dispatched run mints its own fresh GitHub App token in-workflow, so
+        a reconcile batch of any size stays within token lifetime (in-process
+        triage under one job-lifetime token died on batches of more than ~7
+        candidates — see reconcile_triage).
+        """
+        self._run(
+            [
+                "workflow",
+                "run",
+                "bugpatrol-triage.yml",
+                "--repo",
+                repo,
+                "-f",
+                f"issue_number={issue_number}",
+            ]
+        )
+
     def list_issue_comments(self, *, repo: str, issue_number: int) -> tuple[GitHubIssueComment, ...]:
         result = self._run(
             [
