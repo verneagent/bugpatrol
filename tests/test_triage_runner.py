@@ -23,6 +23,7 @@ from bugpatrol.triage_runner import (
     append_triage_run_metadata,
     build_assignee_roster,
     comment_ids,
+    evaluate_followup_re_triage,
     execute_triage_run,
     list_known_assignees,
     prepare_triage_run,
@@ -465,6 +466,192 @@ class TriageRunnerTest(unittest.TestCase):
         self.assertEqual(status, "stale_context")
         run.assert_called_once()
         self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Running"})
+
+    def test_execute_triage_run_skips_agent_when_followup_does_not_change_triage(self) -> None:
+        # A material followup that the cheap classifier judges as no-change must
+        # not burn a full agent run. intake reset Done->Pending so the watcher
+        # would re-dispatch; the skip restores the terminal status.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.comments.append(
+            '<!-- BUGPATROL_TRIAGE_META\n{"result_fingerprint":"abc","version":1,"triage_status":"Done"}\n'
+            "BUGPATROL_TRIAGE_META -->"
+        )
+        github.comments.append("补充一点无关紧要的说明")
+        issue_fields = FakeIssueFields()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=root / "output.json",
+                invocation=AgentInvocation(
+                    provider="deepseek",
+                    command=["claude", "-p", "x"],
+                    env={"ANTHROPIC_BASE_URL": "https://example.invalid"},
+                    model="deepseek-v4-flash",
+                ),
+            )
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["claude", "-p", "x"], 0, "no_change", "")
+                status = execute_triage_run(
+                    config=config,
+                    issue_number=7,
+                    plan=plan,
+                    github=github,  # type: ignore[arg-type]
+                    issue_fields=issue_fields,  # type: ignore[arg-type]
+                )
+        self.assertEqual(status, "no_change_followup")
+        # Only the classifier ran; the expensive agent never did.
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Done"})
+        self.assertEqual(len(github.comments), 3)
+
+    def test_execute_triage_run_re_triages_when_followup_changes_triage(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.comments.append(
+            '<!-- BUGPATROL_TRIAGE_META\n{"result_fingerprint":"abc","version":1,"triage_status":"Done"}\n'
+            "BUGPATROL_TRIAGE_META -->"
+        )
+        github.comments.append("这个其实不是 bug，是网络问题")
+        issue_fields = FakeIssueFields()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "output.json"
+            output.write_text(valid_triage_output())
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=output,
+                invocation=AgentInvocation(
+                    provider="deepseek",
+                    command=["claude", "-p", "x"],
+                    env={"ANTHROPIC_BASE_URL": "https://example.invalid"},
+                    model="deepseek-v4-flash",
+                ),
+            )
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["claude", "-p", "x"], 0, "change", "")
+                status = execute_triage_run(
+                    config=config,
+                    issue_number=7,
+                    plan=plan,
+                    github=github,  # type: ignore[arg-type]
+                    issue_fields=issue_fields,  # type: ignore[arg-type]
+                )
+        # Classifier said change -> the full agent ran after it.
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Running"})
+        self.assertIn(status, {"applied", "stale_context", "no_change_followup"})
+
+    def test_execute_triage_run_re_triages_when_followup_classifier_fails(self) -> None:
+        # A classifier outage must not silently skip a re-triage: fall back to
+        # the expensive-but-correct full agent run.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.comments.append(
+            '<!-- BUGPATROL_TRIAGE_META\n{"result_fingerprint":"abc","version":1,"triage_status":"Done"}\n'
+            "BUGPATROL_TRIAGE_META -->"
+        )
+        github.comments.append("补充细节")
+        issue_fields = FakeIssueFields()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "output.json"
+            output.write_text(valid_triage_output())
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=output,
+                invocation=AgentInvocation(
+                    provider="deepseek",
+                    command=["claude", "-p", "x"],
+                    env={"ANTHROPIC_BASE_URL": "https://example.invalid"},
+                    model="deepseek-v4-flash",
+                ),
+            )
+            with patch("subprocess.run") as run:
+                # Classifier call fails; the agent call that follows succeeds.
+                run.side_effect = [
+                    subprocess.CompletedProcess(["claude", "-p", "x"], 1, "", "boom"),
+                    subprocess.CompletedProcess(["true"], 0, "", ""),
+                ]
+                status = execute_triage_run(
+                    config=config,
+                    issue_number=7,
+                    plan=plan,
+                    github=github,  # type: ignore[arg-type]
+                    issue_fields=issue_fields,  # type: ignore[arg-type]
+                )
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Running"})
+        self.assertIn(status, {"applied", "stale_context"})
+
+    def test_evaluate_followup_re_triage_re_triages_on_new_media_without_classifier(self) -> None:
+        # New screenshots/video are high-value evidence: always re-triage, never
+        # spend a classifier call on them.
+        github = FakeGithub()
+        github.comments.append(
+            '<!-- BUGPATROL_TRIAGE_META\n{"result_fingerprint":"abc","version":1,"triage_status":"Done"}\n'
+            "BUGPATROL_TRIAGE_META -->"
+        )
+        github.comments.append(
+            "## 附件\n\n![截图 1](https://github.com/TheCloverLab/fived-assets/blob/main/x/1.png)"
+        )
+        comments = github.list_issue_comments(repo="r", issue_number=7)
+        invocation = AgentInvocation(
+            provider="deepseek", command=["claude", "-p", "x"], model="deepseek-v4-flash"
+        )
+        with patch("subprocess.run") as run:
+            review = evaluate_followup_re_triage(
+                issue=github.get_issue(repo="r", issue_number=7),
+                comments=comments,
+                invocation=invocation,
+            )
+        self.assertIsNotNone(review)
+        assert review is not None
+        self.assertTrue(review.requires_re_triage)
+        run.assert_not_called()
+
+    def test_evaluate_followup_re_triage_re_triages_on_video_link_without_classifier(self) -> None:
+        # Video attachments render as plain links (no `![]` embed); the extension
+        # fallback must still catch them so media always re-triages.
+        github = FakeGithub()
+        github.comments.append(
+            '<!-- BUGPATROL_TRIAGE_META\n{"result_fingerprint":"abc","version":1,"triage_status":"Done"}\n'
+            "BUGPATROL_TRIAGE_META -->"
+        )
+        github.comments.append("## 附件\n\n- video: [查看视频](https://github.com/TheCloverLab/fived-assets/blob/main/x/clip.mp4)")
+        comments = github.list_issue_comments(repo="r", issue_number=7)
+        invocation = AgentInvocation(
+            provider="deepseek", command=["claude", "-p", "x"], model="deepseek-v4-flash"
+        )
+        with patch("subprocess.run") as run:
+            review = evaluate_followup_re_triage(
+                issue=github.get_issue(repo="r", issue_number=7),
+                comments=comments,
+                invocation=invocation,
+            )
+        self.assertIsNotNone(review)
+        assert review is not None
+        self.assertTrue(review.requires_re_triage)
+        run.assert_not_called()
+
+    def test_evaluate_followup_re_triage_returns_none_without_prior_triage(self) -> None:
+        github = FakeGithub()  # only the default "Follow-up comment", no triage meta
+        comments = github.list_issue_comments(repo="r", issue_number=7)
+        invocation = AgentInvocation(
+            provider="deepseek", command=["claude", "-p", "x"], model="deepseek-v4-flash"
+        )
+        with patch("subprocess.run") as run:
+            review = evaluate_followup_re_triage(
+                issue=github.get_issue(repo="r", issue_number=7),
+                comments=comments,
+                invocation=invocation,
+            )
+        self.assertIsNone(review)
+        run.assert_not_called()
 
     def test_execute_triage_run_reports_stale_context_when_comments_changed(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

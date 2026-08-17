@@ -257,6 +257,7 @@ def apply_triage_result(
                     "duplicate_of": result.duplicate_of,
                     "regression_of": regression.issue_number if regression is not None else 0,
                     "verdict": result.fields.get("Triage verdict", ""),
+                    "triage_status": result.fields.get("Triage status", ""),
                     "blame_suggestion": result.blame_suggestion,
                     "suspected_owner": result.suspected_owner,
                 },

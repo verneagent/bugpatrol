@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, replace
@@ -20,7 +22,7 @@ from bugpatrol.agents import (
     load_agent_json,
     parse_claude_token_usage,
 )
-from bugpatrol.clients import GitHubIssueComment, LarkMessengerClient
+from bugpatrol.clients import GitHubIssue, GitHubIssueComment, LarkMessengerClient
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import default_field_specs, triage_output_schema
 from bugpatrol.github import GitHubCliIssuesClient
@@ -267,6 +269,23 @@ def execute_triage_run(
     existing_comments = github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)
     if triage_already_applied_without_new_material(existing_comments):
         return "already_triaged"
+    followup_review = evaluate_followup_re_triage(
+        issue=issue,
+        comments=existing_comments,
+        invocation=plan.invocation,
+    )
+    if followup_review is not None and not followup_review.requires_re_triage:
+        # A material followup that doesn't change the conclusion would otherwise
+        # burn a full agent run (and intake reset the field to Pending, so the
+        # watcher would keep re-dispatching). Skip the agent and restore the
+        # prior terminal status the intake reset overwrote.
+        issue_fields.add_issue_field_values(
+            repo=config.github_repo,
+            issue_number=issue_number,
+            values={"Triage status": followup_review.prior_status or "Done"},
+            config=config,
+        )
+        return "no_change_followup"
     # Fail fast if the canonical field specs declare an option the live org
     # field is missing. Without this, a triage would run the agent to completion
     # and only crash at write time (add_issue_field_values), leaving the issue
@@ -486,6 +505,154 @@ def triage_already_applied_without_new_material(comments: tuple[GitHubIssueComme
             continue
         return False
     return True
+
+
+# Cheap pre-gate before the expensive triage agent. When an already-triaged issue
+# gets a material followup, a tiny classifier decides whether a full re-triage is
+# warranted instead of blindly burning a full agent run (which nearly always
+# reaches the same conclusion). Followups that add no new evidence skip the agent
+# entirely. Media is treated as high-value evidence and always re-triages without
+# even asking the classifier.
+FOLLOWUP_RE_TRIAGE_PROVIDERS = ("deepseek", "claude")
+
+FOLLOWUP_CLASSIFIER_PROMPT = """你是一个 bug 分诊结论变更预判器。一个 bug issue 已经完成过分诊，分诊后又来了补充消息。判断：是否需要重新完整分诊一次？
+
+只输出一个词：change 或 no_change。不要输出任何其他内容。
+
+判定标准：
+- 补充消息提供了分诊需要的新信息（回答分诊提问、补充复现步骤/环境/平台/版本/日志/证据）、与现有结论冲突或修正、或附带新的截图/视频 → change
+- 补充消息只是确认、寒暄、与结论一致的无信息量补充 → no_change
+- 拿不准时输出 change（宁可多跑一次完整分诊，不可漏掉关键信息）
+
+【issue 标题】
+{title}
+
+【issue 正文】
+{body}
+
+【已应用的分诊结论】
+{conclusion}
+
+【分诊后新增的补充消息】
+{followups}"""
+
+_MEDIA_EMBED_RE = re.compile(r"!\[[^\]]*\]\(https?://[^)]+\)")
+_MEDIA_URL_RE = re.compile(
+    r"https?://\S*\.(?:png|jpe?g|gif|webp|mp4|mov|m4v)(?:\?|#|&|\s|\)|$)", re.IGNORECASE
+)
+
+
+@dataclass(frozen=True)
+class FollowupReTriage:
+    requires_re_triage: bool
+    # Terminal status the last triage wrote (Done/Skipped/Needs info); intake had
+    # reset it to Pending so a no-change followup can put it back.
+    prior_status: str = ""
+
+
+def evaluate_followup_re_triage(
+    *,
+    issue: GitHubIssue,
+    comments: tuple[GitHubIssueComment, ...],
+    invocation: AgentInvocation,
+) -> FollowupReTriage | None:
+    """Decide whether a material followup needs a full re-triage run.
+
+    Returns None when there is no prior applied triage (first run — always run
+    the agent). Otherwise returns whether to re-triage, plus the prior terminal
+    status so the no-change skip can restore it.
+    """
+    latest_triage_index: int | None = None
+    for index, comment in enumerate(comments):
+        if parse_triage_metadata(comment.body) is not None:
+            latest_triage_index = index
+    if latest_triage_index is None:
+        return None
+    prior_meta = parse_triage_metadata(comments[latest_triage_index].body) or {}
+    prior_status = str(prior_meta.get("triage_status") or "")
+    followups = tuple(
+        comment
+        for comment in comments[latest_triage_index + 1 :]
+        if not is_triage_bookkeeping_comment(comment.body)
+        and parse_triage_metadata(comment.body) is None
+    )
+    if not followups:
+        # No material followup after the last triage; the already-triaged guard
+        # normally returns before this, but stay safe and run the agent.
+        return FollowupReTriage(requires_re_triage=True, prior_status=prior_status)
+    if any(_comment_has_media(comment.body) for comment in followups):
+        # New screenshots/video are the strongest new evidence: always re-triage.
+        return FollowupReTriage(requires_re_triage=True, prior_status=prior_status)
+    if invocation.provider not in FOLLOWUP_RE_TRIAGE_PROVIDERS:
+        # Only deepseek/claude can drive the claude CLI classifier cheaply;
+        # fall back to the expensive-but-correct full re-triage.
+        return FollowupReTriage(requires_re_triage=True, prior_status=prior_status)
+    decision = _run_followup_classifier(
+        invocation=invocation,
+        issue=issue,
+        last_triage_comment=comments[latest_triage_index],
+        followups=followups,
+    )
+    if decision == "no_change":
+        return FollowupReTriage(requires_re_triage=False, prior_status=prior_status)
+    # "change", or the classifier failed (None): be conservative and re-triage.
+    return FollowupReTriage(requires_re_triage=True, prior_status=prior_status)
+
+
+def _run_followup_classifier(
+    *,
+    invocation: AgentInvocation,
+    issue: GitHubIssue,
+    last_triage_comment: GitHubIssueComment,
+    followups: tuple[GitHubIssueComment, ...],
+) -> str | None:
+    prompt = FOLLOWUP_CLASSIFIER_PROMPT.format(
+        title=issue.title,
+        body=_truncate(issue.body or "", 3000),
+        conclusion=_truncate(last_triage_comment.body, 6000),
+        followups="\n".join(f"- {_truncate(comment.body, 800)}" for comment in followups),
+    )
+    command = ["claude", "-p", prompt]
+    if invocation.model:
+        command += ["--model", invocation.model]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            env=invocation.env or None,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"followup classifier failed: {error}", file=sys.stderr)
+        return None
+    if completed.returncode != 0:
+        print(
+            f"followup classifier exited {completed.returncode}: {(completed.stderr or '')[:500]}",
+            file=sys.stderr,
+        )
+        return None
+    return _classifier_decision(completed.stdout or "")
+
+
+def _classifier_decision(output: str) -> str | None:
+    lowered = output.lower()
+    # "no_change" contains "change"; check the longer form first.
+    if "no_change" in lowered or "no change" in lowered or "nochange" in lowered:
+        return "no_change"
+    if "change" in lowered:
+        return "change"
+    return None
+
+
+def _comment_has_media(body: str) -> bool:
+    return bool(_MEDIA_EMBED_RE.search(body) or _MEDIA_URL_RE.search(body))
+
+
+def _truncate(value: str, limit: int) -> str:
+    return value if len(value) <= limit else f"{value[:limit]}…"
 
 
 def mark_triage_running(
