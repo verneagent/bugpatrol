@@ -11,6 +11,7 @@ from bugpatrol.clients import GitHubIssueComment, LarkMessengerClient
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fix_notify import parse_fix_metadata
 from bugpatrol.github import GitHubCliIssuesClient
+from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake import parse_intake_metadata, target_branch_from_metadata
 from bugpatrol.triage_result import parse_triage_metadata
 
@@ -52,6 +53,7 @@ def audit_issue_close(
     config: ProjectConfig,
     github: GitHubCliIssuesClient,
     lark: LarkMessengerClient | None = None,
+    issue_fields: GitHubIssueFieldsClient | None = None,
     dry_run: bool = True,
 ) -> CloseAuditSummary:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
@@ -136,6 +138,16 @@ def audit_issue_close(
             lark=lark, metadata=metadata, issue=issue, config=config, kind=kind, reopened=True
         )
         github.reopen_issue(repo=repo, issue_number=issue_number)
+        if issue_fields is not None:
+            # Same unstick as the triage regression reopen: a reopened issue whose
+            # Triage status field is still "Running" (stale from an old run) never
+            # re-dispatches. Reset to Pending so the watcher picks it up.
+            issue_fields.add_issue_field_values(
+                repo=repo,
+                issue_number=issue_number,
+                values={"Triage status": "Pending"},
+                config=config,
+            )
         github.add_issue_comment(
             repo=repo,
             issue_number=issue_number,

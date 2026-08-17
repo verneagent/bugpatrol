@@ -282,6 +282,7 @@ def apply_triage_result(
                 duplicate_issue_number=issue_number,
                 duplicate_issue_url=issue.url,
                 github=github,
+                issue_fields=issue_fields,
                 lark=lark,
                 config=config,
             )
@@ -316,6 +317,7 @@ def _flag_duplicate_regression(
     duplicate_issue_number: int,
     duplicate_issue_url: str,
     github: GitHubCliIssuesClient,
+    issue_fields: GitHubIssueFieldsClient,
     lark: LarkMessengerClient | None,
     config: ProjectConfig,
 ) -> None:
@@ -349,6 +351,15 @@ def _flag_duplicate_regression(
             ),
         )
     github.reopen_issue(repo=repo, issue_number=regression.issue_number)
+    # A reopened issue must re-enter the triage pipeline: leave its field on the
+    # stale "Running" from the old run and dispatch_due_triage defers it forever
+    # (fived #4324). Reset to Pending so the watcher re-dispatches.
+    issue_fields.add_issue_field_values(
+        repo=repo,
+        issue_number=regression.issue_number,
+        values={"Triage status": "Pending"},
+        config=config,
+    )
 
 
 def build_triage_dry_run_report(

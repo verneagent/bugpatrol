@@ -113,6 +113,14 @@ class FakeGithub:
         self.comments.append(body)
 
 
+class _RecordingIssueFields:
+    def __init__(self) -> None:
+        self.add_calls: list[dict[str, object]] = []
+
+    def add_issue_field_values(self, **kwargs: object) -> None:
+        self.add_calls.append(kwargs)
+
+
 def _closed_issue(**overrides) -> GitHubIssue:
     values = dict(
         number=7,
@@ -740,6 +748,32 @@ class CloseAuditTest(unittest.TestCase):
         self.assertEqual(len(lark.replies), 1)
         self.assertIn("已自动重新打开", lark.replies[0].text)
         self.assertIn('<at user_id="ou_dev">garlanddiego</at>', lark.replies[0].text)
+
+    def test_reopen_resets_triage_status_field_to_pending(self) -> None:
+        # Same unstick as the triage regression reopen: a reopened issue whose
+        # Triage status field is still "Running" (stale from an old run) never
+        # re-dispatches, so the reopen must reset it to Pending.
+        config = self._enforce_config()
+        github = FakeGithub(issue=_closed_issue(body=_managed_body(chat_id=config.lark.chat_id)))
+        lark = FakeLarkMessengerClient()
+        issue_fields = _RecordingIssueFields()
+
+        summary = audit_issue_close(
+            repo="o/r",
+            issue_number=7,
+            config=config,
+            github=github,
+            lark=lark,
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+            dry_run=False,
+        )
+
+        self.assertTrue(summary.reopened)
+        self.assertTrue(github.reopened)
+        self.assertEqual(len(issue_fields.add_calls), 1)
+        kwargs = dict(issue_fields.add_calls[0])
+        self.assertEqual(kwargs["issue_number"], 7)
+        self.assertEqual(kwargs["values"], {"Triage status": "Pending"})
 
     def test_reopen_re_fires_on_each_close_not_deduped_by_marker(self) -> None:
         # Dedup rides on issue state (the top guard), not the persistent marker,

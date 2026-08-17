@@ -586,6 +586,16 @@ class TriageResultTest(unittest.TestCase):
         # Both the duplicate's triage comment and its Lark summary say it.
         self.assertIn("疑似回归", github.comments[0])
         self.assertTrue(any("疑似回归" in reply.text for reply in lark.replies))
+        # The reopened original must re-enter the triage pipeline: its Triage
+        # status field is reset to Pending (a stale "Running" would make the
+        # watcher defer it forever).
+        field_calls = [
+            dict(kwargs)
+            for name, kwargs in issue_fields.calls
+            if name == "add_issue_field_values" and dict(kwargs)["issue_number"] == 5
+        ]
+        self.assertEqual(len(field_calls), 1)
+        self.assertEqual(field_calls[0]["values"], {"Triage status": "Pending"})
 
     def test_regression_flag_reaches_the_original_topic_with_assignee_mention(self) -> None:
         base_config = load_project_config(Path("projects/todo-sandbox.toml"))

@@ -1238,6 +1238,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "audit-issue-close":
         config = load_project_config(args.project_config)
         github = GitHubCliIssuesClient(gh=config.github_cli)
+        issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
         lark = None
         if args.write:
             app_secret = os.environ.get(config.lark.app_secret_env)
@@ -1255,6 +1256,7 @@ def main(argv: list[str] | None = None) -> int:
             config=config,
             github=github,
             lark=lark,
+            issue_fields=issue_fields,
             dry_run=not args.write,
         )
         print(json.dumps(summary.__dict__, ensure_ascii=False))
