@@ -71,6 +71,13 @@ TRIAGE_FAILED_HEADER = "## BugPatrol triage failed"
 # stop counting as in-flight or the issue would never be re-triaged.
 TRIAGE_RUN_STALE_AFTER = timedelta(minutes=60)
 
+# A hung LLM call used to burn the whole 60-minute triage job timeout with no
+# output, wasting a runner slot and ending in a silent cancel (run 32022343306
+# on #4938) rather than a visible failure. Normal triage is ~8 minutes; 20
+# minutes fails fast while leaving room for slow runs and the workflow's own
+# retries.
+AGENT_TIMEOUT_SECONDS = 1200
+
 
 @dataclass(frozen=True)
 class TriageRunPlan:
@@ -327,15 +334,38 @@ def execute_triage_run(
     # stdin must be closed: in CI runners stdin is a pipe that never reaches
     # EOF, and `claude -p` blocks reading it forever after finishing its work.
     started = time.monotonic()
-    completed = subprocess.run(
-        plan.invocation.command,
-        check=False,
-        env=agent_env,
-        cwd=plan.agent_cwd,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        completed = subprocess.run(
+            plan.invocation.command,
+            check=False,
+            env=agent_env,
+            cwd=plan.agent_cwd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=AGENT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        duration_seconds = time.monotonic() - started
+        _write_turn_log(plan.output_path.parent, error.stdout or "", error.stderr or "")
+        mark_triage_failed(
+            config=config,
+            issue_number=issue_number,
+            exit_code=124,
+            github=github,
+            issue_fields=issue_fields,
+            lark=lark,
+            reason=agent_failure_reason(
+                f"The triage agent produced no terminal output for {AGENT_TIMEOUT_SECONDS}s "
+                "and was killed (the LLM endpoint likely hung).",
+                stderr=error.stderr,
+                stdout=error.stdout,
+            ),
+        )
+        raise RuntimeError(
+            f"triage agent timed out after {AGENT_TIMEOUT_SECONDS}s "
+            f"({duration_seconds:.0f}s elapsed with no terminal output)"
+        ) from error
     duration_seconds = time.monotonic() - started
     # Persist the turn-by-turn stream so a failed or surprising run can be
     # analysed on the runner afterwards, and derive token usage from it.

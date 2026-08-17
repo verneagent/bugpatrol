@@ -378,6 +378,48 @@ class TriageRunnerTest(unittest.TestCase):
         # No hollow "No agent stderr was captured" when the cause is known.
         self.assertNotIn("No agent stderr", comment)
 
+    def test_execute_triage_run_marks_failed_when_agent_times_out(self) -> None:
+        # #4938's agent hung for a full hour with no output and the job was
+        # silently cancelled at the workflow's 60-minute timeout, wasting a
+        # runner slot. A subprocess timeout must fail fast with a visible
+        # Failed marker instead of letting the job burn to cancel.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=root / "output.json",
+                invocation=AgentInvocation(provider="codex", command=["claude"]),
+            )
+
+            with patch("subprocess.run") as run:
+                timeout = subprocess.TimeoutExpired(
+                    cmd=["claude"],
+                    timeout=1200,
+                    output='{"partial": 1}',
+                    stderr="",
+                )
+                # subprocess.run() populates `.stdout` when it raises the
+                # exception; mirror that for the hand-built one.
+                timeout.stdout = '{"partial": 1}'
+                run.side_effect = timeout
+                with self.assertRaisesRegex(RuntimeError, "timed out after 1200s"):
+                    execute_triage_run(
+                        config=config,
+                        issue_number=7,
+                        plan=plan,
+                        github=github,  # type: ignore[arg-type]
+                        issue_fields=issue_fields,  # type: ignore[arg-type]
+                    )
+
+        self.assertEqual(issue_fields.writes[0]["values"], {"Triage status": "Running"})
+        self.assertEqual(issue_fields.writes[1]["values"], {"Triage status": "Failed"})
+        self.assertIn("no terminal output for 1200s", github.comments[-1])
+        self.assertIn("## BugPatrol triage failed", github.comments[-1])
+
     def test_execute_triage_run_rejects_unmanaged_issue_before_writes(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGithub(issue_body="legacy issue")
