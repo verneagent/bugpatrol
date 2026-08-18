@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import sys
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +31,44 @@ from bugpatrol.slash_commands import SlashCommandHandler
 # branch name -> best-effort remote tip SHA (or "" when unavailable). Injected
 # by the watcher so backfill stays decoupled from GitHub/git access.
 BranchTipResolver = Callable[[str], str]
+
+# {chat_id: (fetched_at_monotonic, {open_id: display name})}. The watcher polls
+# every few seconds; re-resolving chat members every poll would be a network
+# call per chat per cycle. TTL-bounded so new members appear without a watcher
+# restart while a chat is never fetched more than ~once a minute.
+_CHAT_MEMBERS_TTL_S = 300.0
+_chat_members_cache: dict[str, tuple[float, dict[str, str]]] = {}
+_chat_members_lock = threading.Lock()
+
+
+def chat_member_names(
+    lark: LarkOpenApiMessengerClient | None,
+    chat_id: str,
+) -> dict[str, str]:
+    """Best-effort {open_id: display name} for a chat, via the bot identity.
+
+    The watcher runs as the Lark app bot, so names come from the bot's own
+    tenant token (no user login). Name resolution is best-effort by design:
+    failing to resolve must never block intake, so errors warn on stderr and
+    return {} and the caller falls back to configured names / bare open_id.
+    """
+    if lark is None:
+        return {}
+    now = time.monotonic()
+    with _chat_members_lock:
+        cached = _chat_members_cache.get(chat_id)
+        if cached is not None and now - cached[0] < _CHAT_MEMBERS_TTL_S:
+            return cached[1]
+    try:
+        names = lark.list_chat_members(chat_id=chat_id)
+    except Exception as error:  # noqa: BLE001 - resolution is best-effort
+        print(f"[bugpatrol] chat member resolution failed for {chat_id}: {error}", file=sys.stderr)
+        names = {}
+    if not isinstance(names, dict):
+        names = {}
+    with _chat_members_lock:
+        _chat_members_cache[chat_id] = (time.monotonic(), names)
+    return names
 
 
 @dataclass(frozen=True)
@@ -198,6 +239,7 @@ def _build_intake_record(
     record = intake_record_from_lark_message(
         message,
         sender_names=config.lark.sender_names or {},
+        member_names=chat_member_names(lark, message.chat_id),
         message_url_template=config.lark.message_url_template,
         target_branch=target_branch,
         branch_tip_sha=branch_tip_sha,
@@ -494,11 +536,14 @@ def intake_record_from_lark_message(
     message: LarkMessage,
     *,
     sender_names: dict[str, str] | None = None,
+    member_names: dict[str, str] | None = None,
     message_url_template: str = "",
     target_branch: str = "main",
     branch_tip_sha: str = "",
 ) -> IntakeRecord:
-    names = sender_names or {}
+    names = dict(sender_names or {})
+    for open_id, name in (member_names or {}).items():
+        names.setdefault(open_id, name)  # configured names win over API names
     reporter_id = message.sender_open_id or message.sender_id
     reporter_name = _reporter_name(message, sender_names=names)
     topic_url = _message_url_from_template(message_url_template, message=message, target_message_id=message.root_id)

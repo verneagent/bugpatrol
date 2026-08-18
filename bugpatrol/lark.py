@@ -256,6 +256,32 @@ class LarkOpenApiMessengerClient:
                 break
         return tuple(chats)
 
+    def list_chat_members(self, *, chat_id: str) -> dict[str, str]:
+        """Return {open_id: display name} for a chat, via the bot identity.
+
+        Uses the im:chat scope (list chat members) with the tenant access
+        token, so no user login is involved — the watcher runs as the Lark app
+        bot and can stamp real reporter names at intake instead of bare
+        open_ids.
+        """
+        members: dict[str, str] = {}
+        page_token = ""
+        while True:
+            params = {"member_id_type": "open_id", "page_size": "100"}
+            if page_token:
+                params["page_token"] = page_token
+            data = self._request("GET", f"/im/v1/chats/{chat_id}/members?{urlencode(params)}")
+            payload = data.get("data", {})
+            for item in payload.get("items", ()):
+                member_id = item.get("member_id")
+                name = item.get("name")
+                if isinstance(member_id, str) and member_id and isinstance(name, str) and name:
+                    members[member_id] = name
+            page_token = payload.get("page_token") or ""
+            if not payload.get("has_more") or not page_token:
+                break
+        return members
+
     def get_message(self, *, message_id: str, default_chat_id: str) -> LarkMessage:
         data = self._request("GET", f"/im/v1/messages/{message_id}")
         item = data.get("data", {}).get("items")

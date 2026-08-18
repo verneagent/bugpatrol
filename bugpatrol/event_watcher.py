@@ -11,6 +11,7 @@ from typing import Callable, Iterable, Sequence
 from bugpatrol.backfill import (
     BackfillEvent,
     BackfillResult,
+    chat_member_names,
     intake_record_from_lark_message,
     should_skip_message,
     skip_reason,
@@ -184,6 +185,7 @@ def run_lark_event_watcher(
         record = intake_record_from_lark_message(
             message,
             sender_names=config.lark.sender_names or {},
+            member_names=chat_member_names(lark, message.chat_id),
             message_url_template=config.lark.message_url_template,
         )
         if dry_run:

@@ -82,6 +82,7 @@ def render_issue_body(record: IntakeRecord, *, language: str = "en-US") -> str:
         "root_id": record.root_id,
         "message_id": record.message_id,
         "reporter_open_id": record.reporter_open_id,
+        "reporter_name": record.reporter_name,
         "attachment_urls": [item.url for item in record.attachments],
     }
     # Only stamp branch keys for feature-branch topics; main-branch issues keep
@@ -136,6 +137,7 @@ def render_batched_issue_body(records: Sequence[IntakeRecord], *, language: str 
         # already captured (not just the first message) and skip re-appending.
         "message_ids": [record.message_id for record in records],
         "reporter_open_id": first.reporter_open_id,
+        "reporter_name": first.reporter_name,
         "attachment_urls": [item.url for record in records for item in record.attachments],
     }
     if first.target_branch and first.target_branch != "main":
