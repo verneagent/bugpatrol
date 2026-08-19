@@ -477,13 +477,13 @@ def _scan_mail(
     mail: LarkMailClient,
     limit: int,
     processed_ledger: MessageLedger | None,
-    skip_self_sent: bool = True,
 ) -> ScanMailResult:
-    """List unprocessed INBOX mail, skipping ledgered and self-sent items.
+    """List unprocessed INBOX mail, skipping ledgered items.
 
     ``page_size`` is capped at 20 by the mail API, so a ``limit`` above 20
-    paginates. Self-sent items (sender == the mailbox itself, e.g. delivery
-    notifications or test mail) are never reports and are skipped.
+    paginates. The list endpoint returns only message IDs — the full message
+    (sender, body, attachments) is fetched per item by the watcher loop, which
+    is also where self-sent mail (sender == the mailbox itself) is skipped.
     """
     mail_config = config.mail
     if mail_config is None:
@@ -491,7 +491,6 @@ def _scan_mail(
     seen: list[MailMessage] = []
     has_more = True
     page_token = ""
-    self_address = mail_config.mailbox.lower()
     while has_more and len(seen) < limit:
         items, has_more, page_token = mail.list_messages(
             mailbox=mail_config.mailbox,
@@ -503,8 +502,6 @@ def _scan_mail(
                 has_more = False
                 break
             if processed_ledger is not None and processed_ledger.is_processed(item.message_id):
-                continue
-            if skip_self_sent and item.sender_address == self_address:
                 continue
             seen.append(item)
         if not page_token:
@@ -647,6 +644,28 @@ def run_mail_watcher(
                                 "message_id": mail_msg.message_id,
                                 "action": "error",
                                 "error": str(error),
+                            }
+                        )
+                    continue
+                if full.sender_address == config.mail.mailbox.lower():
+                    # Self-sent mail (delivery notifications, the mailbox
+                    # echoing itself) is never a report; ledger it so it is not
+                    # re-fetched every poll, but do not build a record.
+                    skipped += 1
+                    iteration_skipped += 1
+                    if ledger is not None:
+                        ledger.mark_processed(full.message_id)
+                    print(
+                        f"watch-mail: skipping self-sent {full.message_id}",
+                        file=sys.stderr,
+                    )
+                    if logger is not None:
+                        logger.write(
+                            {
+                                "event": "mail_message",
+                                "iteration": iterations,
+                                "message_id": full.message_id,
+                                "action": "skipped_self_sent",
                             }
                         )
                     continue

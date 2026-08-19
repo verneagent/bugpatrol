@@ -94,16 +94,8 @@ class MailClientParsingTest(unittest.TestCase):
                         "code": 0,
                         "data": {
                             "items": [
-                                {
-                                    "message_id": "mail/1",
-                                    "thread_id": "thread_1",
-                                    "subject": "登录后白屏",
-                                    "head_from": {"name": "张三", "mail_address": "zhangsan@example.com"},
-                                    "folder_id": "INBOX",
-                                    "internal_date": "1783099728900",
-                                    "message_state": "received",
-                                    "body_preview": _b64("登录后白屏"),
-                                }
+                                "enAvT3dOdGNCUTR0anNBYlN1OGFKRXZGMHdwPQ==",
+                                "KzlSN1o3TVhUalFOeUh4Zm1IMGZNRzlOWXEwPQ==",
                             ],
                             "has_more": False,
                             "page_token": "",
@@ -117,15 +109,14 @@ class MailClientParsingTest(unittest.TestCase):
                 page_size=10,
             )
 
-        self.assertEqual(len(items), 1)
-        item = items[0]
-        self.assertEqual(item.message_id, "mail/1")
-        self.assertEqual(item.thread_id, "thread_1")
-        self.assertEqual(item.subject, "登录后白屏")
-        self.assertEqual(item.head_from.name, "张三")
-        self.assertEqual(item.head_from.address, "zhangsan@example.com")
-        self.assertEqual(item.internal_date_ms, 1783099728900)
-        self.assertEqual(item.body_preview, "登录后白屏")
+        # The list endpoint returns only base64 message IDs; the watcher
+        # fetches the full message per ID via get_message.
+        self.assertEqual(len(items), 2)
+        self.assertEqual(
+            [item.message_id for item in items],
+            ["enAvT3dOdGNCUTR0anNBYlN1OGFKRXZGMHdwPQ==", "KzlSN1o3TVhUalFOeUh4Zm1IMGZNRzlOWXEwPQ=="],
+        )
+        self.assertEqual(items[0].subject, "")
         self.assertFalse(has_more)
         self.assertEqual(next_token, "")
         url = urlopen.call_args_list[1].args[0].full_url
@@ -133,7 +124,21 @@ class MailClientParsingTest(unittest.TestCase):
         self.assertIn("page_size=10", url)
         self.assertIn("folder_id=INBOX", url)
 
-    def test_list_messages_falls_back_to_from_list_and_create_time(self) -> None:
+    def test_list_messages_drops_empty_ids(self) -> None:
+        client = self._client()
+
+        with patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = [
+                self._json({"code": 0, "tenant_access_token": "token"}),
+                self._json({"code": 0, "data": {"items": [""], "has_more": False, "page_token": ""}}),
+            ]
+
+            items, has_more, _ = client.list_messages(mailbox="bug@fivedegrees.ai", page_size=10)
+
+        self.assertEqual(items, [])
+        self.assertFalse(has_more)
+
+    def test_get_message_falls_back_to_from_list_and_create_time(self) -> None:
         client = self._client()
 
         with patch("urllib.request.urlopen") as urlopen:
@@ -143,28 +148,23 @@ class MailClientParsingTest(unittest.TestCase):
                     {
                         "code": 0,
                         "data": {
-                            "items": [
-                                {
-                                    "message_id": "mail_2",
-                                    "thread_id": "thread_2",
-                                    "subject": "crash",
-                                    "from": [{"name": "李四", "mail_address": "lisi@example.com"}],
-                                    "create_time": "1783099700000",
-                                }
-                            ],
-                            "has_more": False,
-                            "page_token": "",
+                            "message": {
+                                "message_id": "mail_2",
+                                "thread_id": "thread_2",
+                                "subject": "crash",
+                                "from": [{"name": "李四", "mail_address": "lisi@example.com"}],
+                                "create_time": "1783099700000",
+                            }
                         },
                     }
                 ),
             ]
 
-            items, _, _ = client.list_messages(mailbox="bug@fivedegrees.ai", page_size=10)
+            message = client.get_message(mailbox="bug@fivedegrees.ai", message_id="mail_2")
 
-        item = items[0]
-        self.assertEqual(item.head_from.name, "李四")
-        self.assertEqual(item.head_from.address, "lisi@example.com")
-        self.assertEqual(item.internal_date_ms, 1783099700000)
+        self.assertEqual(message.head_from.name, "李四")
+        self.assertEqual(message.head_from.address, "lisi@example.com")
+        self.assertEqual(message.internal_date_ms, 1783099700000)
 
     def test_get_message_decodes_body_and_parses_attachments(self) -> None:
         client = self._client()

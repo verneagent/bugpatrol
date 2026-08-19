@@ -105,10 +105,18 @@ class LarkMailClient(_TenantApiClient):
         payload = data.get("data")
         if not isinstance(payload, dict):
             raise LarkOpenApiError(f"mail list response missing data: {data}")
+        # The list endpoint returns only base64-encoded message IDs (no headers
+        # or bodies); each full message is fetched separately via get_message.
         items = [
-            _parse_mail_message(item)
-            for item in payload.get("items", ())
-            if isinstance(item, dict)
+            MailMessage(
+                message_id=message_id,
+                thread_id="",
+                subject="",
+                head_from=MailAddress(name="", address=""),
+                internal_date_ms=0,
+            )
+            for message_id in payload.get("items", ())
+            if isinstance(message_id, str) and message_id
         ]
         has_more = bool(payload.get("has_more"))
         next_token = str(payload.get("page_token") or "")

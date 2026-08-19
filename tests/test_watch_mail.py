@@ -335,6 +335,26 @@ class RunMailWatcherTest(unittest.TestCase):
         # MAX_CONSECUTIVE_SCAN_FAILURES=10: it must retry, then crash.
         self.assertEqual(mail.list_calls, 10)
 
+    def test_self_sent_mail_is_skipped_and_ledgered(self) -> None:
+        config, github, _, workflow = make_workflow()
+        # Sender == the mailbox itself (e.g. a delivery notification).
+        mail = FakeMailClient([make_mail(head_from=MailAddress(name="", address="bug@fivedegrees.ai"))])
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = JsonMessageLedger(Path(tmp) / "ledger.json")
+            with contextlib.redirect_stderr(io.StringIO()):
+                result = run_mail_watcher(
+                    config=config,
+                    mail=mail,
+                    workflow=workflow,
+                    once=True,
+                    processed_ledger=ledger,
+                )
+
+        self.assertEqual(result.processed, 0)
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(github.created, [])
+        self.assertTrue(ledger.is_processed("mail_1"))
+
     def test_per_message_fetch_failure_is_skipped_and_not_ledgered(self) -> None:
         config, _, _, workflow = make_workflow()
         mail = FakeMailClient([make_mail()], fail_fetch=("mail_1",))
