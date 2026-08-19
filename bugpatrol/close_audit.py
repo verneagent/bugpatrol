@@ -12,7 +12,11 @@ from bugpatrol.config import ProjectConfig
 from bugpatrol.fix_notify import parse_fix_metadata
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
-from bugpatrol.intake import parse_intake_metadata, target_branch_from_metadata
+from bugpatrol.intake import (
+    parse_intake_metadata,
+    resolve_reply_target,
+    target_branch_from_metadata,
+)
 from bugpatrol.triage_result import parse_triage_metadata
 
 CLOSE_AUDIT_META_START = "<!-- BUGPATROL_CLOSE_AUDIT_META"
@@ -455,8 +459,7 @@ def _send_close_lark(
 ) -> bool:
     if lark is None:
         return False
-    chat_id = str(metadata.get("chat_id") or "")
-    message_id = str(metadata.get("message_id") or "")
+    chat_id, message_id = resolve_reply_target(metadata)
     if not (chat_id and message_id):
         return False
     lark.reply_to_message(

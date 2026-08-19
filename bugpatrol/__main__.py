@@ -30,17 +30,24 @@ from bugpatrol.fix_notify import (
     reconcile_fix_notifications,
     resolve_single_issue_from_pr,
 )
+from bugpatrol.fix_runner import (
+    read_triage_verdict,
+    run_ci_feedback,
+    run_fix,
+    run_fix_revise,
+)
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.lark import LarkOpenApiMessengerClient
+from bugpatrol.mail import LarkMailClient
 from bugpatrol.ownership import load_codeowners, resolve_configured_owners, resolve_owners
 from bugpatrol.prd import load_prd_documents, search_prd_documents
 from bugpatrol.reconcile_triage import reconcile_triage
 from bugpatrol.resources import (
-    CommandVideoFrameExtractor,
     CommandResourceDescriber,
     CommandResourceRedactor,
+    CommandVideoFrameExtractor,
     CompositeResourceTransformer,
     FfprobeVideoDurationProbe,
     GitHubAssetRepoStore,
@@ -48,17 +55,16 @@ from bugpatrol.resources import (
     ResourcePolicy,
     ResourceTransformer,
 )
+from bugpatrol.slash_commands import SlashCommandHandler, make_dispatch
 from bugpatrol.triage_context import (
     ReferenceRepoContext,
     build_triage_context,
     render_triage_context_markdown,
 )
-from bugpatrol.triage_result import apply_triage_result, build_triage_dry_run_report, parse_triage_result
-from bugpatrol.fix_runner import (
-    read_triage_verdict,
-    run_ci_feedback,
-    run_fix,
-    run_fix_revise,
+from bugpatrol.triage_result import (
+    apply_triage_result,
+    build_triage_dry_run_report,
+    parse_triage_result,
 )
 from bugpatrol.triage_runner import (
     JOB_LABELS,
@@ -67,13 +73,13 @@ from bugpatrol.triage_runner import (
     report_workflow_failure,
     resolve_issue_branch,
 )
+from bugpatrol.watch_mail import MailIntakeWorkflow, run_mail_watcher
+from bugpatrol.watcher import GitHubTriageStatusReader, run_polling_watcher
 from bugpatrol.worktree import (
     SubprocessGitDriver,
     resolve_reference_branch,
     triage_worktree,
 )
-from bugpatrol.slash_commands import SlashCommandHandler, make_dispatch
-from bugpatrol.watcher import GitHubTriageStatusReader, run_polling_watcher
 
 
 def media_resource_policy(config) -> ResourcePolicy:  # type: ignore[no-untyped-def]
@@ -314,6 +320,32 @@ def main(argv: list[str] | None = None) -> int:
     event_watch.add_argument("--triage-queue", type=Path, help="persist debounced triage requests in this JSON file")
     event_watch.add_argument("--triage-quiet-seconds", type=float, default=60)
     event_watch.add_argument(
+        "--triage-dispatch-command",
+        nargs="+",
+        help=(
+            "command used for due triage requests; supports {issue_number}, "
+            "{trigger_fingerprint}, and {reason}"
+        ),
+    )
+
+    watch_mail = sub.add_parser(
+        "watch-mail",
+        help="poll the public mailbox ([mail]) and mirror reports into GitHub",
+    )
+    watch_mail.add_argument("project_config", type=Path)
+    watch_mail.add_argument("--limit", type=int, default=20)
+    watch_mail.add_argument("--interval", type=float, default=60)
+    watch_mail.add_argument("--once", action="store_true")
+    watch_mail.add_argument("--dry-run", action="store_true", help="scan without GitHub writes")
+    watch_mail.add_argument("--resource-dir", type=Path, help="download mail attachments before writing issues")
+    watch_mail.add_argument("--asset-repo", action="store_true", help="upload mail attachments to configured assets repo")
+    watch_mail.add_argument("--event-log", type=Path, help="append structured watcher events to a JSONL file")
+    watch_mail.add_argument("--processed-ledger", type=Path, help="persist processed mail message ids in this JSON file")
+    watch_mail.add_argument("--lease-file", type=Path, help="single-writer lease file for this watcher")
+    watch_mail.add_argument("--lease-ttl-seconds", type=float, default=120)
+    watch_mail.add_argument("--triage-queue", type=Path, help="persist debounced triage requests in this JSON file")
+    watch_mail.add_argument("--triage-quiet-seconds", type=float, default=60)
+    watch_mail.add_argument(
         "--triage-dispatch-command",
         nargs="+",
         help=(
@@ -708,6 +740,82 @@ def main(argv: list[str] | None = None) -> int:
                 lambda branch: github.remote_branch_tip_sha(repo=config.github_repo, branch=branch)
             ),
             slash_handler=slash_handler,
+        )
+        print(json.dumps(result.__dict__, ensure_ascii=False))
+        return 0
+
+    if args.command == "watch-mail":
+        config = load_project_config(args.project_config)
+        if config.mail is None:
+            print("project config has no [mail] section", file=sys.stderr)
+            return 2
+        app_secret = os.environ.get(config.mail.app_secret_env)
+        if not app_secret:
+            print(f"missing env: {config.mail.app_secret_env}", file=sys.stderr)
+            return 2
+        mail = LarkMailClient(
+            app_id=config.mail.app_id,
+            app_secret=app_secret,
+            base_url=config.lark.api_base_url,
+        )
+        lark_app_secret = os.environ.get(config.lark.app_secret_env)
+        if not lark_app_secret:
+            print(f"missing env: {config.lark.app_secret_env}", file=sys.stderr)
+            return 2
+        lark = LarkOpenApiMessengerClient(
+            app_id=config.lark.app_id,
+            app_secret=lark_app_secret,
+            base_url=config.lark.api_base_url,
+        )
+        issue_fields = GitHubIssueFieldsClient(gh=config.github_cli)
+        github = GitHubCliIssuesClient(
+            gh=config.github_cli,
+            issue_fields=issue_fields,
+            project_config=config,
+        )
+        workflow = MailIntakeWorkflow(config=config, github=github, lark=lark, issue_fields=issue_fields)
+        if args.resource_dir and args.asset_repo:
+            print("--resource-dir and --asset-repo are mutually exclusive", file=sys.stderr)
+            return 2
+        resource_store = None
+        if args.asset_repo:
+            if not config.assets.github_repo or not config.assets.checkout_path:
+                print("missing [assets] github_repo or checkout_path", file=sys.stderr)
+                return 2
+            resource_store = GitHubAssetRepoStore(
+                repo=config.assets.github_repo,
+                checkout_path=Path(config.assets.checkout_path),
+                base_path=config.assets.base_path,
+                branch=config.assets.branch,
+                remote_url=config.assets.remote_url,
+            )
+        result = run_mail_watcher(
+            config=config,
+            mail=mail,
+            workflow=workflow,
+            limit=args.limit,
+            interval_seconds=args.interval,
+            once=args.once,
+            dry_run=args.dry_run,
+            resource_dir=args.resource_dir,
+            resource_store=resource_store,
+            resource_describer=media_resource_describer(config),
+            resource_policy=media_resource_policy(config),
+            resource_redactor=media_resource_redactor(config),
+            resource_transformer=media_resource_transformer(config),
+            event_log_path=args.event_log,
+            processed_ledger_path=args.processed_ledger,
+            lease_file=args.lease_file,
+            lease_ttl_seconds=args.lease_ttl_seconds,
+            triage_queue_path=args.triage_queue,
+            triage_quiet_seconds=args.triage_quiet_seconds,
+            triage_dispatch_command=args.triage_dispatch_command,
+            triage_status_reader=GitHubTriageStatusReader(
+                config=config,
+                issue_fields=GitHubIssueFieldsClient(gh=config.github_cli),
+            )
+            if args.triage_dispatch_command
+            else None,
         )
         print(json.dumps(result.__dict__, ensure_ascii=False))
         return 0

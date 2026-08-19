@@ -11,10 +11,19 @@ from typing import Any
 
 from bugpatrol.clients import GitHubIssueComment, LarkMessengerClient
 from bugpatrol.config import ProjectConfig
-from bugpatrol.fields import AGENT_TRIAGE_STATUS_VALUES, NATIVE_ISSUE_TYPES, default_field_specs, validate_field_value
+from bugpatrol.fields import (
+    AGENT_TRIAGE_STATUS_VALUES,
+    NATIVE_ISSUE_TYPES,
+    default_field_specs,
+    validate_field_value,
+)
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import GitHubIssueFieldsClient
-from bugpatrol.intake import parse_intake_metadata, require_bugpatrol_managed_issue
+from bugpatrol.intake import (
+    parse_intake_metadata,
+    require_bugpatrol_managed_issue,
+    resolve_reply_target,
+)
 from bugpatrol.lark import is_message_unreachable_error
 
 
@@ -761,8 +770,7 @@ def _reply_to_intake_topic(
     metadata = parse_intake_metadata(issue_body)
     if metadata is None:
         return
-    chat_id = _metadata_str(metadata, "chat_id")
-    message_id = _metadata_str(metadata, "message_id")
+    chat_id, message_id = resolve_reply_target(metadata)
     if not chat_id or not message_id:
         return
     try:

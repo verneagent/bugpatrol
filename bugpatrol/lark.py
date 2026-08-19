@@ -105,7 +105,16 @@ class DownloadedLarkResource:
     filename: str
 
 
-class LarkOpenApiMessengerClient:
+class _TenantApiClient:
+    """Shared Lark OpenAPI plumbing: tenant token cache + JSON request + self-heal.
+
+    Lark clients (messenger, mail) authenticate with a tenant access token minted
+    from the app id/secret, cache it, and on error 99991663 (token invalidated
+    while a long-running process holds it) drop the cache, re-mint, and retry once
+    so they self-heal in place. Keeping this in one place avoids drifting copies of
+    the auth/request logic across clients.
+    """
+
     def __init__(
         self,
         *,
@@ -117,6 +126,97 @@ class LarkOpenApiMessengerClient:
         self._app_secret = app_secret
         self._base_url = base_url.rstrip("/")
         self._tenant_access_token: str | None = None
+
+    def _tenant_token(self) -> str:
+        if self._tenant_access_token:
+            return self._tenant_access_token
+        data = self._request_without_auth(
+            "POST",
+            "/auth/v3/tenant_access_token/internal",
+            {"app_id": self._app_id, "app_secret": self._app_secret},
+        )
+        token = data.get("tenant_access_token")
+        if not isinstance(token, str) or not token:
+            raise LarkOpenApiError(f"missing tenant_access_token: {data}")
+        self._tenant_access_token = token
+        return token
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        def call() -> dict[str, object]:
+            return self._request_without_auth(
+                method,
+                path,
+                payload or {},
+                headers={"Authorization": f"Bearer {self._tenant_token()}"},
+            )
+
+        try:
+            return call()
+        except LarkOpenApiError as error:
+            if not is_invalid_access_token_error(error):
+                raise
+            # Cached token was invalidated (e.g. a watcher running for hours):
+            # drop it, re-mint on the next call, and retry exactly once.
+            self._tenant_access_token = None
+            return call()
+
+    def _request_without_auth(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, object],
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        body = None if method == "GET" else json.dumps(payload, ensure_ascii=False).encode()
+        return self._request_raw(
+            method,
+            path,
+            body,
+            headers={"Content-Type": "application/json", **(headers or {})},
+        )
+
+    def _request_raw(
+        self,
+        method: str,
+        path: str,
+        body: bytes | None,
+        *,
+        headers: dict[str, str],
+    ) -> dict[str, object]:
+        request = urllib.request.Request(
+            f"{self._base_url}{path}",
+            data=body,
+            method=method,
+            headers=headers,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                data = json.loads(response.read().decode())
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode(errors="replace")
+            raise LarkOpenApiError(f"Lark HTTP {error.code}: {detail}") from error
+        except urllib.error.URLError as error:
+            raise LarkOpenApiError(f"Lark request failed: {error}") from error
+        if data.get("code") != 0:
+            raise LarkOpenApiError(f"Lark API error: {data}")
+        return data
+
+
+class LarkOpenApiMessengerClient(_TenantApiClient):
+    def __init__(
+        self,
+        *,
+        app_id: str,
+        app_secret: str,
+        base_url: str = "https://open.larksuite.com/open-apis",
+    ) -> None:
+        super().__init__(app_id=app_id, app_secret=app_secret, base_url=base_url)
 
     def reply_to_message(self, *, chat_id: str, message_id: str, text: str) -> None:
         del chat_id
@@ -319,87 +419,6 @@ class LarkOpenApiMessengerClient:
             content_type=headers.get("Content-Type", ""),
             filename=_filename_from_content_disposition(headers.get("Content-Disposition", "")),
         )
-
-    def _tenant_token(self) -> str:
-        if self._tenant_access_token:
-            return self._tenant_access_token
-        data = self._request_without_auth(
-            "POST",
-            "/auth/v3/tenant_access_token/internal",
-            {"app_id": self._app_id, "app_secret": self._app_secret},
-        )
-        token = data.get("tenant_access_token")
-        if not isinstance(token, str) or not token:
-            raise LarkOpenApiError(f"missing tenant_access_token: {data}")
-        self._tenant_access_token = token
-        return token
-
-    def _request(
-        self,
-        method: str,
-        path: str,
-        payload: dict[str, object] | None = None,
-    ) -> dict[str, object]:
-        def call() -> dict[str, object]:
-            return self._request_without_auth(
-                method,
-                path,
-                payload or {},
-                headers={"Authorization": f"Bearer {self._tenant_token()}"},
-            )
-
-        try:
-            return call()
-        except LarkOpenApiError as error:
-            if not is_invalid_access_token_error(error):
-                raise
-            # Cached token was invalidated (e.g. a watcher running for hours):
-            # drop it, re-mint on the next call, and retry exactly once.
-            self._tenant_access_token = None
-            return call()
-
-    def _request_without_auth(
-        self,
-        method: str,
-        path: str,
-        payload: dict[str, object],
-        *,
-        headers: dict[str, str] | None = None,
-    ) -> dict[str, object]:
-        body = None if method == "GET" else json.dumps(payload, ensure_ascii=False).encode()
-        return self._request_raw(
-            method,
-            path,
-            body,
-            headers={"Content-Type": "application/json", **(headers or {})},
-        )
-
-    def _request_raw(
-        self,
-        method: str,
-        path: str,
-        body: bytes | None,
-        *,
-        headers: dict[str, str],
-    ) -> dict[str, object]:
-        request = urllib.request.Request(
-            f"{self._base_url}{path}",
-            data=body,
-            method=method,
-            headers=headers,
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                data = json.loads(response.read().decode())
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode(errors="replace")
-            raise LarkOpenApiError(f"Lark HTTP {error.code}: {detail}") from error
-        except urllib.error.URLError as error:
-            raise LarkOpenApiError(f"Lark request failed: {error}") from error
-        if data.get("code") != 0:
-            raise LarkOpenApiError(f"Lark API error: {data}")
-        return data
-
 
 def parse_lark_message(item: dict[str, object], *, default_chat_id: str) -> LarkMessage:
     body = item.get("body")

@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from dataclasses import dataclass, field
 import os
 import re
+import tomllib
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import tomllib
-
 from bugpatrol.fields import FieldSpec
-
 
 _LARK_PLATFORM_API_BASE_URLS = {
     "lark": "https://open.larksuite.com/open-apis",
@@ -243,7 +241,7 @@ class FixConfig:
     # provider/model independently of triage (e.g. triage on deepseek, fix on
     # claude). When None the fix runner inherits triage_agent. runner_labels are
     # unused for the fix agent (fix picks its runner via the workflow label var).
-    agent: "TriageAgentConfig | None" = None
+    agent: TriageAgentConfig | None = None
     # Install/preview link formats the project's CI posts as PR comments, so the
     # build-ready notification can surface the real links instead of pointing the
     # user at PR comments that may not exist (e.g. a test-only fix deploys no
@@ -264,6 +262,24 @@ class CloseAuditConfig:
 
 
 @dataclass(frozen=True)
+class MailConfig:
+    """Lark public-mailbox intake (`bug@fivedegrees.ai`).
+
+    The mail watcher polls this mailbox with the bot's tenant token (zero user
+    OAuth) and mirrors reports into the same GitHub issue pipeline. `chat_id` is
+    the dedicated group where receipts and notifications are posted (never a
+    reply to the customer). `user_emails` maps internal employee mail addresses
+    to Lark open_ids so those reports can be @mentioned/assigned by person.
+    """
+
+    mailbox: str
+    chat_id: str
+    app_id: str
+    app_secret_env: str
+    user_emails: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     github_repo: str
     github_cli: str
@@ -279,6 +295,8 @@ class ProjectConfig:
     reference_repos: tuple[ReferenceRepo, ...] = ()
     fix: FixConfig | None = None
     close_audit: CloseAuditConfig = CloseAuditConfig()
+    # Optional [mail] public-mailbox intake. None = no mail watcher for the project.
+    mail: MailConfig | None = None
 
     @property
     def project(self) -> str:
@@ -463,6 +481,33 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
         reference_repos=_parse_reference_repos(data),
         fix=_parse_fix(data),
         close_audit=_parse_close_audit(data),
+        mail=_parse_mail(data),
+    )
+
+
+def _parse_mail(data: dict[str, Any]) -> MailConfig | None:
+    """Parse the optional `[mail]` table (public-mailbox intake).
+
+    Absent `[mail]` -> None (the project has no mail watcher). When present,
+    mailbox/chat_id/app credentials are required so a half-written config is
+    rejected loudly rather than silently polling nothing.
+    """
+    table = data.get("mail")
+    if table is None:
+        return None
+    if not isinstance(table, dict):
+        raise ValueError("[mail] must be a table")
+    user_emails = table.get("user_emails") or {}
+    if not isinstance(user_emails, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in user_emails.items()
+    ):
+        raise ValueError("[mail.user_emails] must be a string map")
+    return MailConfig(
+        mailbox=_required_str(table, "mailbox"),
+        chat_id=_required_str(table, "chat_id"),
+        app_id=_required_str(table, "app_id"),
+        app_secret_env=_required_str(table, "app_secret_env"),
+        user_emails=dict(user_emails),
     )
 
 

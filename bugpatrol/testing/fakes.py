@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment, GitHubPullRequest
 from bugpatrol.lark import SentLarkMessage
@@ -78,6 +78,14 @@ class FakeGitHubIssuesClient:
         for item in self.created:
             if item.repo == repo and item.issue.number == issue_number:
                 item.comments.append(body)
+                return
+        raise ValueError(f"issue not found: {repo}#{issue_number}")
+
+    def update_issue_body(self, *, repo: str, issue_number: int, body: str) -> None:
+        for item in self.created:
+            if item.repo == repo and item.issue.number == issue_number:
+                # GitHubIssue is frozen; the anchor PATCH is a body swap.
+                item.issue = replace(item.issue, body=body)
                 return
         raise ValueError(f"issue not found: {repo}#{issue_number}")
 

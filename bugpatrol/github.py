@@ -43,7 +43,7 @@ class GitHubCliIssuesClient:
         gh: str = "gh",
         search_limit: int = 200,
         issue_fields: GitHubIssueFieldsClient | None = None,
-        project_config: "ProjectConfig | None" = None,
+        project_config: ProjectConfig | None = None,
         transient_retries: int = 3,
         retry_backoff_seconds: float = 2.0,
         sleep: Callable[[float], None] = time.sleep,
@@ -142,6 +142,18 @@ class GitHubCliIssuesClient:
     def add_issue_comment(self, *, repo: str, issue_number: int, body: str) -> None:
         self._run(
             ["issue", "comment", str(issue_number), "--repo", repo, "--body-file", "-"],
+            stdin=body,
+        )
+
+    def update_issue_body(self, *, repo: str, issue_number: int, body: str) -> None:
+        """Replace an issue's body.
+
+        Mail intake patches ``notify_anchor_message_id`` into the intake meta
+        after posting the group receipt, and an issue body edit is the one
+        update the issues API supports that touches the body text.
+        """
+        self._run(
+            ["issue", "edit", str(issue_number), "--repo", repo, "--body-file", "-"],
             stdin=body,
         )
 

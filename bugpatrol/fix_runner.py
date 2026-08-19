@@ -17,10 +17,9 @@ import re
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
-from uuid import uuid4
 
 from bugpatrol.agents import (
     AgentInvocation,
@@ -79,6 +78,7 @@ from bugpatrol.intake import (
     is_bugpatrol_managed_issue,
     parse_intake_metadata,
     require_bugpatrol_managed_issue,
+    resolve_reply_target,
 )
 from bugpatrol.intake_workflow import parse_intake_reply_metadata
 from bugpatrol.lark import is_message_unreachable_error
@@ -1444,10 +1444,11 @@ def _build_progress_reporter(
     fix = config.fix
     assert fix is not None
     metadata = parse_intake_metadata(issue.body or "") or {}
+    chat_id, message_id = resolve_reply_target(metadata)
     return ProgressReporter(
         replier=lark,
-        chat_id=str(metadata.get("chat_id") or ""),
-        message_id=str(metadata.get("message_id") or ""),
+        chat_id=chat_id,
+        message_id=message_id,
         issue_number=issue.number,
         interval_seconds=float(fix.progress_heartbeat_seconds),
         runner=triage_runner_name(),

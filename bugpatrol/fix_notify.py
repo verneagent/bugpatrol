@@ -6,12 +6,17 @@ import json
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from bugpatrol.clients import GitHubIssue, GitHubIssueComment, GitHubPullRequest, LarkMessengerClient
+from bugpatrol.clients import (
+    GitHubIssue,
+    GitHubIssueComment,
+    GitHubPullRequest,
+    LarkMessengerClient,
+)
 from bugpatrol.github import GitHubCliError, GitHubCliIssuesClient
-from bugpatrol.intake import parse_intake_metadata
+from bugpatrol.intake import parse_intake_metadata, resolve_reply_target
 from bugpatrol.lark import LarkOpenApiError, is_message_unreachable_error
 
 FIX_META_START = "<!-- BUGPATROL_FIX_META"
@@ -79,10 +84,11 @@ def build_fix_notification(
     metadata = parse_intake_metadata(issue.body or "")
     if metadata is None:
         raise ValueError("issue has no BugPatrol Lark intake metadata")
-    chat_id = _metadata_str(metadata, "chat_id")
-    message_id = _metadata_str(metadata, "message_id")
+    # Mail intake anchors replies to a group receipt (notify_anchor_message_id);
+    # chat sources reply to the original message_id. Either must resolve.
+    chat_id, message_id = resolve_reply_target(metadata)
     if not chat_id or not message_id:
-        raise ValueError("issue Lark metadata is missing chat_id or message_id")
+        raise ValueError("issue intake metadata is missing a reply target (chat_id/message_id)")
     return FixNotification(
         key=key,
         event=event,
@@ -506,7 +512,7 @@ def _window_cutoff(since_days: int) -> datetime | None:
     """Earliest allowed timestamp for a bounded backfill (None = no window)."""
     if since_days <= 0:
         return None
-    return datetime.now(timezone.utc) - timedelta(days=since_days)
+    return datetime.now(UTC) - timedelta(days=since_days)
 
 
 def _within_window(timestamp: str, cutoff: datetime | None) -> bool:
@@ -535,7 +541,7 @@ def _parse_github_timestamp(value: str) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed
 
 

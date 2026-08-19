@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Iterable, Protocol, Sequence
+from typing import Any, Protocol
 
 from bugpatrol.clients import GitHubIssue, GitHubIssuesClient, LarkMessengerClient
 from bugpatrol.config import ProjectConfig
@@ -48,6 +49,30 @@ def _collect_message_ids(meta: dict[str, object], into: set[str]) -> None:
     many = meta.get("message_ids")
     if isinstance(many, list):
         into.update(item for item in many if isinstance(item, str) and item)
+
+
+def collect_recorded_message_ids(
+    *,
+    github: GitHubIssuesClient,
+    repo: str,
+    issue: GitHubIssue,
+) -> set[str]:
+    """Source message ids already captured on an issue (body + follow-ups).
+
+    Shared by the Lark and mail intake workflows: the issue body's intake meta
+    and every follow-up comment's meta embed the source message ids they carry,
+    so de-dup stays stateless — any re-scan can tell what is already here
+    without a local ledger. For mail intake the ids are the mail message_ids.
+    """
+    recorded: set[str] = set()
+    body_meta = parse_intake_metadata(issue.body or "")
+    if body_meta is not None:
+        _collect_message_ids(body_meta, recorded)
+    for comment in github.list_issue_comments(repo=repo, issue_number=issue.number):
+        reply_meta = parse_intake_reply_metadata(comment.body)
+        if reply_meta is not None:
+            _collect_message_ids(reply_meta, recorded)
+    return recorded
 
 
 @dataclass(frozen=True)
@@ -342,18 +367,11 @@ class IntakeWorkflow:
         any re-scan (watcher replay or backfill) can tell what is already here
         without a local ledger.
         """
-        recorded: set[str] = set()
-        body_meta = parse_intake_metadata(issue.body or "")
-        if body_meta is not None:
-            _collect_message_ids(body_meta, recorded)
-        for comment in self._github.list_issue_comments(
+        return collect_recorded_message_ids(
+            github=self._github,
             repo=self._config.github_repo,
-            issue_number=issue.number,
-        ):
-            reply_meta = parse_intake_reply_metadata(comment.body)
-            if reply_meta is not None:
-                _collect_message_ids(reply_meta, recorded)
-        return recorded
+            issue=issue,
+        )
 
     def _closed_outcome(
         self, *, record: IntakeRecord, issue: GitHubIssue
@@ -457,14 +475,14 @@ class IntakeWorkflow:
         )
 
 
-def build_issue_title(record: IntakeRecord) -> str:
+def build_issue_title(record: IntakeRecord, *, prefix: str = "[Lark] ") -> str:
     text = " ".join(line.strip() for line in record.original_text.splitlines() if line.strip())
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
-        text = "Lark bug report"
+        text = "bug report"
     if len(text) > 80:
         text = text[:77].rstrip() + "..."
-    return f"[Lark] {text}"
+    return f"{prefix}{text}"
 
 
 def initial_intake_fields(record: IntakeRecord, *, include_branch: bool = False) -> dict[str, str]:
@@ -508,18 +526,25 @@ def infer_evidence(attachments: tuple[Attachment, ...], original_text: str) -> s
 
 
 def render_followup_comment(
-    record: IntakeRecord, *, language: str = "en-US", signal_reason: str = ""
+    record: IntakeRecord,
+    *,
+    language: str = "en-US",
+    signal_reason: str = "",
+    source: str = "lark",
+    extra_meta: dict[str, Any] | None = None,
 ) -> str:
     copy = _followup_copy(language)
     attachments = render_attachments_markdown(record.attachments, copy=copy)
     meta = {
-        "source": "lark",
+        "source": source,
         "schema_version": 1,
         "chat_id": record.chat_id,
         "root_id": record.root_id,
         "message_id": record.message_id,
         "reporter_open_id": record.reporter_open_id,
     }
+    if extra_meta:
+        meta.update(extra_meta)
     if signal_reason:
         # Record how the followup was classified so a later fix-revise can tell a
         # material correction from an ack/fix-status chatter without re-parsing text.
@@ -548,7 +573,12 @@ def render_followup_comment(
 
 
 def render_batched_followup_comment(
-    records: Sequence[IntakeRecord], *, language: str = "en-US", signal_reason: str = ""
+    records: Sequence[IntakeRecord],
+    *,
+    language: str = "en-US",
+    signal_reason: str = "",
+    source: str = "lark",
+    extra_meta: dict[str, Any] | None = None,
 ) -> str:
     """One comment carrying several messages of the same topic.
 
@@ -577,13 +607,15 @@ def render_batched_followup_comment(
             ]
         )
     meta = {
-        "source": "lark",
+        "source": source,
         "schema_version": 1,
         "chat_id": first.chat_id,
         "root_id": first.root_id,
         "message_ids": [record.message_id for record in records],
         "reporter_open_id": first.reporter_open_id,
     }
+    if extra_meta:
+        meta.update(extra_meta)
     if signal_reason:
         meta["signal_reason"] = signal_reason
     lines.extend(

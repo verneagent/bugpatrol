@@ -115,6 +115,9 @@ class GitHubIssuesClient(Protocol):
     def add_issue_comment(self, *, repo: str, issue_number: int, body: str) -> None:
         """Append a comment to an existing issue."""
 
+    def update_issue_body(self, *, repo: str, issue_number: int, body: str) -> None:
+        """Replace an issue's body (used to patch intake meta after creation)."""
+
     def list_issue_comments(self, *, repo: str, issue_number: int) -> tuple[GitHubIssueComment, ...]:
         """Return comments for an issue."""
 

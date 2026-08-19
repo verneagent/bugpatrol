@@ -136,6 +136,20 @@ resize_max_image_height = 1600
 resize_image_quality = 85
 convert_images_to_jpeg = true
 
+[mail]
+# 公共邮箱 bug@fivedegrees.ai 接入：bot 以 tenant token 轮询收件箱（零用户授权），
+# 上报镜像进同一套 GitHub issue 管线；回执与通知发到下方专属群，绝不回复客户。
+# 详见 docs/MAIL-INTAKE.md。
+mailbox = "bug@fivedegrees.ai"
+# 「fived 邮件 bug」话题群（topic mode，bot 管理，无群主）
+chat_id = "oc_8ac023afccc18f7cad5c08056c68021a"
+app_id = "cli_aac97d050d385ee9"
+app_secret_env = "BUGPATROL_LARK_APP_SECRET"
+# 内部员工邮箱 -> Lark open_id，用于分诊/追问消息里真正 @ 到人；
+# 未映射的地址一律以 mail:<address> 标识。
+# [mail.user_emails]
+# dinghaozeng@fivedegrees.ai = "ou_xxx"
+
 [issue_field_names]
 Priority = "Priority"
 "Triage status" = "Triage status"

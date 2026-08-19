@@ -7,9 +7,10 @@ bug, assign an owner, or compare behavior to PRD.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Sequence
+from typing import Any
 
 from bugpatrol.clients import GitHubIssue
 
@@ -71,12 +72,18 @@ def intake_record_from_dict(data: dict[str, Any]) -> IntakeRecord:
     )
 
 
-def render_issue_body(record: IntakeRecord, *, language: str = "en-US") -> str:
+def render_issue_body(
+    record: IntakeRecord,
+    *,
+    language: str = "en-US",
+    source: str = "lark",
+    extra_meta: dict[str, Any] | None = None,
+) -> str:
     copy = _copy(language)
     attachments = render_attachments_markdown(record.attachments, copy=copy)
 
     meta = {
-        "source": "lark",
+        "source": source,
         "schema_version": 1,
         "chat_id": record.chat_id,
         "root_id": record.root_id,
@@ -85,6 +92,8 @@ def render_issue_body(record: IntakeRecord, *, language: str = "en-US") -> str:
         "reporter_name": record.reporter_name,
         "attachment_urls": [item.url for item in record.attachments],
     }
+    if extra_meta:
+        meta.update(extra_meta)
     # Only stamp branch keys for feature-branch topics; main-branch issues keep
     # the legacy meta shape unchanged.
     if record.target_branch and record.target_branch != "main":
@@ -115,7 +124,13 @@ def render_issue_body(record: IntakeRecord, *, language: str = "en-US") -> str:
     )
 
 
-def render_batched_issue_body(records: Sequence[IntakeRecord], *, language: str = "en-US") -> str:
+def render_batched_issue_body(
+    records: Sequence[IntakeRecord],
+    *,
+    language: str = "en-US",
+    source: str = "lark",
+    extra_meta: dict[str, Any] | None = None,
+) -> str:
     """Issue body carrying several messages of one topic in a single create.
 
     Folding the backlog into the body (rather than a create plus follow-up
@@ -128,7 +143,7 @@ def render_batched_issue_body(records: Sequence[IntakeRecord], *, language: str 
     copy = _copy(language)
     first = records[0]
     meta = {
-        "source": "lark",
+        "source": source,
         "schema_version": 1,
         "chat_id": first.chat_id,
         "root_id": first.root_id,
@@ -140,6 +155,8 @@ def render_batched_issue_body(records: Sequence[IntakeRecord], *, language: str 
         "reporter_name": first.reporter_name,
         "attachment_urls": [item.url for record in records for item in record.attachments],
     }
+    if extra_meta:
+        meta.update(extra_meta)
     if first.target_branch and first.target_branch != "main":
         meta["target_branch"] = first.target_branch
         if first.branch_tip_sha:
@@ -197,6 +214,49 @@ def parse_intake_metadata(body: str) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         raise ValueError("intake metadata must be a JSON object")
     return data
+
+
+def resolve_reply_target(metadata: dict[str, Any]) -> tuple[str, str]:
+    """(chat_id, message_id) to reply to for an issue's intake metadata.
+
+    Mail intake posts a receipt message in the dedicated group and anchors all
+    of its Lark replies there; ``notify_anchor_message_id`` carries that IM
+    message_id. Prefer it when present; otherwise fall back to ``message_id``
+    (the original Lark source message), so chat-source behavior is unchanged.
+    Empty strings mean no reply target could be resolved.
+    """
+    chat_id = metadata.get("chat_id")
+    if not isinstance(chat_id, str) or not chat_id:
+        return "", ""
+    target = metadata.get("notify_anchor_message_id")
+    if not isinstance(target, str) or not target:
+        target = metadata.get("message_id")
+    if not isinstance(target, str):
+        target = ""
+    return chat_id, target
+
+
+def update_intake_metadata(body: str, updates: dict[str, Any]) -> str:
+    """Merge `updates` into an issue body's intake meta JSON, preserving the rest.
+
+    Used to patch ``notify_anchor_message_id`` into the body after the receipt
+    is posted, without re-rendering the human-readable intake section above the
+    marker.
+    """
+    marker = f"<!-- {INTAKE_META_MARKER}:"
+    start = body.find(marker)
+    if start == -1:
+        raise ValueError(f"missing {INTAKE_META_MARKER}")
+    json_start = start + len(marker)
+    end = body.find(" -->", json_start)
+    if end == -1:
+        raise ValueError(f"unterminated {INTAKE_META_MARKER}")
+    data = json.loads(body[json_start:end])
+    if not isinstance(data, dict):
+        raise ValueError("intake metadata must be a JSON object")
+    data.update(updates)
+    new_meta = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    return body[:json_start] + new_meta + body[end:]
 
 
 def target_branch_from_metadata(metadata: dict[str, Any]) -> str:
