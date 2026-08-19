@@ -162,6 +162,7 @@ class MailIntakeWorkflow:
             reply = self._notify(
                 issue=existing,
                 text=f"已追加到 GitHub issue [#{existing.number}]({existing.url})",
+                record=record,
             )
             return MailIntakeOutcome(
                 action="updated",
@@ -182,6 +183,7 @@ class MailIntakeWorkflow:
             reply = self._notify(
                 issue=raced,
                 text=f"已创建 GitHub issue [#{raced.number}]({raced.url})",
+                record=record,
             )
             return MailIntakeOutcome(
                 action="deduplicated",
@@ -199,6 +201,7 @@ class MailIntakeWorkflow:
         reply = self._notify(
             issue=issue,
             text=f"已创建 GitHub issue [#{issue.number}]({issue.url})",
+            record=record,
         )
         return MailIntakeOutcome(
             action="created",
@@ -207,7 +210,28 @@ class MailIntakeWorkflow:
             triage_signal=classify_triage_signal("created", record, self._config.followup_classifier),
         )
 
-    def _notify(self, *, issue: GitHubIssue, text: str) -> str:
+    def _with_preview(self, *, text: str, record: IntakeRecord) -> str:
+        """Append the mail subject/sender/body excerpt to a receipt so the
+        group can see what the report is about without opening GitHub."""
+        subject = ""
+        body = record.original_text
+        if "\n\n" in body:
+            subject, body = body.split("\n\n", 1)
+        subject = subject.strip()
+        body = body.strip()
+        lines = [text]
+        if subject:
+            lines.append(f"\n📧 {subject}")
+        if record.reporter_name:
+            lines.append(f"👤 {record.reporter_name}")
+        if body:
+            preview = body[:200]
+            if len(body) > 200:
+                preview += "…"
+            lines.append(f"\n> {preview}")
+        return "\n".join(lines)
+
+    def _notify(self, *, issue: GitHubIssue, text: str, record: IntakeRecord | None = None) -> str:
         """Post the group receipt (and anchor it) or reply to the existing anchor.
 
         Mail intake cannot reply to the customer thread, so every notification
@@ -218,6 +242,8 @@ class MailIntakeWorkflow:
         between issue create and the anchor patch is repaired right here on the
         next replay.
         """
+        if record is not None:
+            text = self._with_preview(text=text, record=record)
         metadata = parse_intake_metadata(issue.body or "") or {}
         if metadata.get("notify_anchor_message_id"):
             return self._reply_to_anchor(issue=issue, text=text)
@@ -251,6 +277,7 @@ class MailIntakeWorkflow:
                 f"该 issue [#{issue.number}]({issue.url}) 已关闭，本条邮件未处理。"
                 "如需重新处理，请在群里发 /reopen。"
             ),
+            record=record,
         )
         return MailIntakeOutcome(
             action="ignored_closed",
@@ -289,6 +316,7 @@ class MailIntakeWorkflow:
             reply = self._notify(
                 issue=issue,
                 text=f"已创建 GitHub issue [#{issue.number}]({issue.url})",
+                record=record,
             )
         return MailIntakeOutcome(
             action="duplicate",

@@ -146,6 +146,13 @@ class MailIntakeWorkflowTest(unittest.TestCase):
         # The receipt goes to the dedicated group, then is anchored into the
         # body meta so later replies thread onto it (never the customer).
         self.assertEqual([message.chat_id for message in lark.chat_messages], ["oc_mail"])
+        # The receipt carries the mail subject, sender, and body preview so the
+        # group sees the report without opening GitHub.
+        receipt = lark.chat_messages[0].text
+        self.assertIn("已创建 GitHub issue [#1]", receipt)
+        self.assertIn("📧 登录后白屏", receipt)
+        self.assertIn("👤 客户张三", receipt)
+        self.assertIn("登录后白屏，无报错", receipt)
         metadata = parse_intake_metadata(github.created[0].issue.body)
         assert metadata is not None
         self.assertEqual(metadata["notify_anchor_message_id"], "om_sent_1")
