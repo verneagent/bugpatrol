@@ -30,6 +30,7 @@ from bugpatrol.triage_runner import (
     render_triage_failed_comment,
     report_workflow_failure,
     triage_run_in_flight,
+    _write_turn_log,
 )
 
 
@@ -396,15 +397,18 @@ class TriageRunnerTest(unittest.TestCase):
             )
 
             with patch("subprocess.run") as run:
+                # Real TimeoutExpired carries raw bytes in .stdout/.stderr even
+                # under text=True (CPython quirk); mirror that so the bytes-vs-str
+                # crash that masked #5038's real cause stays covered.
                 timeout = subprocess.TimeoutExpired(
                     cmd=["claude"],
                     timeout=1200,
-                    output='{"partial": 1}',
-                    stderr="",
+                    output=b'{"partial": 1}',
+                    stderr=b"",
                 )
                 # subprocess.run() populates `.stdout` when it raises the
                 # exception; mirror that for the hand-built one.
-                timeout.stdout = '{"partial": 1}'
+                timeout.stdout = b'{"partial": 1}'
                 run.side_effect = timeout
                 with self.assertRaisesRegex(RuntimeError, "timed out after 1200s"):
                     execute_triage_run(
@@ -419,6 +423,16 @@ class TriageRunnerTest(unittest.TestCase):
         self.assertEqual(issue_fields.writes[1]["values"], {"Triage status": "Failed"})
         self.assertIn("no terminal output for 1200s", github.comments[-1])
         self.assertIn("## BugPatrol triage failed", github.comments[-1])
+
+    def test_write_turn_log_accepts_bytes_like_timeoutexpired(self) -> None:
+        # #5038: a timed-out `claude -p` carried bytes in .stdout even under
+        # text=True, and write_text(bytes) crashed the failure path with
+        # "data must be str, not bytes", masking the real timeout cause.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            _write_turn_log(out, b'{"stream": "event"}\n', b"partial stderr\n")
+            self.assertEqual((out / "agent-turns.jsonl").read_text(), '{"stream": "event"}\n')
+            self.assertEqual((out / "agent-stderr.log").read_text(), "partial stderr\n")
 
     def test_execute_triage_run_rejects_unmanaged_issue_before_writes(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

@@ -89,7 +89,7 @@ from bugpatrol.triage_result import (
     send_intake_topic_message,
     triage_runner_name,
 )
-from bugpatrol.triage_runner import AGENT_TIMEOUT_SECONDS, resolve_issue_branch
+from bugpatrol.triage_runner import AGENT_TIMEOUT_SECONDS, _write_turn_log, resolve_issue_branch
 from bugpatrol.worktree import (
     fix_revise_worktree,
     fix_worktree,
@@ -1589,8 +1589,3 @@ def _post_baseline_broken(
     )
 
 
-def _write_turn_log(output_dir: Path, stdout: str | None, stderr: str | None) -> None:
-    if stdout:
-        (output_dir / "agent-turns.jsonl").write_text(stdout)
-    if stderr:
-        (output_dir / "agent-stderr.log").write_text(stderr)

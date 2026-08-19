@@ -347,7 +347,9 @@ def execute_triage_run(
         )
     except subprocess.TimeoutExpired as error:
         duration_seconds = time.monotonic() - started
-        _write_turn_log(plan.output_path.parent, error.stdout or "", error.stderr or "")
+        stdout = _coerce_text(error.stdout)
+        stderr = _coerce_text(error.stderr)
+        _write_turn_log(plan.output_path.parent, stdout, stderr)
         mark_triage_failed(
             config=config,
             issue_number=issue_number,
@@ -358,8 +360,8 @@ def execute_triage_run(
             reason=agent_failure_reason(
                 f"The triage agent produced no terminal output for {AGENT_TIMEOUT_SECONDS}s "
                 "and was killed (the LLM endpoint likely hung).",
-                stderr=error.stderr,
-                stdout=error.stdout,
+                stderr=stderr,
+                stdout=stdout,
             ),
         )
         raise RuntimeError(
@@ -491,7 +493,21 @@ def execute_triage_run(
     return "applied"
 
 
-def _write_turn_log(output_dir: Path, stdout: str | None, stderr: str | None) -> None:
+def _coerce_text(payload: str | bytes | None) -> str | None:
+    """Decode a ``subprocess`` timeout payload to ``str``.
+
+    ``TimeoutExpired`` keeps ``.stdout``/``.stderr`` as raw bytes even when the
+    subprocess was spawned with ``text=True``, so any text-only sink (``write_text``,
+    regex, ``json.loads``) must see decoded text first.
+    """
+    if payload is None:
+        return None
+    return payload.decode("utf-8", errors="replace") if isinstance(payload, bytes) else payload
+
+
+def _write_turn_log(output_dir: Path, stdout: str | bytes | None, stderr: str | bytes | None) -> None:
+    stdout = _coerce_text(stdout)
+    stderr = _coerce_text(stderr)
     if stdout:
         (output_dir / "agent-turns.jsonl").write_text(stdout)
     if stderr:

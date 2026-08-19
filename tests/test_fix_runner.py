@@ -641,8 +641,10 @@ class RunFixAgentTimeoutTest(unittest.TestCase):
                 reviewer_open_id="",
                 branch_note="",
             )
-            timeout = subprocess.TimeoutExpired(cmd=["claude"], timeout=1200, output="", stderr="")
-            timeout.stdout = ""
+            # Real TimeoutExpired carries raw bytes even under text=True; the
+            # turn-log write must survive that (bytes-vs-str crash, #5038).
+            timeout = subprocess.TimeoutExpired(cmd=["claude"], timeout=1200, output=b"partial", stderr=b"")
+            timeout.stdout = b"partial"
             with patch("bugpatrol.fix_runner.subprocess.run", side_effect=timeout):
                 with self.assertRaisesRegex(RuntimeError, "fix agent timed out after 1200s"):
                     _run_fix_agent(plan)
