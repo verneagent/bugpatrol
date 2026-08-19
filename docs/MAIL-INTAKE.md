@@ -152,14 +152,27 @@ app_secret_env = "BUGPATROL_LARK_APP_SECRET"
 4. `MailResourceDownloader` + 附件管线。
 5. `fix_notify` 支持 `notify_anchor_message_id`。
 6. 测试:一封真实客户邮件 → issue 创建 → triage → 群里通知;同 thread 后续邮件追加同一 issue。
-7. 部署:relay 加 launchd daemon(`com.clover.bugpatrol-fived-mail-watcher`)。
+7. 部署:relay(Mac Studio, neojenkins-relay)加 system daemon
+   `com.clover.bugpatrol-fived-mail-watcher`。模板:`deploy/com.clover.bugpatrol-fived-mail-watcher.plist`
+   (secret 占位,部署时从现役 `/Library/LaunchDaemons/com.clover.bugpatrol-fived-watcher.plist`
+   提取 `BUGPATROL_LARK_APP_SECRET` 填充)。
+   - **独立 triage queue**(`~/.bugpatrol/fived/mail-triage-queue.json`):`TriageRequestQueue.save()`
+     是无锁原子写,两个 watcher 共用会互相覆盖,必须与 Lark watcher 的 `triage-queue.json` 分开。
+   - dispatch 命令与现役一致(`gh workflow run bugpatrol-triage.yml --repo TheCloverLab/fived --ref main ...`),
+     邮件 issue 建完即进分诊,不依赖 6h reconcile 兜底。
+   - 独立 lock/ledger/event-log:`watch-mail.lock`、`mail-processed.json`、`mail-watch-events.jsonl`。
+   - env 从现役 plist 镜像(proxy 18443),**不带 `DEEPSEEK_API_KEY`**(watch-mail 不跑 LLM agent)。
+   - 部署命令:`sudo cp <final>.plist /Library/LaunchDaemons/` + `sudo launchctl bootstrap system ...`;
+     验证 `launchctl print system/com.clover.bugpatrol-fived-mail-watcher`。
 
 ## 验证门(Verification Gate)
 
-- list API 200;再跑一轮确认未读/正文/附件可读。
-- 一封真实邮件端到端:issue 创建 → 群回执 → triage → 群通知。
-- 同 thread 第二封邮件 → 追加同一 issue,不新建。
-- ledger 幂等:重启 watcher 不重复建 issue。
+- [x] list API 200;get_message 拉全文/正文/附件可读(2026-08-19)。
+- [x] 真实邮件端到端:SES 测试邮件 → #5091/#5092 创建 → 群回执 → 锚点写入(2026-08-19)。
+- [x] 同 thread 第二封邮件 → 追加同一 issue,不新建(单测覆盖)。
+- [x] ledger 幂等:重启 watcher 不重复建 issue(daemon 已跑,iteration 2+ scan 0 新)。
+- [x] triage 接线:dry-run 全参数通过;daemon 已带 `--triage-dispatch-command`(2026-08-19 部署)。
+- [ ] 真实客户邮件 → issue → triage → 群通知(待首封真实邮件)。
 
 ## 附录:被驳回的备选
 

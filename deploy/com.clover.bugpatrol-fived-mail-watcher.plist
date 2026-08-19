@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<!-- Fill from the live Lark watcher plist:
+		     /Library/LaunchDaemons/com.clover.bugpatrol-fived-watcher.plist -->
+		<key>BUGPATROL_LARK_APP_SECRET</key>
+		<string>__BUGPATROL_LARK_APP_SECRET__</string>
+		<key>HTTPS_PROXY</key>
+		<string>http://127.0.0.1:18443</string>
+		<key>HTTP_PROXY</key>
+		<string>http://127.0.0.1:18443</string>
+		<key>PATH</key>
+		<string>/Users/neojenkins/local/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>all_proxy</key>
+		<string>socks5://127.0.0.1:18443</string>
+		<key>http_proxy</key>
+		<string>http://127.0.0.1:18443</string>
+		<key>https_proxy</key>
+		<string>http://127.0.0.1:18443</string>
+	</dict>
+	<key>GroupName</key>
+	<string>staff</string>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.clover.bugpatrol-fived-mail-watcher</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/neojenkins/clover/bugpatrol/.venv/bin/python</string>
+		<string>-m</string>
+		<string>bugpatrol</string>
+		<string>watch-mail</string>
+		<string>projects/fived.toml</string>
+		<string>--interval</string>
+		<string>30</string>
+		<string>--limit</string>
+		<string>20</string>
+		<string>--asset-repo</string>
+		<string>--event-log</string>
+		<string>/Users/neojenkins/.bugpatrol/fived/mail-watch-events.jsonl</string>
+		<string>--lease-file</string>
+		<string>/Users/neojenkins/.bugpatrol/fived/watch-mail.lock</string>
+		<string>--processed-ledger</string>
+		<string>/Users/neojenkins/.bugpatrol/fived/mail-processed.json</string>
+		<!-- MUST stay separate from the Lark watcher's triage-queue.json:
+		     TriageRequestQueue.save() is an unlocked atomic write, so two
+		     watchers sharing one file would clobber each other's requests. -->
+		<string>--triage-queue</string>
+		<string>/Users/neojenkins/.bugpatrol/fived/mail-triage-queue.json</string>
+		<string>--triage-dispatch-command</string>
+		<string>gh workflow run bugpatrol-triage.yml --repo TheCloverLab/fived --ref main -f issue_number={issue_number} -f trigger_fingerprint={trigger_fingerprint} -f reason={reason}</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/neojenkins/.bugpatrol/fived/logs/mail-watcher.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/neojenkins/.bugpatrol/fived/logs/mail-watcher.out.log</string>
+	<key>UserName</key>
+	<string>neojenkins</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/neojenkins/clover/bugpatrol</string>
+</dict>
+</plist>
