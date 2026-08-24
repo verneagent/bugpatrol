@@ -54,6 +54,7 @@ class NeedsInfoLoopE2ETest(unittest.TestCase):
                 "triage_confidence": "低",
                 "assignee": "garlanddiego",
                 "owner_reason": "Manual",
+                "corrected_title": "Todo 删除最后一项后页面空白",
                 "follow_up_questions": ["请补充浏览器版本", "请确认刷新后是否恢复"],
                 "comment_markdown": "## Triage Analysis\n\n需要补充信息。",
             }

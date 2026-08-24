@@ -97,6 +97,7 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
         "blame_suggestion",
         "suspected_owner",
         "follow_up_questions",
+        "corrected_title",
         "comment_markdown",
     ],
     "properties": {
@@ -154,6 +155,11 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
         "description": "GitHub login of the person who most likely introduced the issue (from git history/PR evidence). Not the assignee. Use an empty string when evidence is insufficient.",
     },
     "follow_up_questions": {"type": "array", "items": {"type": "string"}},
+        "corrected_title": {
+            "type": "string",
+            "minLength": 1,
+            "description": "An improved, concise issue title capturing the actual bug, without the [Lark]/[邮件] source prefix. Draft one from the full evidence even when it matches the current title.",
+        },
         "comment_markdown": {"type": "string", "minLength": 1},
     },
 }

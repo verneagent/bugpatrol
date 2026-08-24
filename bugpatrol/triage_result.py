@@ -37,6 +37,7 @@ class TriageResult:
     suspected_owner: str = ""
     follow_up_questions: tuple[str, ...] = ()
     duplicate_of: int = 0
+    corrected_title: str = ""
 
 
 @dataclass(frozen=True)
@@ -172,6 +173,7 @@ def parse_triage_result(data: dict[str, Any]) -> TriageResult:
         raise ValueError("duplicate_of is only allowed when Triage verdict is 重复")
     assignee = _required_str(data, "assignee").lstrip("@")
     comment = _required_str(data, "comment_markdown")
+    corrected_title = _required_str(data, "corrected_title")
     return TriageResult(
         issue_type=issue_type,
         fields=fields,
@@ -181,7 +183,39 @@ def parse_triage_result(data: dict[str, Any]) -> TriageResult:
         suspected_owner=suspected_owner,
         follow_up_questions=follow_up_questions,
         duplicate_of=duplicate_of,
+        corrected_title=corrected_title,
     )
+
+
+# The intake auto-title carries a source marker prefix. A triage rewrite must
+# preserve it, and the agent is told to draft without it — mirroring
+# build_issue_title in intake_workflow.
+SOURCE_TITLE_PREFIXES = ("[Lark] ", "[邮件] ")
+TITLE_MAX_CHARS = 80
+
+
+def corrected_issue_title(current: str, corrected: str) -> str:
+    """Issue title to write after triage, or ``current`` when nothing changed.
+
+    The agent drafts ``corrected_title`` without the source prefix, but the
+    prefix (``[Lark] `` / ``[邮件] ``) is a source marker that must survive a
+    rewrite. Returns ``current`` unchanged when ``corrected`` is empty or
+    reduces to the current core, so repeated triage converges instead of
+    churning the title.
+    """
+    corrected = corrected.strip()
+    if not corrected:
+        return current
+    prefix = next((p for p in SOURCE_TITLE_PREFIXES if current.startswith(p)), "")
+    for p in SOURCE_TITLE_PREFIXES:
+        if corrected.startswith(p):
+            corrected = corrected[len(p):].strip()
+            break
+    budget = TITLE_MAX_CHARS - len(prefix)
+    if len(corrected) > budget:
+        corrected = corrected[: budget - 3].rstrip() + "..."
+    title = prefix + corrected
+    return title if title != current else current
 
 
 def apply_triage_result(
@@ -222,6 +256,17 @@ def apply_triage_result(
         existing_field_values=existing_field_values,
     )
     github.set_issue_type(repo=repo, issue_number=issue_number, issue_type=result.issue_type)
+    # Title correction is an issue-level mutation, applied unconditionally (not
+    # gated on the comment-dedup): a re-triage that reaches the same conclusion
+    # must still be able to fix the title, and once written the corrected title
+    # converges (agent proposes the same core → no write).
+    corrected_title = corrected_issue_title(issue.title, result.corrected_title)
+    if corrected_title != issue.title:
+        github.update_issue_title(
+            repo=repo,
+            issue_number=issue_number,
+            title=corrected_title,
+        )
     issue_fields.add_issue_field_values(
         repo=repo,
         issue_number=issue_number,

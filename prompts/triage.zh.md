@@ -24,4 +24,5 @@
    - `blame_suggestion` 是 best-effort 归因线索（自由文本），用于后续修复时追溯哪个 PR/哪个 commit/哪个代码区域可能引入了问题；证据不足时输出空字符串。
    - `suspected_owner` 是「疑似引入人」，只有当 git 历史/PR 证据明确指向某人时才填其 GitHub login；证据不足输出空字符串，绝不强行猜人。它不是 assignee，不影响谁跟进。
 10. 不要修改代码，不要创建 PR，不要自动修复。
-11. 最终只输出符合 `triage.schema.json` 的 JSON。
+11. 输出 `corrected_title`：基于 issue 全文和 comments，给一个简洁、准确的标题（中文，≤ 60 字），抓住真正的 bug/任务点（如「XX 页面点分享崩溃」）。现有标题通常是上报原文的前 80 字截断，往往没抓住重点，你要重拟；若现有标题已准确，输出其核心内容即可（去掉 `[Lark] ` / `[邮件] ` 来源前缀，系统会自动加回）。
+12. 最终只输出符合 `triage.schema.json` 的 JSON。

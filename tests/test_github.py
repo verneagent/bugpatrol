@@ -131,6 +131,20 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["input"], "comment")
         self.assertIn("comment", run.call_args.args[0])
 
+    def test_update_issue_title_passes_title_to_gh_edit(self) -> None:
+        client = GitHubCliIssuesClient()
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 0, "", "")
+            client.update_issue_title(repo="o/r", issue_number=42, title="登录页崩溃")
+
+        args = run.call_args.args[0]
+        self.assertIn("issue", args)
+        self.assertIn("edit", args)
+        self.assertIn("42", args)
+        self.assertIn("--title", args)
+        self.assertIn("登录页崩溃", args)
+
     def test_list_issue_comments_reads_rest_comments(self) -> None:
         client = GitHubCliIssuesClient()
 

@@ -39,6 +39,7 @@ class LiveTriageApplyE2ETest(unittest.TestCase):
                     "triage_confidence": "高",
                     "assignee": "garlanddiego",
                     "owner_reason": "CODEOWNERS",
+                    "corrected_title": "live triage apply e2e",
                     "comment_markdown": "## Triage Analysis\n\nLive e2e triage apply.",
                 }
             )

@@ -89,6 +89,13 @@ class FakeGitHubIssuesClient:
                 return
         raise ValueError(f"issue not found: {repo}#{issue_number}")
 
+    def update_issue_title(self, *, repo: str, issue_number: int, title: str) -> None:
+        for item in self.created:
+            if item.repo == repo and item.issue.number == issue_number:
+                item.issue = replace(item.issue, title=title)
+                return
+        raise ValueError(f"issue not found: {repo}#{issue_number}")
+
     def get_issue(self, *, repo: str, issue_number: int) -> GitHubIssue:
         for item in self.created:
             if item.repo == repo and item.issue.number == issue_number:

@@ -157,6 +157,16 @@ class GitHubCliIssuesClient:
             stdin=body,
         )
 
+    def update_issue_title(self, *, repo: str, issue_number: int, title: str) -> None:
+        """Replace an issue's title.
+
+        Triage rewrites the intake auto-title (an 80-char prefix of the raw
+        report) when the agent drafts a corrected_title that actually differs.
+        """
+        self._run(
+            ["issue", "edit", str(issue_number), "--repo", repo, "--title", title],
+        )
+
     def dispatch_triage_run(self, *, repo: str, issue_number: int) -> None:
         """Dispatch the standard bugpatrol-triage workflow for one issue.
 

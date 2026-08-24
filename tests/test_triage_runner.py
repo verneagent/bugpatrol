@@ -39,6 +39,7 @@ class FakeGithub:
         self.comments: list[str] = ["Follow-up comment"]
         self.issue_types: list[str] = []
         self.assignees: list[str] = []
+        self.updated_titles: list[str] = []
         self.issue_body = issue_body if issue_body is not None else managed_issue_body()
 
     def get_issue(self, *, repo: str, issue_number: int) -> GitHubIssue:
@@ -60,6 +61,9 @@ class FakeGithub:
 
     def set_issue_type(self, *, repo: str, issue_number: int, issue_type: str) -> None:
         self.issue_types.append(issue_type)
+
+    def update_issue_title(self, *, repo: str, issue_number: int, title: str) -> None:
+        self.updated_titles.append(title)
 
     def add_assignee(self, *, repo: str, issue_number: int, assignee: str) -> None:
         self.assignees.append(assignee)
@@ -739,6 +743,7 @@ class TriageRunnerTest(unittest.TestCase):
                   "owner_reason": "Manual",
                   "summary_cn": "空状态缺失",
                   "follow_up_questions": [],
+                  "corrected_title": "删除全部 Todo 后缺少空状态",
                   "comment_markdown": "## Triage Analysis\\n\\nLooks like a code bug."
                 }
                 """
@@ -1180,6 +1185,7 @@ def valid_triage_output() -> str:
       "owner_reason": "Manual",
       "summary_cn": "空状态缺失",
       "follow_up_questions": [],
+      "corrected_title": "删除全部 Todo 后缺少空状态",
       "comment_markdown": "## Triage Analysis\\n\\nLooks like a code bug."
     }
     """

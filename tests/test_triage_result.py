@@ -39,6 +39,7 @@ VALID = {
     "assignee": "@garlanddiego",
     "owner_reason": "CODEOWNERS",
     "blame_suggestion": "",
+    "corrected_title": "空状态缺失",
     "comment_markdown": "## Triage Analysis\n\n是代码 Bug。",
 }
 
@@ -54,6 +55,9 @@ class FakeGithub:
 
     def set_issue_type(self, **kwargs: object) -> None:
         self.calls.append(("set_issue_type", kwargs))
+
+    def update_issue_title(self, **kwargs: object) -> None:
+        self.calls.append(("update_issue_title", kwargs))
 
     def add_issue_comment(self, **kwargs: object) -> None:
         self.calls.append(("add_issue_comment", kwargs))
@@ -109,6 +113,138 @@ class TriageResultTest(unittest.TestCase):
         self.assertEqual(result.assignee, "garlanddiego")
         self.assertEqual(result.fields["Triage verdict"], "代码 Bug")
         self.assertEqual(result.blame_suggestion, "")
+        self.assertEqual(result.corrected_title, "空状态缺失")
+
+    def test_parse_triage_result_requires_corrected_title(self) -> None:
+        data = dict(VALID)
+        del data["corrected_title"]
+
+        with self.assertRaisesRegex(ValueError, "corrected_title"):
+            parse_triage_result(data)
+
+    def test_corrected_issue_title_rewrites_core_and_preserves_source_prefix(self) -> None:
+        from bugpatrol.triage_result import corrected_issue_title
+
+        self.assertEqual(corrected_issue_title("issue", "登录页崩溃"), "登录页崩溃")
+        self.assertEqual(corrected_issue_title("[Lark] 旧标题", "登录页崩溃"), "[Lark] 登录页崩溃")
+        # An agent that copies a prefix in anyway must not double it up.
+        self.assertEqual(corrected_issue_title("[邮件] 旧标题", "[Lark] 登录页崩溃"), "[邮件] 登录页崩溃")
+        # Same core → converge, no rewrite.
+        self.assertEqual(corrected_issue_title("[Lark] 旧标题", "旧标题"), "[Lark] 旧标题")
+        # Empty correction is a no-op.
+        self.assertEqual(corrected_issue_title("issue", "   "), "issue")
+        # Long corrections are truncated to the 80-char budget.
+        long_title = "这个标题" * 30
+        self.assertLessEqual(len(corrected_issue_title("issue", long_title)), 80)
+
+    def test_apply_triage_result_rewrites_title_when_different(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        result = TriageResult(
+            issue_type="Bug",
+            fields={"Source": "Lark"},
+            assignee="garlanddiego",
+            comment_markdown="done",
+            corrected_title="登录页崩溃",
+        )
+
+        summary = apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+        )
+
+        call_names = [name for name, _ in github.calls]
+        self.assertIn("update_issue_title", call_names)
+        title_kwargs = dict(github.calls[call_names.index("update_issue_title")][1])
+        self.assertEqual(title_kwargs["issue_number"], 1)
+        self.assertEqual(title_kwargs["title"], "登录页崩溃")
+
+    def test_apply_triage_result_preserves_source_prefix_on_title_rewrite(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.issues[1] = GitHubIssue(
+            number=1,
+            url="https://github.test/o/r/issues/1",
+            title="[Lark] 旧标题",
+            body=managed_issue_body(),
+        )
+        issue_fields = FakeIssueFields()
+        result = TriageResult(
+            issue_type="Bug",
+            fields={"Source": "Lark"},
+            assignee="garlanddiego",
+            comment_markdown="done",
+            corrected_title="登录页崩溃",
+        )
+
+        apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+        )
+
+        call_names = [name for name, _ in github.calls]
+        title_kwargs = dict(github.calls[call_names.index("update_issue_title")][1])
+        self.assertEqual(title_kwargs["title"], "[Lark] 登录页崩溃")
+
+    def test_apply_triage_result_skips_title_write_when_core_unchanged(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.issues[1] = GitHubIssue(
+            number=1,
+            url="https://github.test/o/r/issues/1",
+            title="[Lark] 登录页崩溃",
+            body=managed_issue_body(),
+        )
+        issue_fields = FakeIssueFields()
+        result = TriageResult(
+            issue_type="Bug",
+            fields={"Source": "Lark"},
+            assignee="garlanddiego",
+            comment_markdown="done",
+            corrected_title="登录页崩溃",
+        )
+
+        apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+        )
+
+        self.assertNotIn("update_issue_title", [name for name, _ in github.calls])
+
+    def test_apply_triage_result_skips_title_write_when_corrected_empty(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        result = TriageResult(
+            issue_type="Bug",
+            fields={"Source": "Lark"},
+            assignee="garlanddiego",
+            comment_markdown="done",
+        )
+
+        apply_triage_result(
+            repo=config.github_repo,
+            issue_number=1,
+            config=config,
+            result=result,
+            github=github,  # type: ignore[arg-type]
+            issue_fields=issue_fields,  # type: ignore[arg-type]
+        )
+
+        self.assertNotIn("update_issue_title", [name for name, _ in github.calls])
 
     def test_parse_triage_result_rejects_invalid_enum(self) -> None:
         data = dict(VALID)

@@ -63,6 +63,7 @@ class LiveNeedsInfoFollowUpE2ETest(unittest.TestCase):
                     "triage_confidence": "低",
                     "assignee": "garlanddiego",
                     "owner_reason": "Manual",
+                    "corrected_title": "Todo needs info live e2e",
                     "follow_up_questions": [unique_question],
                     "comment_markdown": "## Triage Analysis\n\nNeeds live follow-up info.",
                 }
