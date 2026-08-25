@@ -235,6 +235,86 @@ class WatermarkDecodeTest(unittest.TestCase):
             self.assertTrue(result.found, msg=f"shift={shift} should still decode")
             self.assertEqual(result.payload, _payload())
 
+    def test_screenshot_pixel_carrier_recovers_a_background_step_via_majority(self) -> None:
+        """A sharp vertical UI edge under the carrier inverts every cell pair it
+        straddles (the >13-luma step between the two cells flips the polarity).
+        The 3× bit-interleaved copies majority-vote the flipped bits back."""
+        from PIL import Image, ImageDraw
+
+        envelope = self._envelope()
+        image = Image.open(io.BytesIO(_png_canvas(width=1080, height=2340))).convert("RGB")
+        draw = ImageDraw.Draw(image)
+        # Dark vertical stripe across the carrier region, drawn as background
+        # before the carrier (the app renders the overlay last).
+        draw.rectangle((300, 0, 306, 2340), fill=(30, 32, 36))
+        out = io.BytesIO()
+        image.save(out, format="PNG")
+        embedded = embed_screenshot_pixel_envelope(out.getvalue(), envelope, scale=3, corner="both")
+        result = decode_image(embedded, key_store=self._store())
+        self.assertTrue(result.found, msg="background step should be majority-recovered")
+        self.assertEqual(result.payload, _payload())
+
+    def test_screenshot_pixel_carrier_survives_ui_texture_via_majority_and_corners(self) -> None:
+        """Real screenshots have sharp UI edges under the carrier: a texture with
+        luma steps >13 between adjacent 3px cells flips individual cells'
+        polarity. The 3× copy majority plus both-corner redundancy must still
+        decode the envelope. Texture is drawn under the carrier (the app renders
+        the overlay last)."""
+        from PIL import Image, ImageDraw
+
+        envelope = self._envelope()
+        image = Image.open(io.BytesIO(_png_canvas(width=1080, height=2340))).convert("RGB")
+        draw = ImageDraw.Draw(image)
+        for y in range(40, 2300, 140):  # horizontal text/separator runs
+            draw.rectangle((20, y, 700, y + 26), fill=(230, 231, 236))
+        for x in range(60, 1060, 260):  # dark chips
+            draw.rectangle((x, 200, x + 130, 230), fill=(60, 64, 72))
+        for (x, y) in ((300, 500), (500, 900), (700, 1300)):  # avatars/badges
+            draw.ellipse((x, y, x + 60, y + 60), fill=(200, 60, 60))
+        out = io.BytesIO()
+        image.save(out, format="PNG")
+        textured = out.getvalue()
+        embedded = embed_screenshot_pixel_envelope(textured, envelope, scale=3, corner="both")
+        result = decode_image(embedded, key_store=self._store())
+        self.assertTrue(result.found, msg="textured background should still decode")
+        self.assertEqual(result.payload, _payload())
+
+    def test_screenshot_pixel_carrier_survives_jpeg_q85_transcode(self) -> None:
+        """The pipeline transcodes screenshots to JPEG q85, whose quantization
+        washes some 3px cell pairs' luma delta below the detection threshold.
+        Unreadable cells must abstain (per-bit majority over the 3 interleaved
+        copies) instead of discarding the whole carrier."""
+        from PIL import Image
+
+        base = _png_canvas(width=1080, height=2340)
+        embedded = embed_screenshot_pixel_envelope(base, self._envelope(), scale=3, corner="both")
+        jpeg = io.BytesIO()
+        Image.open(io.BytesIO(embedded)).save(jpeg, format="JPEG", quality=85)
+        result = decode_image(jpeg.getvalue(), key_store=self._store())
+        self.assertTrue(result.found, msg="JPEG q85 transcode should still decode")
+        self.assertEqual(result.payload, _payload())
+
+    def test_screenshot_pixel_carrier_survives_ui_edge_and_jpeg(self) -> None:
+        """A UI edge inverts cell polarity AND JPEG washes cells out; the
+        3× majority + corner redundancy + unreadable-cell abstention together
+        must still recover the envelope."""
+        from PIL import Image, ImageDraw
+
+        envelope = self._envelope()
+        image = Image.open(io.BytesIO(_png_canvas(width=1080, height=2340))).convert("RGB")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((0, 0, 60, 2340), fill=(40, 42, 50))
+        draw.rectangle((40, 140, 400, 168), fill=(90, 92, 100))
+        draw.rectangle((40, 180, 520, 204), fill=(70, 72, 80))
+        out = io.BytesIO()
+        image.save(out, format="PNG")
+        embedded = embed_screenshot_pixel_envelope(out.getvalue(), envelope, scale=3, corner="both")
+        jpeg = io.BytesIO()
+        Image.open(io.BytesIO(embedded)).save(jpeg, format="JPEG", quality=85)
+        result = decode_image(jpeg.getvalue(), key_store=self._store())
+        self.assertTrue(result.found, msg="UI edge + JPEG should still decode")
+        self.assertEqual(result.payload, _payload())
+
     def test_qr_carrier_round_trips(self) -> None:
         envelope = self._envelope()
         screenshot = _qr_screenshot(

@@ -25,6 +25,7 @@ import io
 import json
 import math
 import struct
+import typing
 import zlib
 from typing import cast
 
@@ -48,7 +49,14 @@ PIXEL_LENGTH_BITS = 16
 PIXEL_WIDTH_MODULES = PIXEL_BIT_COLUMNS * 2
 PIXEL_HEIGHT_MODULES = PIXEL_BIT_ROWS
 PIXEL_OFFSET_MODULES = 6
-PIXEL_MAX_ENVELOPE_BYTES = (PIXEL_BIT_COLUMNS * PIXEL_BIT_ROWS - PIXEL_LENGTH_BITS) // 8
+# The envelope is embedded 3× so a background edge that inverts one cell's
+# polarity (underlying UI pixels >13 luma apart flip the light/dark pair) is
+# out-voted byte-wise by the two clean copies. Grid capacity / 3 bounds the
+# single-copy size.
+PIXEL_COPY_COUNT = 3
+PIXEL_MAX_ENVELOPE_BYTES = (
+    (PIXEL_BIT_COLUMNS * PIXEL_BIT_ROWS - PIXEL_LENGTH_BITS) // 8
+) // PIXEL_COPY_COUNT
 PIXEL_SCALE_CANDIDATES = tuple(1.0 + index * 0.125 for index in range(25))
 
 
@@ -58,23 +66,53 @@ def extract_envelope_bytes(data: bytes) -> bytes | None:
     Raises ``WatermarkInvalidEnvelope`` when a carrier is present but the
     payload inside it is not a valid base64-encoded JSON envelope.
     """
+    candidates = list(iter_envelope_candidates(data))
+    return candidates[0] if candidates else None
+
+
+def extract_envelope_candidates(data: bytes) -> list[bytes]:
+    """Every structurally-valid envelope embedded in ``data``, deduped.
+
+    A pixel read at a wrong ±1px offset can yield JSON that *parses* as an
+    envelope but carries corrupted ciphertext — valid-looking, wrong content.
+    The decoder must not stop at the first parseable envelope: it tries each
+    candidate against the private key (GCM auth is the ground truth) and the
+    clean read wins. This is why the whole candidate set is surfaced.
+    """
+    return _dedupe(list(iter_envelope_candidates(data)))
+
+
+def iter_envelope_candidates(data: bytes) -> typing.Iterator[bytes]:
+    """Yield every structurally-valid embedded envelope, best-first.
+
+    Lazy: the decoder pulls candidates one at a time and stops at the first
+    that decrypts, so a clean screenshot costs a single read instead of the
+    full scale/corner/offset probe space.
+    """
     from_marker = _extract_from_markers(data)
     if from_marker is not None:
-        return from_marker
+        yield from_marker
     if data.startswith(PNG_SIGNATURE):
         from_chunk = _extract_from_png_text_chunk(data)
         if from_chunk is not None:
-            return from_chunk
-    from_pixels = _extract_from_screenshot_pixels(data)
-    if from_pixels is not None:
-        return from_pixels
+            yield from_chunk
+    yield from _iter_pixel_candidates(data)
     # QR/Data Matrix is the last resort: a visual barcode, scanned out of the
     # image rather than parsed out of the byte layout. Keep it last so byte
     # carriers stay canonical (they never degrade under re-encoding).
     from_qr = extract_qr_envelope_bytes(data)
     if from_qr is not None:
-        return from_qr
-    return None
+        yield from_qr
+
+
+def _dedupe(envelopes: list[bytes]) -> list[bytes]:
+    seen: set[bytes] = set()
+    unique: list[bytes] = []
+    for envelope in envelopes:
+        if envelope not in seen:
+            seen.add(envelope)
+            unique.append(envelope)
+    return unique
 
 
 def embed_envelope_trailer(image_bytes: bytes, envelope: dict[str, object]) -> bytes:
@@ -106,22 +144,25 @@ def embed_screenshot_pixel_envelope(
     light/dark cells so local background cancels out during extraction.
     ``scale=3`` reproduces the app's fixed-3px whole-pixel geometry; ``shift``
     simulates the layout rounding that the extractor's ±1px probe absorbs.
+    ``corner="both"`` embeds the carrier at both corners like the app (top-left
+    first, then bottom-right), giving the extractor two chances at a clean copy.
     """
     envelope_bytes = _compact_json_bytes(envelope)
     if len(envelope_bytes) > PIXEL_MAX_ENVELOPE_BYTES:
         raise ValueError("envelope is too large for screenshot pixel carrier")
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    origin_x, origin_y = _pixel_origin(image.width, image.height, scale, corner)
-    origin_x += shift[0]
-    origin_y += shift[1]
     draw = ImageDraw.Draw(image, "RGBA")
-    for bit_index, bit in enumerate(_pixel_bits(envelope_bytes)):
-        x = origin_x + (bit_index % PIXEL_BIT_COLUMNS) * 2 * scale
-        y = origin_y + (bit_index // PIXEL_BIT_COLUMNS) * scale
-        dark_x = x if bit == 1 else x + scale
-        light_x = x + scale if bit == 1 else x
-        draw.rectangle((light_x, y, light_x + scale - 1, y + scale - 1), fill=(255, 255, 255, 13))
-        draw.rectangle((dark_x, y, dark_x + scale - 1, y + scale - 1), fill=(0, 0, 0, 13))
+    for current in (("top_left", "bottom_right") if corner == "both" else (corner,)):
+        origin_x, origin_y = _pixel_origin(image.width, image.height, scale, current)
+        origin_x += shift[0]
+        origin_y += shift[1]
+        for bit_index, bit in enumerate(_pixel_bits(envelope_bytes)):
+            x = origin_x + (bit_index % PIXEL_BIT_COLUMNS) * 2 * scale
+            y = origin_y + (bit_index // PIXEL_BIT_COLUMNS) * scale
+            dark_x = x if bit == 1 else x + scale
+            light_x = x + scale if bit == 1 else x
+            draw.rectangle((light_x, y, light_x + scale - 1, y + scale - 1), fill=(255, 255, 255, 13))
+            draw.rectangle((dark_x, y, dark_x + scale - 1, y + scale - 1), fill=(0, 0, 0, 13))
     out = io.BytesIO()
     image.save(out, format="PNG")
     return out.getvalue()
@@ -195,33 +236,44 @@ def _decode_envelope_raw(raw: bytes) -> bytes | None:
     return _compact_json_bytes(parsed)
 
 
-def _extract_from_screenshot_pixels(data: bytes) -> bytes | None:
+def _iter_pixel_candidates(data: bytes) -> typing.Iterator[bytes]:
+    """Yield pixel-carrier envelopes across scale/corner/offset, best-first.
+
+    The app's fixed-3px cells decode at ``scale=3``; probe that first so a real
+    screenshot succeeds on the first offset read. The remaining scales follow
+    for alternative/legacy cell geometries.
+    """
     try:
         image = Image.open(io.BytesIO(data)).convert("RGB")
     except (UnidentifiedImageError, OSError):
-        return None
-    for scale in PIXEL_SCALE_CANDIDATES:
+        return
+    for scale in _pixel_scale_order():
         if image.width < PIXEL_WIDTH_MODULES * scale or image.height < PIXEL_HEIGHT_MODULES * scale:
             continue
         for corner in ("top_left", "bottom_right"):
-            decoded = _read_pixel_carrier_at(image, scale=scale, corner=corner)
-            if decoded is not None:
-                return decoded
-    return None
+            yield from _iter_pixel_carrier_candidates(image, scale=scale, corner=corner)
 
 
-def _read_pixel_carrier_at(image: Image.Image, *, scale: float, corner: str) -> bytes | None:
-    """Return the compact envelope JSON at ``corner``, or None.
+def _pixel_scale_order() -> tuple[float, ...]:
+    return (3.0,) + tuple(scale for scale in PIXEL_SCALE_CANDIDATES if scale != 3.0)
+
+
+def _iter_pixel_carrier_candidates(
+    image: Image.Image, *, scale: float, corner: str
+) -> typing.Iterator[bytes]:
+    """Yield each offset whose read decodes to a valid envelope at ``corner``.
 
     The app renders cells at whole physical px, but a device's layout rounding
-    can shift the grid by a pixel or two. Probe a small neighborhood of
-    offsets and return the first one whose header + payload decode to valid
-    envelope JSON, so sub-pixel misalignment never silently loses the carrier.
+    can shift the grid by a pixel or two. Probe a small neighborhood of offsets
+    and keep every read whose header + payload decode to valid envelope JSON:
+    a misaligned offset can produce JSON that *parses* but carries corrupted
+    ciphertext, so the decoder keeps all candidates and lets GCM auth pick.
     """
     origin_x, origin_y = _pixel_origin(image.width, image.height, scale, corner)
+    pix = image.load()
     for offset_x, offset_y in _carrier_offset_candidates():
         raw = _read_carrier_bytes(
-            image,
+            image, pix,
             origin_x=origin_x + offset_x,
             origin_y=origin_y + offset_y,
             scale=scale,
@@ -229,10 +281,10 @@ def _read_pixel_carrier_at(image: Image.Image, *, scale: float, corner: str) -> 
         if raw is None:
             continue
         try:
-            return _decode_pixel_envelope(raw)
+            decoded = _decode_pixel_envelope(raw)
         except WatermarkInvalidEnvelope:
             continue
-    return None
+        yield decoded
 
 
 def _carrier_offset_candidates() -> tuple[tuple[int, int], ...]:
@@ -248,30 +300,86 @@ def _carrier_offset_candidates() -> tuple[tuple[int, int], ...]:
     return tuple(candidates)
 
 
-def _read_carrier_bytes(image: Image.Image, *, origin_x: int, origin_y: int, scale: float) -> bytes | None:
+def _read_carrier_bytes(
+    image: Image.Image, pix: typing.Any,
+    *, origin_x: int, origin_y: int, scale: float,
+) -> bytes | None:
+    """De-interleave + majority-vote the 3 interleaved copies.
+
+    Bit position ``pos`` holds logical bit ``pos // 3`` of copy ``pos % 3``.
+    The header is read first (3 copies of 16 bits, majority-voted per bit) to
+    learn the payload length, then the payload span is read and every logical
+    bit is majority-voted over its 3 copies. Unreadable cells (JPEG washing a
+    pair's luma delta below the detection threshold) abstain instead of killing
+    the whole read: a logical bit survives as long as at least one of its three
+    adjacent copy positions is readable.
+    """
     length = 0
-    for bit_index in range(PIXEL_LENGTH_BITS):
-        bit = _read_pixel_bit(image, origin_x=origin_x, origin_y=origin_y, scale=scale, bit_index=bit_index)
-        if bit is None:
+    for j in range(PIXEL_LENGTH_BITS):
+        votes: list[int] = []
+        for copy_index in range(PIXEL_COPY_COUNT):
+            bit = _read_pixel_bit(
+                image, pix, origin_x=origin_x, origin_y=origin_y,
+                scale=scale, bit_index=j * PIXEL_COPY_COUNT + copy_index,
+            )
+            if bit is not None:
+                votes.append(bit)
+        # A triple with no readable cell means the carrier isn't here (flat
+        # page, wrong scale, or misaligned grid) — bail before reading the
+        # whole payload span, which is the hot path for watermark-less images.
+        if not votes:
             return None
-        length = (length << 1) | bit
+        length = (length << 1) | _majority_values(votes)
     if length <= 0 or length > PIXEL_MAX_ENVELOPE_BYTES:
         return None
-    values = bytearray()
-    for byte_index in range(length):
-        value = 0
-        for bit_in_byte in range(8):
-            bit_index = PIXEL_LENGTH_BITS + byte_index * 8 + bit_in_byte
-            bit = _read_pixel_bit(image, origin_x=origin_x, origin_y=origin_y, scale=scale, bit_index=bit_index)
-            if bit is None:
-                return None
-            value = (value << 1) | bit
-        values.append(value)
-    return bytes(values)
+    payload = _read_pixel_span(
+        image, pix, origin_x=origin_x, origin_y=origin_y, scale=scale,
+        start_bit=PIXEL_LENGTH_BITS * PIXEL_COPY_COUNT,
+        bit_count=length * 8 * PIXEL_COPY_COUNT,
+    )
+    merged = bytearray(length)
+    for j in range(length * 8):
+        votes = [
+            payload[j * PIXEL_COPY_COUNT + c]
+            for c in range(PIXEL_COPY_COUNT)
+            if payload[j * PIXEL_COPY_COUNT + c] is not None
+        ]
+        if not votes:
+            return None
+        bit = _majority_values(votes)
+        merged[j // 8] |= bit << (7 - (j % 8))
+    return bytes(merged)
+
+
+def _read_pixel_span(
+    image: Image.Image,
+    pix: typing.Any,
+    *,
+    origin_x: int,
+    origin_y: int,
+    scale: float,
+    start_bit: int,
+    bit_count: int,
+) -> list[int | None]:
+    """Read ``bit_count`` consecutive bit cells (0, 1, or None if unreadable).
+
+    JPEG re-encoding can wash a cell pair's luma delta below the detection
+    threshold; such cells read as ``None`` and callers abstain during voting
+    rather than discarding the whole carrier.
+    """
+    values: list[int | None] = []
+    for bit_index in range(start_bit, start_bit + bit_count):
+        values.append(_read_pixel_bit(image, pix, origin_x=origin_x, origin_y=origin_y, scale=scale, bit_index=bit_index))
+    return values
+
+
+def _majority_values(bits: list[int]) -> int:
+    return 1 if sum(bits) * 2 >= len(bits) else 0
 
 
 def _read_pixel_bit(
     image: Image.Image,
+    pix: typing.Any,
     *,
     origin_x: int,
     origin_y: int,
@@ -280,8 +388,8 @@ def _read_pixel_bit(
 ) -> int | None:
     x = origin_x + (bit_index % PIXEL_BIT_COLUMNS) * 2 * scale
     y = origin_y + (bit_index // PIXEL_BIT_COLUMNS) * scale
-    left = _sample_cell_luma(image, x, y, scale)
-    right = _sample_cell_luma(image, x + scale, y, scale)
+    left = _sample_cell_luma(image, pix, x, y, scale)
+    right = _sample_cell_luma(image, pix, x + scale, y, scale)
     if left is None or right is None:
         return None
     delta = left - right
@@ -290,7 +398,9 @@ def _read_pixel_bit(
     return 1 if delta < 0 else 0
 
 
-def _sample_cell_luma(image: Image.Image, x: float, y: float, scale: float) -> float | None:
+def _sample_cell_luma(
+    image: Image.Image, pix: typing.Any, x: float, y: float, scale: float
+) -> float | None:
     start_x = max(0, math.floor(x))
     end_x = min(image.width - 1, math.ceil(x + scale) - 1)
     start_y = max(0, math.floor(y))
@@ -301,7 +411,7 @@ def _sample_cell_luma(image: Image.Image, x: float, y: float, scale: float) -> f
     count = 0
     for py in range(start_y, end_y + 1):
         for px in range(start_x, end_x + 1):
-            value = _sample_luma(image, px, py)
+            value = _sample_luma(pix, px, py, image.width, image.height)
             if value is None:
                 continue
             total += value
@@ -309,12 +419,12 @@ def _sample_cell_luma(image: Image.Image, x: float, y: float, scale: float) -> f
     return total / count if count > 0 else None
 
 
-def _sample_luma(image: Image.Image, x: float, y: float) -> float | None:
+def _sample_luma(pix: typing.Any, x: float, y: float, width: int, height: int) -> float | None:
     px = round(x)
     py = round(y)
-    if px < 0 or py < 0 or px >= image.width or py >= image.height:
+    if px < 0 or py < 0 or px >= width or py >= height:
         return None
-    r, g, b = cast(tuple[int, int, int], image.getpixel((px, py)))
+    r, g, b = cast(tuple[int, int, int], pix[px, py])
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 
@@ -340,13 +450,26 @@ def _pixel_origin(width: int, height: int, scale: float, corner: str) -> tuple[i
 
 
 def _pixel_bits(envelope_bytes: bytes) -> tuple[int, ...]:
-    bits: list[int] = []
+    """3 bit-interleaved copies of (16-bit length header + envelope bytes).
+
+    Each logical bit ``j`` is written three times — ``c0[j] c1[j] c2[j]`` — so a
+    background feature that flips a contiguous run of cells (a UI edge, a text
+    run, a separator bar) damages bits spread across all three copies at
+    *different byte positions*. Byte-wise majority then always has two clean
+    votes per byte. Interleaving (not sequential blocks) matters: a blob
+    spanning the old copy boundary corrupted the same byte columns in two
+    sequential copies and defeated a simple block-majority.
+    """
+    logical: list[int] = []
     for shift in range(PIXEL_LENGTH_BITS - 1, -1, -1):
-        bits.append((len(envelope_bytes) >> shift) & 1)
+        logical.append((len(envelope_bytes) >> shift) & 1)
     for byte in envelope_bytes:
         for shift in range(7, -1, -1):
-            bits.append((byte >> shift) & 1)
-    return tuple(bits)
+            logical.append((byte >> shift) & 1)
+    interleaved: list[int] = []
+    for bit in logical:
+        interleaved.extend([bit] * PIXEL_COPY_COUNT)
+    return tuple(interleaved)
 
 
 def _compact_json_bytes(obj: dict[str, object]) -> bytes:

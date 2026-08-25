@@ -45,6 +45,7 @@ from bugpatrol.watermark.extractor import (
     embed_png_text_envelope,
     embed_screenshot_pixel_envelope,
     extract_envelope_bytes,
+    iter_envelope_candidates,
 )
 from bugpatrol.watermark.keys import (
     WatermarkBadKeyConfig,
@@ -112,6 +113,7 @@ __all__ = [
     "embed_png_text_envelope",
     "embed_screenshot_pixel_envelope",
     "extract_envelope_bytes",
+    "iter_envelope_candidates",
     "parse_envelope",
     "payload_to_compact_json",
     "render_payload_summary",
@@ -150,27 +152,38 @@ def decode_image(
     store = key_store if key_store is not None else WatermarkKeyStore.from_env()
     if not store.has_keys():
         return WatermarkDecodeResult(found=False, confidence=0, error=ERROR_KEY_MISSING)
+    # A pixel read at a wrong ±1px offset can look like a valid envelope but
+    # carry corrupted ciphertext. GCM authentication is the ground truth, so
+    # pull candidates lazily (best-first) and stop at the first that decrypts:
+    # the clean read (e.g. the other corner) wins over a look-alike that fails
+    # to decrypt, and a clean screenshot costs one read, not the full
+    # scale/corner/offset probe space.
+    last_error = ERROR_NOT_FOUND
+    # The generator can raise WatermarkInvalidEnvelope lazily while iterating
+    # (e.g. a carrier start marker with no end), so the try must span the loop.
     try:
-        envelope_bytes = extract_envelope_bytes(data)
+        candidates = iter_envelope_candidates(data)
+        for envelope_bytes in candidates:
+            try:
+                envelope = json.loads(envelope_bytes.decode("utf-8"))
+                payload = decrypt_envelope(envelope, store)
+            except WatermarkBadEnvelope:
+                last_error = ERROR_BAD_ENVELOPE
+                continue
+            except WatermarkKeyNotFound:
+                return WatermarkDecodeResult(found=False, confidence=0, error=ERROR_KEY_UNKNOWN)
+            except WatermarkDecryptError:
+                last_error = ERROR_DECRYPT
+                continue
+            except WatermarkBadPayload:
+                last_error = ERROR_BAD_PAYLOAD
+                continue
+            return WatermarkDecodeResult(
+                found=True,
+                confidence=FOUND_CONFIDENCE,
+                key_id=str(payload.get("keyId") or ""),
+                payload=payload,
+            )
     except WatermarkInvalidEnvelope:
         return WatermarkDecodeResult(found=False, confidence=0, error=ERROR_BAD_ENVELOPE)
-    if envelope_bytes is None:
-        return WatermarkDecodeResult(found=False, confidence=0, error=ERROR_NOT_FOUND)
-    try:
-        envelope = json.loads(envelope_bytes.decode("utf-8"))
-        payload = decrypt_envelope(envelope, store)
-    except WatermarkBadEnvelope:
-        return WatermarkDecodeResult(found=False, confidence=0, error=ERROR_BAD_ENVELOPE)
-    except WatermarkKeyNotFound:
-        return WatermarkDecodeResult(found=False, confidence=0, error=ERROR_KEY_UNKNOWN)
-    except WatermarkDecryptError:
-        return WatermarkDecodeResult(found=False, confidence=0, error=ERROR_DECRYPT)
-    except WatermarkBadPayload:
-        return WatermarkDecodeResult(found=False, confidence=0, error=ERROR_BAD_PAYLOAD)
-    key_id = str(envelope.get("keyId") or payload.get("keyId") or "")
-    return WatermarkDecodeResult(
-        found=True,
-        confidence=FOUND_CONFIDENCE,
-        key_id=key_id,
-        payload=payload,
-    )
+    return WatermarkDecodeResult(found=False, confidence=0, error=last_error)

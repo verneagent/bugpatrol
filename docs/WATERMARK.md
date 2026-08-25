@@ -39,11 +39,17 @@ Five Degrees app 在截图里嵌入不可见诊断水印(BugPatrol / app 协作�
 app 把加密 envelope 确定性嵌入截图。**canonical = 隐形 paired-cell pixel carrier**(用户完全感知不到,只有 BugPatrol 分析时能读出来);旧载体保留兼容:
 
 1. **Screenshot pixel carrier(canonical, invisible)**:app 渲染 root overlay,每 bit = 相邻的深/浅两格(alpha 13),视觉上互相抵消、对页面几乎不可见(δ≈13/255 亮度)。几何是**固定 3 物理像素 cell**(`app/lib/dev/diagnosticScreenshotWatermarkPixels.ts`:CELL=3、viewBox 768×768、距角 18px),任何 DPR(2 / 2.625 / 3 / …)都落在整数像素边界,无亚像素混叠;提取端固定 scale=3 读取,并用 **±1px 偏移探测**吸收 RN 布局舍入。双角冗余(top_left + bottom_right 各嵌一份)。所有构建(含 prod)都嵌——隐形载体对用户无感知,prod 截图也能追溯。
+
+   **3× 比特交错 + 多数投票**:envelope 逻辑位 `j` 在连续 3 个格位各写一份(`j//3` 逻辑位、`j%3` 副本),占满 128×256 格栅(上限从 4094 降到 **1364 字节**,实际 prod envelope ≈1028B)。提取端逐 bit 在 3 副本间多数投票。这样两类真实干扰都能扛:
+   - **背景 UI 边翻转极性**:底下一段 >13 luma 阶跃会反转被它跨过的 cell 对的极性(错值)。交错(而非顺序块)让局部 blob 分散到不同字节位,每字节总有 2 份干净投票。
+   - **JPEG 洗掉单元**:q85 量化会把个别 3px 对的 luma delta 压到检测阈值(0.25)以下 → 该 bit 读为「不可读」。读 span 时不可读单元**弃权**,只要某个逻辑位的 3 个副本里 ≥1 个可读就能投票恢复,而不是整条载波作废。
 2. **QR/Data Matrix(fallback)**:BugPatrol 用 zxing-cpp 扫图,只认内容能解析成 envelope JSON 的条码(屏幕上的分享二维码被忽略),多候选取离左上角最近者。app 侧已不渲染 QR badge,此 leg 供屏幕截图里恰好有信封 JSON 条码的场景。
 3. **Trailer(legacy/reference)**:图片自然结束处追加 `BUGPATROL_WM1:<b64-envelope>:BUGPATROL_WM1`。PNG/JPEG 解码器在 IEND/EOI 处停下,trailer 对用户不可见但文件里存在。
 4. **PNG tEXt chunk(legacy/reference)**:关键字 `bugpatrol.watermark`,值为 base64 envelope。
 
-提取逻辑:先扫 trailer 标记,再试 PNG tEXt/iTXt chunk,再试 pixel carrier,最后扫 QR/Data Matrix。byte carrier envelope 上限 512KB。
+提取逻辑:先扫 trailer 标记,再试 PNG tEXt/iTXt chunk,再试 pixel carrier(scale=3 优先,双角,每个 ±1px 偏移),最后扫 QR/Data Matrix。byte carrier envelope 上限 512KB。
+
+**候选解码(抗错读)**:±1px 偏移读错时可能产出「结构合法但密文损坏」的 envelope(base64 里 2 个字符错位仍能解析成 JSON)。解码端收集**所有**结构合法候选,逐个用私钥试,以 **GCM auth 为 ground truth** —— 干净的那份(比如另一角)赢过解析得出但解不了密的冒牌货。迭代是**惰性 best-first** 的,干净截图只读一次就停下(~170ms/图),无载波图 ~30ms。
 
 ## Envelope 格式
 
@@ -98,10 +104,16 @@ bugpatrol watermark decode --image /path/to/screenshot.png --json
 
 - watcher / backfill / event-watcher / mail-watcher 全部接入,`configured_watermark_decoder()` 仅在环境配了 key 时启用(无 key 不产生噪音)。
 
+## 验证(端到端)
+
+- **fived jest harness**(`app/lib/__tests__/verify-watermark-e2e.test.ts`):用 app 真实代码构建 prod-mode envelope,导出加密 envelope + 匹配私钥 + **真实渲染的 darkPath/lightPath**(3× 交错几何)到 `$TMPDIR/wm-e2e-{envelope,private,paths}.*`。断言 prod payload = 15 字段(含 `uid`,不含敏感字段)。
+- **BugPatrol E2E harness**(`wm_e2e_embed.py`):解析 fived 导出的真实 path 字符串,把 cell 渲染到 1080×2340 截图(双角 + 页面噪声),跑 `bugpatrol watermark decode`。PNG、JPEG q85、UI 遮挡 + JPEG q85 四种形态全部解码出完整 prod payload。消费的是 app 真实几何,不是 Python 重实现。
+- 单测:`tests/test_watermark.py`(47 例,含全部失败模式 + QR/pixel/trailer/tEXt carriers + 固定 3px ±1px 偏移 + 背景阶跃多数恢复 + JPEG q85 弃权 + UI edge + JPEG + 流水线集成 + CLI)。
+
 ## 实现位置
 
 - `bugpatrol/watermark/` — types / keys / envelope / extractor / decryptor / reporter / `__init__`(公共 API `decode_image`、`WatermarkResourceDecoder`)
 - `bugpatrol/resources.py`、`intake.py`、`triage_context.py`、`backfill.py`、`watcher.py`、`event_watcher.py`、`watch_mail.py`、`__main__.py`
-- 测试:`tests/test_watermark.py`(43 例,含全部失败模式 + QR/pixel/trailer/tEXt carriers + 固定 3px ±1px 偏移 + 流水线集成 + CLI)
+- 测试:`tests/test_watermark.py`(47 例,含全部失败模式 + QR/pixel/trailer/tEXt carriers + 固定 3px ±1px 偏移 + 背景阶跃多数恢复 + JPEG q85 弃权 + UI edge + JPEG + 流水线集成 + CLI)
 
 依赖:`cryptography>=42`、`zxing-cpp>=3.1` + `numpy>=1.26`(均 lazy-import,不拖慢 import 路径;测试夹具还用 `qrcode`(dev extra)生成 QR 图)。
