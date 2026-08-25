@@ -13,12 +13,17 @@ keywords = ["lark", "github", "codex", "triage", "bugops"]
 dependencies = [
   "pillow>=10",
   "cryptography>=42",
+  "zxing-cpp>=3.1",
+  "numpy>=1.26",
 ]
 
 [project.optional-dependencies]
 dev = [
   "ruff>=0.6",
   "mypy>=1.11",
+  # QR test-fixture generation only; the decode pipeline itself uses
+  # zxing-cpp (a runtime dep) and does not need this encoder.
+  "qrcode>=8",
 ]
 
 [project.scripts]

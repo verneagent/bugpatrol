@@ -14,6 +14,7 @@ media-evidence extraction -> triage context) and the CLI contract.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import io
 import json
@@ -131,6 +132,42 @@ def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
     return length + chunk_type + data + struct.pack(">I", crc)
 
 
+try:
+    import qrcode
+except ImportError:  # pragma: no cover - test-only QR encoder, optional
+    qrcode = None
+
+
+def _qr_png(text: str) -> bytes:
+    """Render ``text`` as a QR PNG (ecl M, matching the app's badge)."""
+    if qrcode is None:
+        raise unittest.SkipTest("qrcode encoder not installed")
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M)
+    qr.add_data(text)
+    qr.make(fit=True)
+    image = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    out = io.BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
+
+
+def _qr_screenshot(*, watermark_text: str | None, other_text: str | None) -> bytes:
+    """Synthetic screenshot: watermark QR at top-left (app badge) and/or an
+    unrelated QR at bottom-right (e.g. a share card shown on screen)."""
+    from PIL import Image
+
+    canvas = Image.new("RGB", (900, 600), (142, 137, 129))
+    if other_text is not None:
+        other = Image.open(io.BytesIO(_qr_png(other_text))).convert("RGB").resize((220, 220))
+        canvas.paste(other, (900 - 220 - 12, 600 - 220 - 12))
+    if watermark_text is not None:
+        wm = Image.open(io.BytesIO(_qr_png(watermark_text))).convert("RGB").resize((200, 200))
+        canvas.paste(wm, (12, 12))
+    out = io.BytesIO()
+    canvas.save(out, format="PNG")
+    return out.getvalue()
+
+
 class WatermarkDecodeTest(unittest.TestCase):
     """Required failure modes + round-trip through both carriers."""
 
@@ -180,6 +217,50 @@ class WatermarkDecodeTest(unittest.TestCase):
     def test_screenshot_pixel_carrier_handles_fractional_android_scale(self) -> None:
         embedded = embed_screenshot_pixel_envelope(_png_canvas(width=1200, height=900), self._envelope(), scale=2.625)
         result = decode_image(embedded, key_store=self._store())
+        self.assertTrue(result.found)
+        self.assertEqual(result.payload, _payload())
+
+    def test_qr_carrier_round_trips(self) -> None:
+        envelope = self._envelope()
+        screenshot = _qr_screenshot(
+            watermark_text=json.dumps(envelope, separators=(",", ":")),
+            other_text=None,
+        )
+        result = decode_image(screenshot, key_store=self._store())
+        self.assertTrue(result.found)
+        self.assertEqual(result.confidence, 1.0)
+        self.assertEqual(result.key_id, DEFAULT_KEY_ID)
+        self.assertEqual(result.payload, _payload())
+
+    def test_qr_carrier_accepts_base64_wrapped_envelope(self) -> None:
+        envelope = self._envelope()
+        wrapped = base64.b64encode(
+            json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        ).decode("ascii")
+        screenshot = _qr_screenshot(watermark_text=wrapped, other_text=None)
+        result = decode_image(screenshot, key_store=self._store())
+        self.assertTrue(result.found)
+        self.assertEqual(result.payload, _payload())
+
+    def test_qr_carrier_unrelated_on_screen_qr_is_not_a_watermark(self) -> None:
+        screenshot = _qr_screenshot(
+            watermark_text=None,
+            other_text="https://example.com/share/abc",
+        )
+        result = decode_image(screenshot, key_store=self._store())
+        self.assertFalse(result.found)
+        self.assertEqual(result.error, ERROR_NOT_FOUND)
+
+    def test_qr_carrier_wins_over_unrelated_on_screen_qr_by_content(self) -> None:
+        # The app badge (top-left) and a share card (bottom-right) coexist on
+        # screen; only the envelope-JSON QR is a watermark, so content-based
+        # selection must pick it even though the other QR is also present.
+        envelope = self._envelope()
+        screenshot = _qr_screenshot(
+            watermark_text=json.dumps(envelope, separators=(",", ":")),
+            other_text="https://example.com/share/abc",
+        )
+        result = decode_image(screenshot, key_store=self._store())
         self.assertTrue(result.found)
         self.assertEqual(result.payload, _payload())
 

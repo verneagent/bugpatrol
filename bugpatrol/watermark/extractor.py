@@ -30,13 +30,16 @@ from typing import cast
 
 from PIL import Image, ImageDraw, UnidentifiedImageError
 
+from bugpatrol.watermark.qr import extract_qr_envelope_bytes
+from bugpatrol.watermark.types import MAX_ENVELOPE_BYTES
+
 CARRIER_START = b"BUGPATROL_WM1:"
+
+
+class WatermarkInvalidEnvelope(Exception):
+    """A watermark carrier was found but its contents are corrupt."""
 CARRIER_END = b":BUGPATROL_WM1"
 PNG_WATERMARK_KEYWORD = b"bugpatrol.watermark"
-# Guard against a corrupted/oversized payload ballooning memory: the envelope
-# carries an AES-GCM ciphertext, which can legitimately be tens of KB, but never
-# this. Anything bigger is a scan artifact, not a watermark.
-MAX_ENVELOPE_BYTES = 512 * 1024
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 PIXEL_BIT_COLUMNS = 128
@@ -47,10 +50,6 @@ PIXEL_HEIGHT_MODULES = PIXEL_BIT_ROWS
 PIXEL_OFFSET_MODULES = 6
 PIXEL_MAX_ENVELOPE_BYTES = (PIXEL_BIT_COLUMNS * PIXEL_BIT_ROWS - PIXEL_LENGTH_BITS) // 8
 PIXEL_SCALE_CANDIDATES = tuple(1.0 + index * 0.125 for index in range(25))
-
-
-class WatermarkInvalidEnvelope(Exception):
-    """A watermark carrier was found but its contents are corrupt."""
 
 
 def extract_envelope_bytes(data: bytes) -> bytes | None:
@@ -69,6 +68,12 @@ def extract_envelope_bytes(data: bytes) -> bytes | None:
     from_pixels = _extract_from_screenshot_pixels(data)
     if from_pixels is not None:
         return from_pixels
+    # QR/Data Matrix is the last resort: a visual barcode, scanned out of the
+    # image rather than parsed out of the byte layout. Keep it last so byte
+    # carriers stay canonical (they never degrade under re-encoding).
+    from_qr = extract_qr_envelope_bytes(data)
+    if from_qr is not None:
+        return from_qr
     return None
 
 

@@ -39,7 +39,6 @@ from bugpatrol.watermark.envelope import (
 from bugpatrol.watermark.extractor import (
     CARRIER_END,
     CARRIER_START,
-    MAX_ENVELOPE_BYTES,
     PNG_WATERMARK_KEYWORD,
     WatermarkInvalidEnvelope,
     embed_envelope_trailer,
@@ -70,6 +69,7 @@ from bugpatrol.watermark.types import (
     ERROR_KEY_UNKNOWN,
     ERROR_NOT_FOUND,
     FOUND_CONFIDENCE,
+    MAX_ENVELOPE_BYTES,
     PAYLOAD_REQUIRED_FIELDS,
     WatermarkDecoder,
     WatermarkDecodeResult,

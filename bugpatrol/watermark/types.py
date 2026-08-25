@@ -23,6 +23,12 @@ DEFAULT_KEY_ID = "diagnostic-watermark-v1"
 # A successful authenticated decrypt is deterministic proof, not a model guess.
 FOUND_CONFIDENCE = 1.0
 
+# Guard against a corrupted/oversized payload ballooning memory: the envelope
+# carries an AES-GCM ciphertext, which can legitimately be tens of KB, but never
+# this. Anything bigger is a scan artifact, not a watermark. Shared by the
+# byte-carrier extractor and the QR leg (which import from types to stay acyclic).
+MAX_ENVELOPE_BYTES = 512 * 1024
+
 # Stable machine-readable error codes surfaced by the CLI and the pipeline.
 ERROR_NOT_FOUND = "watermark_not_found"
 ERROR_KEY_MISSING = "watermark_private_key_missing"
