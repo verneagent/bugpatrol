@@ -220,6 +220,21 @@ class WatermarkDecodeTest(unittest.TestCase):
         self.assertTrue(result.found)
         self.assertEqual(result.payload, _payload())
 
+    def test_screenshot_pixel_carrier_fixed_3px_phone_scale_with_layout_rounding(self) -> None:
+        # The app renders cells at fixed 3 physical px (DPR-independent), which
+        # the extractor reads at scale=3. A device's layout rounding can shift
+        # the grid by a pixel; the extractor's ±1px offset probe absorbs it.
+        base = _png_canvas(width=1080, height=2340)
+        aligned = embed_screenshot_pixel_envelope(base, self._envelope(), scale=3)
+        result = decode_image(aligned, key_store=self._store())
+        self.assertTrue(result.found)
+        self.assertEqual(result.payload, _payload())
+        for shift in ((1, 0), (0, 1), (-1, -1)):
+            shifted = embed_screenshot_pixel_envelope(base, self._envelope(), scale=3, shift=shift)
+            result = decode_image(shifted, key_store=self._store())
+            self.assertTrue(result.found, msg=f"shift={shift} should still decode")
+            self.assertEqual(result.payload, _payload())
+
     def test_qr_carrier_round_trips(self) -> None:
         envelope = self._envelope()
         screenshot = _qr_screenshot(

@@ -98,17 +98,22 @@ def embed_screenshot_pixel_envelope(
     *,
     scale: float = 2,
     corner: str = "top_left",
+    shift: tuple[int, int] = (0, 0),
 ) -> bytes:
     """Overlay the screenshot-time paired-cell pixel carrier on a PNG fixture.
 
     This mirrors the app's root overlay: each bit is encoded as adjacent
     light/dark cells so local background cancels out during extraction.
+    ``scale=3`` reproduces the app's fixed-3px whole-pixel geometry; ``shift``
+    simulates the layout rounding that the extractor's ±1px probe absorbs.
     """
     envelope_bytes = _compact_json_bytes(envelope)
     if len(envelope_bytes) > PIXEL_MAX_ENVELOPE_BYTES:
         raise ValueError("envelope is too large for screenshot pixel carrier")
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     origin_x, origin_y = _pixel_origin(image.width, image.height, scale, corner)
+    origin_x += shift[0]
+    origin_y += shift[1]
     draw = ImageDraw.Draw(image, "RGBA")
     for bit_index, bit in enumerate(_pixel_bits(envelope_bytes)):
         x = origin_x + (bit_index % PIXEL_BIT_COLUMNS) * 2 * scale
@@ -199,18 +204,51 @@ def _extract_from_screenshot_pixels(data: bytes) -> bytes | None:
         if image.width < PIXEL_WIDTH_MODULES * scale or image.height < PIXEL_HEIGHT_MODULES * scale:
             continue
         for corner in ("top_left", "bottom_right"):
-            raw = _read_pixel_carrier_at(image, scale=scale, corner=corner)
-            if raw is None:
-                continue
-            try:
-                return _decode_pixel_envelope(raw)
-            except WatermarkInvalidEnvelope:
-                continue
+            decoded = _read_pixel_carrier_at(image, scale=scale, corner=corner)
+            if decoded is not None:
+                return decoded
     return None
 
 
 def _read_pixel_carrier_at(image: Image.Image, *, scale: float, corner: str) -> bytes | None:
+    """Return the compact envelope JSON at ``corner``, or None.
+
+    The app renders cells at whole physical px, but a device's layout rounding
+    can shift the grid by a pixel or two. Probe a small neighborhood of
+    offsets and return the first one whose header + payload decode to valid
+    envelope JSON, so sub-pixel misalignment never silently loses the carrier.
+    """
     origin_x, origin_y = _pixel_origin(image.width, image.height, scale, corner)
+    for offset_x, offset_y in _carrier_offset_candidates():
+        raw = _read_carrier_bytes(
+            image,
+            origin_x=origin_x + offset_x,
+            origin_y=origin_y + offset_y,
+            scale=scale,
+        )
+        if raw is None:
+            continue
+        try:
+            return _decode_pixel_envelope(raw)
+        except WatermarkInvalidEnvelope:
+            continue
+    return None
+
+
+def _carrier_offset_candidates() -> tuple[tuple[int, int], ...]:
+    """Offsets to probe, nearest first (0,0 is the app's nominal grid origin)."""
+    candidates = [(0, 0)]
+    candidates.extend(
+        (offset_x, offset_y)
+        for offset_y in (-1, 0, 1)
+        for offset_x in (-1, 0, 1)
+        if (offset_x, offset_y) != (0, 0)
+    )
+    candidates.sort(key=lambda item: abs(item[0]) + abs(item[1]))
+    return tuple(candidates)
+
+
+def _read_carrier_bytes(image: Image.Image, *, origin_x: int, origin_y: int, scale: float) -> bytes | None:
     length = 0
     for bit_index in range(PIXEL_LENGTH_BITS):
         bit = _read_pixel_bit(image, origin_x=origin_x, origin_y=origin_y, scale=scale, bit_index=bit_index)

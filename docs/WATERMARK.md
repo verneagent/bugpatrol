@@ -36,14 +36,14 @@ Five Degrees app 在截图里嵌入不可见诊断水印(BugPatrol / app 协作�
 
 ## 载体契约(embedding)
 
-app 把加密 envelope 确定性嵌入截图。当前 app 用 **QR badge**,旧载体保留兼容:
+app 把加密 envelope 确定性嵌入截图。**canonical = 隐形 paired-cell pixel carrier**(用户完全感知不到,只有 BugPatrol 分析时能读出来);旧载体保留兼容:
 
-1. **QR badge(canonical)**:app 用 `react-native-qrcode-svg` 在屏幕左上角渲染白色底板的 QR(值 = 紧凑 envelope JSON,`buildDiagnosticScreenshotWatermarkQrValue`),`pointerEvents="none"`、a11y 隐藏,只在内测(non-prod)构建出现。BugPatrol 用 zxing-cpp 扫图,zxing 自带 Reed-Solomon 纠错,对 JPEG/缩放鲁棒。真 envelope ~1KB,ecl M 容量(2331B)余量充足。
-2. **Trailer(legacy/reference)**:图片自然结束处追加 `BUGPATROL_WM1:<b64-envelope>:BUGPATROL_WM1`。PNG/JPEG 解码器在 IEND/EOI 处停下,trailer 对用户不可见但文件里存在。
-3. **PNG tEXt chunk(legacy/reference)**:关键字 `bugpatrol.watermark`,值为 base64 envelope。
-4. **Screenshot pixel carrier(legacy/reverted)**:app 曾用低 alpha paired-cell 网格编码,已回退弃用(不可读回);BugPatrol 提取端保留该 leg 供旧 fixture。
+1. **Screenshot pixel carrier(canonical, invisible)**:app 渲染 root overlay,每 bit = 相邻的深/浅两格(alpha 13),视觉上互相抵消、对页面几乎不可见(δ≈13/255 亮度)。几何是**固定 3 物理像素 cell**(`app/lib/dev/diagnosticScreenshotWatermarkPixels.ts`:CELL=3、viewBox 768×768、距角 18px),任何 DPR(2 / 2.625 / 3 / …)都落在整数像素边界,无亚像素混叠;提取端固定 scale=3 读取,并用 **±1px 偏移探测**吸收 RN 布局舍入。双角冗余(top_left + bottom_right 各嵌一份)。所有构建(含 prod)都嵌——隐形载体对用户无感知,prod 截图也能追溯。
+2. **QR/Data Matrix(fallback)**:BugPatrol 用 zxing-cpp 扫图,只认内容能解析成 envelope JSON 的条码(屏幕上的分享二维码被忽略),多候选取离左上角最近者。app 侧已不渲染 QR badge,此 leg 供屏幕截图里恰好有信封 JSON 条码的场景。
+3. **Trailer(legacy/reference)**:图片自然结束处追加 `BUGPATROL_WM1:<b64-envelope>:BUGPATROL_WM1`。PNG/JPEG 解码器在 IEND/EOI 处停下,trailer 对用户不可见但文件里存在。
+4. **PNG tEXt chunk(legacy/reference)**:关键字 `bugpatrol.watermark`,值为 base64 envelope。
 
-提取逻辑:先扫 trailer 标记,再试 PNG tEXt/iTXt chunk,再试 pixel carrier,最后扫 QR/Data Matrix。QR 按**内容**选取——只有内容能解析成 envelope JSON 的条码才算水印,屏幕上的分享二维码等无关条码被忽略;多个候选时取离左上角最近者(徽标位置)。byte carrier envelope 上限 512KB。
+提取逻辑:先扫 trailer 标记,再试 PNG tEXt/iTXt chunk,再试 pixel carrier,最后扫 QR/Data Matrix。byte carrier envelope 上限 512KB。
 
 ## Envelope 格式
 
@@ -102,6 +102,6 @@ bugpatrol watermark decode --image /path/to/screenshot.png --json
 
 - `bugpatrol/watermark/` — types / keys / envelope / extractor / decryptor / reporter / `__init__`(公共 API `decode_image`、`WatermarkResourceDecoder`)
 - `bugpatrol/resources.py`、`intake.py`、`triage_context.py`、`backfill.py`、`watcher.py`、`event_watcher.py`、`watch_mail.py`、`__main__.py`
-- 测试:`tests/test_watermark.py`(42 例,含全部失败模式 + QR/pixel/trailer/tEXt carriers + 流水线集成 + CLI)
+- 测试:`tests/test_watermark.py`(43 例,含全部失败模式 + QR/pixel/trailer/tEXt carriers + 固定 3px ±1px 偏移 + 流水线集成 + CLI)
 
 依赖:`cryptography>=42`、`zxing-cpp>=3.1` + `numpy>=1.26`(均 lazy-import,不拖慢 import 路径;测试夹具还用 `qrcode`(dev extra)生成 QR 图)。
