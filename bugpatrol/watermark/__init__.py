@@ -55,6 +55,7 @@ from bugpatrol.watermark.keys import (
 )
 from bugpatrol.watermark.reporter import (
     NO_WATERMARK_NOTE,
+    candidates_to_compact_json,
     payload_to_compact_json,
     render_payload_summary,
     watermark_failure_note,
@@ -107,6 +108,7 @@ __all__ = [
     "WatermarkKeyStore",
     "WatermarkResourceDecoder",
     "build_envelope",
+    "candidates_to_compact_json",
     "decode_image",
     "decrypt_envelope",
     "embed_envelope_trailer",

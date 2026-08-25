@@ -29,7 +29,7 @@ from unittest.mock import patch
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from bugpatrol.__main__ import configured_watermark_decoder, main
+from bugpatrol.__main__ import main
 from bugpatrol.clients import GitHubIssue
 from bugpatrol.intake import (
     Attachment,
@@ -42,8 +42,10 @@ from bugpatrol.resources import LocalResourceStore, materialize_attachment
 from bugpatrol.triage_context import (
     MediaEvidence,
     TriageContext,
+    build_triage_context,
     extract_media_evidence,
     render_triage_context_markdown,
+    resolve_media_watermarks,
 )
 from bugpatrol.watermark import (
     DEFAULT_KEY_ID,
@@ -56,8 +58,8 @@ from bugpatrol.watermark import (
     ERROR_NOT_FOUND,
     NO_WATERMARK_NOTE,
     WatermarkKeyStore,
-    WatermarkResourceDecoder,
     build_envelope,
+    candidates_to_compact_json,
     decode_image,
     embed_envelope_trailer,
     embed_png_text_envelope,
@@ -497,32 +499,29 @@ class WatermarkKeyStoreTest(unittest.TestCase):
 
 
 class WatermarkPipelineTest(unittest.TestCase):
-    """Decoded metadata rides through materialization and triage rendering."""
+    """Candidates ride through materialization, intake render, and triage render."""
 
     private_pem: str
     public_pem: str
     watermarked_png: bytes
     compact: str
+    candidates_json: str
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.private_pem, cls.public_pem = _keypair()
-        cls.watermarked_png = embed_envelope_trailer(
-            _png_1x1(),
-            build_envelope(
-                _payload(),
-                public_key_pem=cls.public_pem,
-                key_id=DEFAULT_KEY_ID,
-            ),
+        cls.envelope = build_envelope(
+            _payload(),
+            public_key_pem=cls.public_pem,
+            key_id=DEFAULT_KEY_ID,
         )
+        cls.watermarked_png = embed_envelope_trailer(_png_1x1(), cls.envelope)
         cls.compact = payload_to_compact_json(_payload())
+        envelope_bytes = json.dumps(cls.envelope, separators=(",", ":")).encode("utf-8")
+        cls.candidates_json = candidates_to_compact_json([envelope_bytes])
 
-    def _decoder(self) -> object:
-        from bugpatrol.watermark import WatermarkResourceDecoder
-
-        return WatermarkResourceDecoder(
-            key_store=WatermarkKeyStore(keys={DEFAULT_KEY_ID: self.private_pem})
-        )
+    def _store(self) -> WatermarkKeyStore:
+        return WatermarkKeyStore(keys={DEFAULT_KEY_ID: self.private_pem})
 
     def _watermarked_attachment(self) -> Attachment:
         return Attachment(
@@ -530,7 +529,7 @@ class WatermarkPipelineTest(unittest.TestCase):
             url="lark://message/om_wm/image/img_v2_wm",
         )
 
-    def test_materialize_attachment_decodes_watermark(self) -> None:
+    def test_materialize_attachment_extracts_candidates(self) -> None:
         class Downloader:
             def download_message_resource(self, **kwargs: object) -> DownloadedLarkResource:
                 return DownloadedLarkResource(
@@ -545,13 +544,13 @@ class WatermarkPipelineTest(unittest.TestCase):
                 attachment=self._watermarked_attachment(),
                 lark=downloader,
                 store=LocalResourceStore(Path(tmp)),
-                watermark_decoder=self._decoder(),  # type: ignore[arg-type]
             )
-        self.assertEqual(materialized.watermark, self.compact)
+        self.assertEqual(materialized.watermark, self.candidates_json)
 
-    def test_materialize_decodes_before_transform_strips_carrier(self) -> None:
+    def test_materialize_extracts_before_transform_strips_carrier(self) -> None:
         # A redactor that rewrites the bytes (as a JPEG re-encode would) must not
-        # lose the watermark, because decode runs on the ORIGINAL bytes first.
+        # lose the watermark candidates, because extraction runs on the ORIGINAL
+        # bytes first (keyless — the runner decrypts later).
         class StrippingRedactor:
             def redact(self, *, ref: object, resource: DownloadedLarkResource) -> DownloadedLarkResource:
                 return DownloadedLarkResource(
@@ -575,9 +574,8 @@ class WatermarkPipelineTest(unittest.TestCase):
                 lark=downloader,
                 store=LocalResourceStore(Path(tmp)),
                 redactor=StrippingRedactor(),
-                watermark_decoder=self._decoder(),  # type: ignore[arg-type]
             )
-        self.assertEqual(materialized.watermark, self.compact)
+        self.assertEqual(materialized.watermark, self.candidates_json)
 
     def test_materialize_video_without_watermark_reports_not_found(self) -> None:
         # Videos are watermark candidates too (the trailer carrier can ride any
@@ -598,7 +596,6 @@ class WatermarkPipelineTest(unittest.TestCase):
             ),
             lark=Downloader(),
             store=LocalResourceStore(Path(tempfile.mkdtemp())),
-            watermark_decoder=self._decoder(),  # type: ignore[arg-type]
         )
         self.assertEqual(attachment.watermark, NO_WATERMARK_NOTE)
 
@@ -615,52 +612,10 @@ class WatermarkPipelineTest(unittest.TestCase):
             attachment=self._watermarked_attachment(),
             lark=Downloader(),
             store=LocalResourceStore(Path(tempfile.mkdtemp())),
-            watermark_decoder=self._decoder(),  # type: ignore[arg-type]
         )
         self.assertEqual(attachment.watermark, NO_WATERMARK_NOTE)
 
-    def test_materialize_without_decoder_is_silent(self) -> None:
-        # Feature off (no decoder wired) must not fabricate a note: the
-        # watermark line stays absent entirely.
-        class Downloader:
-            def download_message_resource(self, **kwargs: object) -> DownloadedLarkResource:
-                return DownloadedLarkResource(
-                    content=_png_1x1(),
-                    content_type="image/png",
-                    filename="clean.png",
-                )
-
-        attachment = materialize_attachment(
-            attachment=self._watermarked_attachment(),
-            lark=Downloader(),
-            store=LocalResourceStore(Path(tempfile.mkdtemp())),
-        )
-        self.assertEqual(attachment.watermark, "")
-
-    def test_materialize_reports_watermark_decode_failure(self) -> None:
-        # An envelope that cannot be decrypted with the configured key must
-        # surface a visible failure note, not silently drop the watermark line.
-        class Downloader:
-            def download_message_resource(self, **kwargs: object) -> DownloadedLarkResource:
-                return DownloadedLarkResource(
-                    content=WatermarkPipelineTest.watermarked_png,
-                    content_type="image/png",
-                    filename="bug screenshot.png",
-                )
-
-        other_private, _other_public = _keypair()
-        wrong_decoder = WatermarkResourceDecoder(
-            key_store=WatermarkKeyStore(keys={DEFAULT_KEY_ID: other_private})
-        )
-        attachment = materialize_attachment(
-            attachment=self._watermarked_attachment(),
-            lark=Downloader(),
-            store=LocalResourceStore(Path(tempfile.mkdtemp())),
-            watermark_decoder=wrong_decoder,
-        )
-        self.assertEqual(attachment.watermark, watermark_failure_note(ERROR_DECRYPT))
-
-    def test_render_attachments_markdown_emits_watermark_line(self) -> None:
+    def test_render_attachments_markdown_emits_candidates_line(self) -> None:
         copy = {
             "open_asset": "open asset",
             "preview": "preview",
@@ -669,69 +624,10 @@ class WatermarkPipelineTest(unittest.TestCase):
             "none": "none",
         }
         markdown = render_attachments_markdown(
-            (Attachment(kind="image", url="https://assets/x.png", watermark=self.compact),),
+            (Attachment(kind="image", url="https://assets/x.png", watermark=self.candidates_json),),
             copy=copy,
         )
-        self.assertIn(f"- watermark: {self.compact}", markdown)
-
-    def test_extract_media_evidence_parses_watermark_line(self) -> None:
-        markdown = (
-            "- image: https://assets/x.png\n"
-            f"  - watermark: {self.compact}\n"
-        )
-        evidence = extract_media_evidence(markdown)
-        self.assertEqual(len(evidence), 1)
-        self.assertEqual(evidence[0].watermark, self.compact)
-
-    def test_render_triage_context_markdown_includes_watermark_summary(self) -> None:
-        issue = GitHubIssue(
-            number=1,
-            url="https://github.test/org/repo/issues/1",
-            title="broken screen",
-            body="report",
-        )
-        context = TriageContext(
-            issue=issue,
-            comments=(),
-            prd_hits=(),
-            media=(
-                MediaEvidence(
-                    kind="image",
-                    url="https://assets/x.png",
-                    watermark=self.compact,
-                ),
-            ),
-        )
-        markdown = render_triage_context_markdown(context)
-        self.assertIn(
-            "  - Watermark: [Watermark] keyId=diagnostic-watermark-v1 "
-            "watermarkId=wm-abc123 uid=u_12345 pathname=/settings/account",
-            markdown,
-        )
-
-    def test_intake_record_from_dict_round_trips_watermark(self) -> None:
-        record = IntakeRecord(
-            reporter_name="Reporter",
-            reporter_open_id="ou_1",
-            created_at="2026-08-25T00:00:00Z",
-            chat_id="oc_1",
-            root_id="om_1",
-            message_id="om_1",
-            original_text="bug",
-            attachments=(Attachment(kind="image", url="u", watermark=self.compact),),
-        )
-        as_dict = {
-            "reporter_name": record.reporter_name,
-            "reporter_open_id": record.reporter_open_id,
-            "created_at": record.created_at,
-            "chat_id": record.chat_id,
-            "root_id": record.root_id,
-            "message_id": record.message_id,
-            "original_text": record.original_text,
-            "attachments": [vars(a) for a in record.attachments],
-        }
-        restored = intake_record_from_dict(as_dict)
-        self.assertEqual(restored.attachments[0].watermark, self.compact)
+        self.assertIn(f"- watermark-candidates: {self.candidates_json}", markdown)
 
     def test_render_attachments_markdown_emits_not_found_note(self) -> None:
         copy = {
@@ -747,6 +643,54 @@ class WatermarkPipelineTest(unittest.TestCase):
         )
         self.assertIn(f"- watermark: {NO_WATERMARK_NOTE}", markdown)
 
+    def test_intake_record_from_dict_round_trips_candidates(self) -> None:
+        record = IntakeRecord(
+            reporter_name="Reporter",
+            reporter_open_id="ou_1",
+            created_at="2026-08-25T00:00:00Z",
+            chat_id="oc_1",
+            root_id="om_1",
+            message_id="om_1",
+            original_text="bug",
+            attachments=(Attachment(kind="image", url="u", watermark=self.candidates_json),),
+        )
+        as_dict = {
+            "reporter_name": record.reporter_name,
+            "reporter_open_id": record.reporter_open_id,
+            "created_at": record.created_at,
+            "chat_id": record.chat_id,
+            "root_id": record.root_id,
+            "message_id": record.message_id,
+            "original_text": record.original_text,
+            "attachments": [vars(a) for a in record.attachments],
+        }
+        restored = intake_record_from_dict(as_dict)
+        self.assertEqual(restored.attachments[0].watermark, self.candidates_json)
+
+    def test_intake_record_from_dict_round_trips_not_found_note(self) -> None:
+        attachments = (Attachment(kind="image", url="u", watermark=NO_WATERMARK_NOTE),)
+        as_dict = {
+            "reporter_name": "Reporter",
+            "reporter_open_id": "ou_1",
+            "created_at": "2026-08-25T00:00:00Z",
+            "chat_id": "oc_1",
+            "root_id": "om_1",
+            "message_id": "om_1",
+            "original_text": "bug",
+            "attachments": [vars(a) for a in attachments],
+        }
+        restored = intake_record_from_dict(as_dict)
+        self.assertEqual(restored.attachments[0].watermark, NO_WATERMARK_NOTE)
+
+    def test_extract_media_evidence_parses_candidates_line(self) -> None:
+        markdown = (
+            "- image: https://assets/x.png\n"
+            f"  - watermark-candidates: {self.candidates_json}\n"
+        )
+        evidence = extract_media_evidence(markdown)
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0].watermark, self.candidates_json)
+
     def test_extract_media_evidence_parses_not_found_note(self) -> None:
         markdown = (
             "- image: https://assets/x.png\n"
@@ -755,6 +699,33 @@ class WatermarkPipelineTest(unittest.TestCase):
         evidence = extract_media_evidence(markdown)
         self.assertEqual(len(evidence), 1)
         self.assertEqual(evidence[0].watermark, NO_WATERMARK_NOTE)
+
+    def test_render_triage_context_markdown_summarizes_candidates(self) -> None:
+        # Without a key the triage agent must see a compact count, not the raw
+        # encrypted JSON array dumped into the prompt.
+        issue = GitHubIssue(
+            number=1,
+            url="https://github.test/org/repo/issues/1",
+            title="broken screen",
+            body="report",
+        )
+        context = TriageContext(
+            issue=issue,
+            comments=(),
+            prd_hits=(),
+            media=(
+                MediaEvidence(
+                    kind="image",
+                    url="https://assets/x.png",
+                    watermark=self.candidates_json,
+                ),
+            ),
+        )
+        markdown = render_triage_context_markdown(context)
+        self.assertIn(
+            "  - Watermark: [Watermark] 1 candidate envelope(s) (encrypted)",
+            markdown,
+        )
 
     def test_render_triage_context_markdown_renders_not_found_note(self) -> None:
         issue = GitHubIssue(
@@ -778,20 +749,105 @@ class WatermarkPipelineTest(unittest.TestCase):
         markdown = render_triage_context_markdown(context)
         self.assertIn(f"  - Watermark: {NO_WATERMARK_NOTE}", markdown)
 
-    def test_intake_record_from_dict_round_trips_not_found_note(self) -> None:
-        attachments = (Attachment(kind="image", url="u", watermark=NO_WATERMARK_NOTE),)
-        as_dict = {
-            "reporter_name": "Reporter",
-            "reporter_open_id": "ou_1",
-            "created_at": "2026-08-25T00:00:00Z",
-            "chat_id": "oc_1",
-            "root_id": "om_1",
-            "message_id": "om_1",
-            "original_text": "bug",
-            "attachments": [vars(a) for a in attachments],
-        }
-        restored = intake_record_from_dict(as_dict)
-        self.assertEqual(restored.attachments[0].watermark, NO_WATERMARK_NOTE)
+
+class RunnerWatermarkDecryptTest(unittest.TestCase):
+    """The triage runner decrypts candidate envelopes with the GH Actions key."""
+
+    private_pem: str
+    public_pem: str
+    candidates_json: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.private_pem, cls.public_pem = _keypair()
+        cls.envelope = build_envelope(
+            _payload(),
+            public_key_pem=cls.public_pem,
+            key_id=DEFAULT_KEY_ID,
+        )
+        envelope_bytes = json.dumps(cls.envelope, separators=(",", ":")).encode("utf-8")
+        cls.candidates_json = candidates_to_compact_json([envelope_bytes])
+
+    def _store(self) -> WatermarkKeyStore:
+        return WatermarkKeyStore(keys={DEFAULT_KEY_ID: self.private_pem})
+
+    def _media(self, watermark: str) -> tuple[MediaEvidence, ...]:
+        return (MediaEvidence(kind="image", url="https://assets/x.png", watermark=watermark),)
+
+    def test_decrypts_clean_candidate_to_payload(self) -> None:
+        media = resolve_media_watermarks(self._media(self.candidates_json), key_store=self._store())
+        self.assertEqual(media[0].watermark, payload_to_compact_json(_payload()))
+
+    def test_no_key_is_a_noop_keeping_candidates(self) -> None:
+        media = resolve_media_watermarks(self._media(self.candidates_json), key_store=WatermarkKeyStore())
+        self.assertEqual(media[0].watermark, self.candidates_json)
+
+    def test_all_candidates_fail_reports_decrypt_failure(self) -> None:
+        other_private, _ = _keypair()
+        store = WatermarkKeyStore(keys={DEFAULT_KEY_ID: other_private})
+        media = resolve_media_watermarks(self._media(self.candidates_json), key_store=store)
+        self.assertEqual(media[0].watermark, watermark_failure_note(ERROR_DECRYPT))
+
+    def test_unknown_key_id_reports_key_not_found(self) -> None:
+        other_private, other_public = _keypair()
+        envelope = build_envelope(
+            _payload(keyId="retired-key-v0"),
+            public_key_pem=other_public,
+            key_id="retired-key-v0",
+        )
+        envelope_bytes = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        candidates = candidates_to_compact_json([envelope_bytes])
+        store = WatermarkKeyStore(keys={DEFAULT_KEY_ID: other_private})
+        media = resolve_media_watermarks(self._media(candidates), key_store=store)
+        self.assertEqual(media[0].watermark, watermark_failure_note(ERROR_KEY_UNKNOWN))
+
+    def test_picks_the_clean_candidate_over_a_corrupt_one(self) -> None:
+        # A wrong-read ±1px offset can look like a valid envelope but carry
+        # corrupted ciphertext. GCM auth picks the clean candidate, so a list
+        # [corrupt, clean] must resolve to the clean payload.
+        corrupt = dict(self.envelope)
+        data = dict(corrupt["data"])
+        assert isinstance(data, dict)
+        ciphertext = data["ciphertext"]
+        assert isinstance(ciphertext, str)
+        data["ciphertext"] = ("A" if ciphertext[0] != "A" else "B") + ciphertext[1:]
+        corrupt["data"] = data
+        both = candidates_to_compact_json(
+            [
+                json.dumps(corrupt, separators=(",", ":")).encode("utf-8"),
+                json.dumps(self.envelope, separators=(",", ":")).encode("utf-8"),
+            ]
+        )
+        media = resolve_media_watermarks(self._media(both), key_store=self._store())
+        self.assertEqual(media[0].watermark, payload_to_compact_json(_payload()))
+
+    def test_non_candidate_watermark_is_left_untouched(self) -> None:
+        for value in (NO_WATERMARK_NOTE, payload_to_compact_json(_payload()), "not json"):
+            media = resolve_media_watermarks(self._media(value), key_store=self._store())
+            self.assertEqual(media[0].watermark, value)
+
+    def test_build_triage_context_decrypts_with_env_key(self) -> None:
+        issue = GitHubIssue(
+            number=3,
+            url="https://github.test/org/repo/issues/3",
+            title="env-key decrypt",
+            body=(
+                "- image: https://assets/x.png\n"
+                f"  - watermark-candidates: {self.candidates_json}\n"
+            ),
+        )
+        with patch.dict(
+            os.environ,
+            {ENV_PRIVATE_KEY: self.private_pem, ENV_KEYS_JSON: ""},
+            clear=True,
+        ):
+            context = build_triage_context(
+                issue=issue,
+                prd_root=Path(tempfile.mkdtemp()),
+                prd_include_globs=("*.md",),
+            )
+        self.assertEqual(len(context.media), 1)
+        self.assertEqual(context.media[0].watermark, payload_to_compact_json(_payload()))
 
 
 class WatermarkCliTest(unittest.TestCase):
@@ -869,12 +925,6 @@ class WatermarkCliTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("watermark found", out)
         self.assertIn("[Watermark]", out)
-
-    def test_configured_decoder_respects_env(self) -> None:
-        with patch.dict(os.environ, {ENV_PRIVATE_KEY: "", ENV_KEYS_JSON: ""}, clear=True):
-            self.assertIsNone(configured_watermark_decoder())
-        with patch.dict(os.environ, {ENV_PRIVATE_KEY: self.private_pem, ENV_KEYS_JSON: ""}, clear=True):
-            self.assertIsNotNone(configured_watermark_decoder())
 
 
 if __name__ == "__main__":

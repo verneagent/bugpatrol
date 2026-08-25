@@ -88,16 +88,61 @@ def with_obstructing_ui(png_bytes: bytes) -> bytes:
     return buf.getvalue()
 
 
+def run_split_flow(data: bytes, suffix: str) -> None:
+    """Watcher-extract -> issue body line -> runner-decrypt, end to end.
+
+    Mirrors the production split: the relay watcher has NO private key, so it
+    only extracts the encrypted envelope candidates into the issue body; the
+    triage runner decrypts them with the GH Actions key and GCM auth picks the
+    clean candidate. Uses the actual pipeline functions (not a re-derivation).
+    """
+    from bugpatrol.triage_context import extract_media_evidence, resolve_media_watermarks
+    from bugpatrol.watermark.extractor import extract_envelope_candidates
+    from bugpatrol.watermark.keys import WatermarkKeyStore
+    from bugpatrol.watermark.reporter import (
+        NO_WATERMARK_NOTE,
+        candidates_to_compact_json,
+        render_payload_summary,
+    )
+    from bugpatrol.watermark.types import DEFAULT_KEY_ID, PAYLOAD_REQUIRED_FIELDS
+
+    candidates = extract_envelope_candidates(data)
+    if candidates:
+        line = candidates_to_compact_json(candidates)
+        body_line = f"  - watermark-candidates: {line}"
+    else:
+        line = NO_WATERMARK_NOTE
+        body_line = f"  - watermark: {NO_WATERMARK_NOTE}"
+    print(f"=== {suffix}: split flow ===")
+    print(f"watcher extract -> {len(candidates)} candidate(s); issue-body line: {body_line[:72]}...")
+    media = extract_media_evidence(f"- image: https://assets/x.png\n{body_line}\n")
+    assert len(media) == 1, f"expected 1 media item, got {len(media)}"
+    resolved = resolve_media_watermarks(
+        media, key_store=WatermarkKeyStore(keys={DEFAULT_KEY_ID: PRIV})
+    )
+    payload = json.loads(resolved[0].watermark)
+    missing = [f for f in PAYLOAD_REQUIRED_FIELDS if not payload.get(f)]
+    assert not missing, f"payload missing required fields: {missing}"
+    print(f"runner decrypted payload: {render_payload_summary(payload)}")
+    print(f"required fields ({len(PAYLOAD_REQUIRED_FIELDS)}): all present")
+    print()
+
+
 if __name__ == "__main__":
-    png = render_screenshot((1080, 2340))
-    run_decode(png, ".png")
-    # JPEG q85 — the pipeline's convert_images_to_jpeg transcode
     from PIL import Image
+
+    png = render_screenshot((1080, 2340))
     jp = io.BytesIO()
     Image.open(io.BytesIO(png)).save(jp, format="JPEG", quality=85)
-    run_decode(jp.getvalue(), "-q85.jpg")
-    # UI obstruction across the carrier (majority-vote recovery check)
-    run_decode(with_obstructing_ui(png), "-ui-edge.png")
+    ui = with_obstructing_ui(png)
     jp2 = io.BytesIO()
-    Image.open(io.BytesIO(with_obstructing_ui(png))).save(jp2, format="JPEG", quality=85)
-    run_decode(jp2.getvalue(), "-ui-edge-q85.jpg")
+    Image.open(io.BytesIO(ui)).save(jp2, format="JPEG", quality=85)
+
+    for label, data in (
+        (".png", png),
+        ("-q85.jpg", jp.getvalue()),
+        ("-ui-edge.png", ui),
+        ("-ui-edge-q85.jpg", jp2.getvalue()),
+    ):
+        run_decode(data, label)
+        run_split_flow(data, label)

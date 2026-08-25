@@ -16,7 +16,6 @@ from typing import Protocol
 
 from bugpatrol.intake import Attachment, IntakeRecord
 from bugpatrol.lark import DownloadedLarkResource
-from bugpatrol.watermark.types import ERROR_KEY_MISSING, ERROR_NOT_FOUND, WatermarkDecoder
 
 LARK_RESOURCE_RE = re.compile(r"^lark://message/([^/]+)/([^/]+)/([^/]+)$")
 
@@ -563,7 +562,6 @@ def materialize_lark_attachments(
     policy: ResourcePolicy | None = None,
     redactor: ResourceRedactor | None = None,
     transformer: ResourceTransformer | None = None,
-    watermark_decoder: WatermarkDecoder | None = None,
 ) -> IntakeRecord:
     attachments = tuple(
         materialize_attachment(
@@ -574,7 +572,6 @@ def materialize_lark_attachments(
             policy=policy,
             redactor=redactor,
             transformer=transformer,
-            watermark_decoder=watermark_decoder,
         )
         for attachment in record.attachments
     )
@@ -590,7 +587,6 @@ def materialize_attachment(
     policy: ResourcePolicy | None = None,
     redactor: ResourceRedactor | None = None,
     transformer: ResourceTransformer | None = None,
-    watermark_decoder: WatermarkDecoder | None = None,
 ) -> Attachment:
     ref = parse_lark_resource_url(attachment.url)
     if ref is None:
@@ -600,11 +596,13 @@ def materialize_attachment(
         resource_key=ref.resource_key,
         resource_type=_download_resource_type(ref.kind),
     )
-    # Decode the invisible watermark on the ORIGINAL downloaded bytes, before any
-    # redaction/transform re-encodes the image (which would strip the carrier).
-    # This is "before normal image analysis": the vision describer runs later and
-    # the decoded metadata rides into the issue body via Attachment.watermark.
-    watermark = _decode_watermark(watermark_decoder, ref=ref, resource=resource)
+    # Extract the invisible watermark carrier on the ORIGINAL downloaded bytes,
+    # before any redaction/transform re-encodes the image (which would strip the
+    # carrier). This runs with NO private key: only the encrypted envelope
+    # candidates are stored (via Attachment.watermark) for the triage runner to
+    # decrypt later. The vision describer runs after and sees the re-encoded
+    # image, so extraction must happen here, first.
+    watermark = _decode_watermark(ref=ref, resource=resource)
     if redactor is not None:
         resource = redactor.redact(ref=ref, resource=resource)
     if transformer is not None:
@@ -685,50 +683,54 @@ def _is_watermark_candidate(*, ref: LarkResourceRef, resource: DownloadedLarkRes
 
 
 def _decode_watermark(
-    decoder: WatermarkDecoder | None,
     *,
     ref: LarkResourceRef,
     resource: DownloadedLarkResource,
 ) -> str:
     """Return the watermark issue-line value for a media attachment.
 
-    Four states, rendered verbatim as the issue body's ``- watermark:`` line so
-    the triage agent always sees an explicit watermark status:
+    The relay watcher has NO private key: it only extracts every structurally
+    valid encrypted envelope (candidates) from the raw bytes and stores them
+    unverified. The triage runner later decrypts each candidate with the
+    GH Actions private key and GCM auth picks the clean payload.
 
-    - compact payload JSON      -> decoded watermark found
-    - ``未找到水印``             -> scanned, no watermark carrier present
-    - ``水印解码失败 (<code>)``  -> real decode failure (corrupt envelope /
-                                   unknown keyId / bad payload)
-    - ``""``                    -> not attempted (feature off, or not media)
+    Three states, rendered verbatim into the issue body:
 
-    Runs on the raw downloaded bytes, before any re-encode (resize/JPEG convert
-    would strip the carrier). A watermark outcome never blocks intake.
+    - compact JSON array of envelope dicts -> carrier found (encrypted)
+    - ``未找到水印``                        -> scanned, no carrier present
+    - ``""``                               -> not attempted (not media)
+
+    A corrupt carrier surfaces as ``水印解码失败 (<code>)``. Runs on the raw
+    downloaded bytes, before any re-encode (resize/JPEG convert would strip the
+    carrier). A watermark outcome never blocks intake.
     """
-    if decoder is None or not _is_watermark_candidate(ref=ref, resource=resource):
+    if not _is_watermark_candidate(ref=ref, resource=resource):
         return ""
+    from bugpatrol.watermark.extractor import (
+        WatermarkInvalidEnvelope,
+        extract_envelope_candidates,
+    )
     from bugpatrol.watermark.reporter import (
         NO_WATERMARK_NOTE,
-        payload_to_compact_json,
+        candidates_to_compact_json,
         watermark_failure_note,
     )
+    from bugpatrol.watermark.types import ERROR_BAD_ENVELOPE
 
-    result = decoder.decode(resource.content)
-    if result.found and result.payload is not None:
-        return payload_to_compact_json(result.payload)
-    if result.error == ERROR_NOT_FOUND:
+    try:
+        candidates = extract_envelope_candidates(resource.content)
+    except WatermarkInvalidEnvelope as exc:
+        # A carrier was present but unreadable; surface it AND log, but never
+        # block intake.
+        print(
+            f"resource watermark extract failed "
+            f"({ref.message_id}/{ref.resource_key}): {exc}",
+            file=sys.stderr,
+        )
+        return watermark_failure_note(ERROR_BAD_ENVELOPE)
+    if not candidates:
         return NO_WATERMARK_NOTE
-    if result.error == ERROR_KEY_MISSING:
-        # Feature configured with no usable key: we did not actually scan, so
-        # claim nothing in the issue.
-        return ""
-    # Genuine decode failures surface in the issue AND on stderr, but never
-    # block intake.
-    print(
-        f"resource watermark decode failed "
-        f"({ref.message_id}/{ref.resource_key}): {result.error}",
-        file=sys.stderr,
-    )
-    return watermark_failure_note(result.error)
+    return candidates_to_compact_json(candidates)
 
 
 def _is_video_resource(*, ref: LarkResourceRef, resource: DownloadedLarkResource) -> bool:

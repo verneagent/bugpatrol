@@ -22,9 +22,10 @@ Five Degrees app 在截图里嵌入不可见诊断水印(BugPatrol / app 协作�
 | `FIVED_WATERMARK_PRIVATE_KEY_PEM` | 当前主私钥,服务默认 `keyId` = `diagnostic-watermark-v1` |
 | `FIVED_WATERMARK_KEYS_JSON` | (可选)keyId → PEM 的 JSON 对象,用于**密钥轮换** |
 
-- **GitHub Actions**:两个都设成仓库 secret(`Settings → Secrets and variables → Actions`)。triage/fix runner 每 run 由 workflow 注入环境。
-- **本地 / dev**:同名环境变量,例:`~/.zshrc` 或 watcher launchd 的 `EnvironmentVariables`。
-- **无 key = 特性关闭**:没配私钥时解码静默返回 `watermark_private_key_missing`,流水线照常走,不报错不阻塞。
+- **解密发生在 GH Actions runner,不是 relay**:watcher 无 key 只提取候选密文写进 issue body;私钥**只**存在于 fived repo 的 **GitHub Actions secret**,由 workflow env 注入 runner,在 `build_triage_context` 里解密。Mac Studio **不存私钥**。
+- **生产**:deploy 时把正式私钥设成 fived repo 的 GH secret `FIVED_WATERMARK_PRIVATE_KEY_PEM`(轮换另加 `FIVED_WATERMARK_KEYS_JSON`),并在 `.github/workflows/bugpatrol-triage.yml` 的 provision step env 注入(secret 未设 = 空串,特性关闭,无害)。
+- **本地 / dev**:同名环境变量(E2E / 单测用测试 key pair),例:`~/.zshrc` 或命令行 `export`。
+- **无 key = 特性关闭**:runner 端没配私钥时 `resolve_media_watermarks` 原样保留候选密文(渲染成 `[Watermark] N candidate envelope(s)`),流水线照常走,不报错不阻塞。
 
 ### 轮换流程
 
@@ -49,7 +50,7 @@ app 把加密 envelope 确定性嵌入截图。**canonical = 隐形 paired-cell 
 
 提取逻辑:先扫 trailer 标记,再试 PNG tEXt/iTXt chunk,再试 pixel carrier(scale=3 优先,双角,每个 ±1px 偏移),最后扫 QR/Data Matrix。byte carrier envelope 上限 512KB。
 
-**候选解码(抗错读)**:±1px 偏移读错时可能产出「结构合法但密文损坏」的 envelope(base64 里 2 个字符错位仍能解析成 JSON)。解码端收集**所有**结构合法候选,逐个用私钥试,以 **GCM auth 为 ground truth** —— 干净的那份(比如另一角)赢过解析得出但解不了密的冒牌货。迭代是**惰性 best-first** 的,干净截图只读一次就停下(~170ms/图),无载波图 ~30ms。
+**候选提取 + 解密(抗错读)**:±1px 偏移读错时可能产出「结构合法但密文损坏」的 envelope(base64 里 2 个字符错位仍能解析成 JSON)。**watcher 无 key 收集所有结构合法候选**写进 issue body;runner 端 `resolve_media_watermarks` 逐个用私钥试,以 **GCM auth 为 ground truth** —— 干净的那份(比如另一角)赢过解析得出但解不了密的冒牌货。迭代是**惰性 best-first** 的,干净截图只读一次就停下(~170ms/图),无载波图 ~30ms。
 
 ## Envelope 格式
 
@@ -91,29 +92,31 @@ bugpatrol watermark decode --image /path/to/screenshot.png --json
 
 ## 流水线接入点
 
-解码在**原始下载字节**上、`redactor`/`transformer` 重编码**之前**执行(resize/JPEG 转码可能毁掉低 alpha pixel carrier):
+提取在**原始下载字节**上、`redactor`/`transformer` 重编码**之前**执行(resize/JPEG 转码可能毁掉低 alpha pixel carrier),且**不需要私钥**:
 
-`materialize_attachment`(resources.py,RAW bytes→解码→redact→transform→policy→store→describe)→ `Attachment.watermark` → issue body `- watermark: <值>` 行 → `extract_media_evidence` → `MediaEvidence.watermark` → triage context 渲染成 `- Watermark: <摘要>` 供 agent 读取。
+- **watcher 侧(无 key)**:`materialize_attachment`(resources.py,RAW bytes → 提取候选 → redact → transform → policy → store → describe)→ `Attachment.watermark` = 候选密文 JSON 数组 → issue body `- watermark-candidates: <JSON 数组>` 行。
+- **runner 侧(有 key)**:`extract_media_evidence`(triage_context.py)解析候选 → `resolve_media_watermarks` 逐个 `decrypt_envelope`(GCM auth 挑干净)→ `MediaEvidence.watermark` = payload → triage context 渲染成 `- Watermark: [Watermark] keyId=...` 供 agent 读取。
 
-图片和视频都是水印候选(resources.py `_is_watermark_candidate`),`Attachment.watermark` 承载四态:
+图片和视频都是水印候选(resources.py `_is_watermark_candidate`)。**issue body** 只表达三态:
 
-- **找到** → 紧凑 payload JSON,渲染成 `- Watermark: [Watermark] keyId=...`
-- **扫描过、没有** → `未找到水印`,issue body 显式标注「已检查、不存在」,而不是整行缺失
-- **解码失败**(损坏 envelope / 未知 key / 坏 payload)→ `水印解码失败 (<code>)` 并在 stderr 打日志,不阻塞 intake
-- **未尝试**(特性关闭 / 非图片视频)→ `""`,整行省略
+- **有候选(加密)** → `- watermark-candidates: <JSON 数组>`,打开 issue 看不到明文
+- **扫描过、没有** → `- watermark: 未找到水印`,显式标注「已检查、不存在」,而不是整行缺失
+- **未尝试**(非图片视频)→ `""`,整行省略
 
-- watcher / backfill / event-watcher / mail-watcher 全部接入,`configured_watermark_decoder()` 仅在环境配了 key 时启用(无 key 不产生噪音)。
+**解密失败 / 未知 key / 坏 payload** 不落 issue body,在 **runner context** 里变成 `水印解码失败 (<code>)`;无 key 时 runner 原样保留候选,渲染成 `[Watermark] N candidate envelope(s) (encrypted)`。watermark 任何阶段失败都不阻塞 intake / triage。
+
+watcher / backfill / event-watcher / mail-watcher 全部接入(无 key 提取,`configured_watermark_decoder()` 已删除)。
 
 ## 验证(端到端)
 
 - **fived jest harness**(`app/lib/__tests__/verify-watermark-e2e.test.ts`):用 app 真实代码构建 prod-mode envelope,导出加密 envelope + 匹配私钥 + **真实渲染的 darkPath/lightPath**(3× 交错几何)到 `$TMPDIR/wm-e2e-{envelope,private,paths}.*`。断言 prod payload = 15 字段(含 `uid`,不含敏感字段)。
-- **BugPatrol E2E harness**(`wm_e2e_embed.py`):解析 fived 导出的真实 path 字符串,把 cell 渲染到 1080×2340 截图(双角 + 页面噪声),跑 `bugpatrol watermark decode`。PNG、JPEG q85、UI 遮挡 + JPEG q85 四种形态全部解码出完整 prod payload。消费的是 app 真实几何,不是 Python 重实现。
-- 单测:`tests/test_watermark.py`(47 例,含全部失败模式 + QR/pixel/trailer/tEXt carriers + 固定 3px ±1px 偏移 + 背景阶跃多数恢复 + JPEG q85 弃权 + UI edge + JPEG + 流水线集成 + CLI)。
+- **BugPatrol E2E harness**(`wm_e2e_embed.py`):解析 fived 导出的真实 path 字符串,把 cell 渲染到 1080×2340 截图(双角 + 页面噪声),跑 `bugpatrol watermark decode`。PNG、JPEG q85、UI 遮挡 + JPEG q85 四种形态全部解码出完整 prod payload。**同时跑 split 流程**:watcher 无 key 提取候选 → 构造 `- watermark-candidates:` issue body 行 → `extract_media_evidence` + `resolve_media_watermarks`(测试 key)→ 断言 14 个 required 字段全在。消费的是 app 真实几何,不是 Python 重实现。
+- 单测:`tests/test_watermark.py`(51 例,含全部失败模式 + QR/pixel/trailer/tEXt carriers + 固定 3px ±1px 偏移 + 背景阶跃多数恢复 + JPEG q85 弃权 + UI edge + JPEG + **watcher 提取 / runner 解密 split + 候选优先 + 未知 key + 无 key 原样** + 流水线集成 + CLI)。
 
 ## 实现位置
 
-- `bugpatrol/watermark/` — types / keys / envelope / extractor / decryptor / reporter / `__init__`(公共 API `decode_image`、`WatermarkResourceDecoder`)
-- `bugpatrol/resources.py`、`intake.py`、`triage_context.py`、`backfill.py`、`watcher.py`、`event_watcher.py`、`watch_mail.py`、`__main__.py`
-- 测试:`tests/test_watermark.py`(47 例,含全部失败模式 + QR/pixel/trailer/tEXt carriers + 固定 3px ±1px 偏移 + 背景阶跃多数恢复 + JPEG q85 弃权 + UI edge + JPEG + 流水线集成 + CLI)
+- `bugpatrol/watermark/` — types / keys / envelope / extractor / decryptor / reporter / `__init__`(公共 API `decode_image`、`WatermarkResourceDecoder`、`candidates_to_compact_json`)
+- `bugpatrol/resources.py`(watcher 无 key 提取)、`intake.py`(issue body 渲染)、`triage_context.py`(`resolve_media_watermarks` runner 解密)、`backfill.py`、`watcher.py`、`event_watcher.py`、`watch_mail.py`、`__main__.py`(CLI decode)
+- 测试:`tests/test_watermark.py`(51 例,含全部失败模式 + QR/pixel/trailer/tEXt carriers + 固定 3px ±1px 偏移 + 背景阶跃多数恢复 + JPEG q85 弃权 + UI edge + JPEG + split 流程 + 流水线集成 + CLI)
 
 依赖:`cryptography>=42`、`zxing-cpp>=3.1` + `numpy>=1.26`(均 lazy-import,不拖慢 import 路径;测试夹具还用 `qrcode`(dev extra)生成 QR 图)。

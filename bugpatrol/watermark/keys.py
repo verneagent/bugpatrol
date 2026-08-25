@@ -9,9 +9,13 @@ Two sources, both optional:
   key rotation, so older payloads encrypted under retired keys still decrypt
   while newer payloads use the current key.
 
-GitHub Actions ships ``FIVED_WATERMARK_PRIVATE_KEY_PEM`` as a repository
-secret; local development sets the same variable (e.g. in ``~/.zshrc`` or the
-watcher launchd EnvironmentVariables).
+Decryption happens on the GH Actions triage runner, not the relay watcher:
+the watcher only extracts the encrypted envelope candidates into the issue
+body (keyless), and the runner decrypts them in ``build_triage_context``
+(``resolve_media_watermarks``). In production the key is a GitHub Actions
+repository secret on the fived repo, injected into the triage workflow env;
+locally/dev it is the same-named environment variable. The Mac Studio relay
+holds no private key.
 """
 
 from __future__ import annotations

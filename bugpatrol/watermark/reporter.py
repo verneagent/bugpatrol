@@ -43,6 +43,21 @@ def payload_to_compact_json(payload: dict[str, object]) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def candidates_to_compact_json(candidates: list[bytes]) -> str:
+    """Single-line JSON array of envelope dicts, for ``Attachment.watermark``.
+
+    The relay watcher has no private key, so it stores every structurally-valid
+    envelope extracted from the raw bytes **unverified**. The triage runner
+    later decrypts each candidate with the GH Actions key and GCM auth picks the
+    clean one — see ``triage_context.resolve_media_watermarks``.
+    """
+    return json.dumps(
+        [json.loads(envelope_bytes.decode("utf-8")) for envelope_bytes in candidates],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 def render_payload_summary(payload: dict[str, object]) -> str:
     """A single-line human/agent-readable summary of a decoded payload.
 

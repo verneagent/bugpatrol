@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from bugpatrol.clients import GitHubIssue
+from bugpatrol.watermark.reporter import NO_WATERMARK_NOTE
 
 INTAKE_META_MARKER = "BUGPATROL_INTAKE_META"
 
@@ -23,10 +24,11 @@ class Attachment:
     url: str
     description: str = ""
     # Watermark status for this attachment, rendered verbatim as the issue
-    # body's `- watermark:` line. Compact payload JSON when a watermark was
-    # found; `未找到水印` when media was scanned and carried none; a
-    # `水印解码失败 (code)` note on real decode failures; "" when not
-    # attempted (feature off, or not image/video media).
+    # body's `- watermark-candidates:` line. The relay watcher stores every
+    # extracted encrypted envelope as a compact JSON array (unverified — the
+    # triage runner decrypts them with the GH Actions key); `未找到水印` when
+    # media was scanned and carried none; "" when not attempted (not
+    # image/video media). Decryption results are never persisted here.
     watermark: str = ""
 
 
@@ -337,7 +339,10 @@ def render_attachments_markdown(attachments: tuple[Attachment, ...], *, copy: di
         if item.description:
             lines.append(f"  - {copy['generated_description']}: {item.description}")
         if item.watermark:
-            lines.append(f"  - watermark: {item.watermark}")
+            if item.watermark == NO_WATERMARK_NOTE:
+                lines.append(f"  - watermark: {item.watermark}")
+            else:
+                lines.append(f"  - watermark-candidates: {item.watermark}")
     return "\n".join(lines)
 
 
