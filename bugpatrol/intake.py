@@ -22,9 +22,11 @@ class Attachment:
     kind: str
     url: str
     description: str = ""
-    # Compact JSON of a decoded diagnostic watermark payload ("" when absent).
-    # Rendered as a machine-readable `- watermark:` line in the issue body so
-    # triage context can feed it to the agent before downstream analysis.
+    # Watermark status for this attachment, rendered verbatim as the issue
+    # body's `- watermark:` line. Compact payload JSON when a watermark was
+    # found; `未找到水印` when media was scanned and carried none; a
+    # `水印解码失败 (code)` note on real decode failures; "" when not
+    # attempted (feature off, or not image/video media).
     watermark: str = ""
 
 

@@ -22,7 +22,9 @@ class MediaEvidence:
     url: str
     description: str = ""
     source: str = ""
-    # Compact JSON of the decoded diagnostic watermark payload ("" when absent).
+    # Watermark status of this attachment, as read from the issue body's
+    # `- watermark:` line: payload JSON when found, or `未找到水印` / a decode
+    # failure note when scanned and absent or failed ("" when never scanned).
     watermark: str = ""
 
 

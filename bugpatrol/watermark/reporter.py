@@ -9,6 +9,17 @@ from __future__ import annotations
 
 import json
 
+# Issue-body value for an attachment that was scanned for a watermark and
+# carried none. Rendered verbatim as `- watermark: 未找到水印` so the triage
+# agent sees an explicit "checked, absent" status instead of no line at all.
+NO_WATERMARK_NOTE = "未找到水印"
+
+
+def watermark_failure_note(error: str) -> str:
+    """Issue-body note for a watermark decode that failed (e.g. corrupt envelope)."""
+    return f"水印解码失败 ({error})"
+
+
 _ORDERED_FIELDS = (
     "keyId",
     "watermarkId",

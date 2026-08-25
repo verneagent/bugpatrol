@@ -673,34 +673,62 @@ def _is_image_resource(*, ref: LarkResourceRef, resource: DownloadedLarkResource
     return ref.kind == "image" or content_type.startswith("image/")
 
 
+def _is_watermark_candidate(*, ref: LarkResourceRef, resource: DownloadedLarkResource) -> bool:
+    """Media that can carry a diagnostic watermark: image or video bytes.
+
+    Videos get scanned too (a recording can carry the same trailer carrier);
+    the carrier scan simply reports not-found when absent, so the issue can
+    state that no watermark was found rather than staying silent.
+    """
+    content_type = resource.content_type.split(";", 1)[0].strip().lower()
+    return ref.kind in ("image", "video") or content_type.startswith(("image/", "video/"))
+
+
 def _decode_watermark(
     decoder: WatermarkDecoder | None,
     *,
     ref: LarkResourceRef,
     resource: DownloadedLarkResource,
 ) -> str:
-    """Decode an embedded watermark into a compact JSON string ("" if absent).
+    """Return the watermark issue-line value for a media attachment.
 
-    Runs on the raw downloaded bytes, before any re-encode. A missing private
-    key and a watermarked-free image are normal "feature off / no watermark"
-    states and stay silent; genuine decode failures (corrupt envelope, unknown
-    keyId, bad payload) are surfaced on stderr and skipped so a watermark
-    failure never blocks intake.
+    Four states, rendered verbatim as the issue body's ``- watermark:`` line so
+    the triage agent always sees an explicit watermark status:
+
+    - compact payload JSON      -> decoded watermark found
+    - ``未找到水印``             -> scanned, no watermark carrier present
+    - ``水印解码失败 (<code>)``  -> real decode failure (corrupt envelope /
+                                   unknown keyId / bad payload)
+    - ``""``                    -> not attempted (feature off, or not media)
+
+    Runs on the raw downloaded bytes, before any re-encode (resize/JPEG convert
+    would strip the carrier). A watermark outcome never blocks intake.
     """
-    if decoder is None or not _is_image_resource(ref=ref, resource=resource):
+    if decoder is None or not _is_watermark_candidate(ref=ref, resource=resource):
         return ""
-    from bugpatrol.watermark.reporter import payload_to_compact_json
+    from bugpatrol.watermark.reporter import (
+        NO_WATERMARK_NOTE,
+        payload_to_compact_json,
+        watermark_failure_note,
+    )
 
     result = decoder.decode(resource.content)
     if result.found and result.payload is not None:
         return payload_to_compact_json(result.payload)
-    if result.error not in (ERROR_NOT_FOUND, ERROR_KEY_MISSING):
-        print(
-            f"resource watermark decode failed "
-            f"({ref.message_id}/{ref.resource_key}): {result.error}",
-            file=sys.stderr,
-        )
-    return ""
+    if result.error == ERROR_NOT_FOUND:
+        return NO_WATERMARK_NOTE
+    if result.error == ERROR_KEY_MISSING:
+        # Feature configured with no usable key: we did not actually scan, so
+        # claim nothing in the issue.
+        return ""
+    # Genuine decode failures surface in the issue AND on stderr, but never
+    # block intake.
+    print(
+        f"resource watermark decode failed "
+        f"({ref.message_id}/{ref.resource_key}): {result.error}",
+        file=sys.stderr,
+    )
+    return watermark_failure_note(result.error)
 
 
 def _is_video_resource(*, ref: LarkResourceRef, resource: DownloadedLarkResource) -> bool:

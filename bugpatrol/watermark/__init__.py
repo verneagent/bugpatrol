@@ -53,8 +53,10 @@ from bugpatrol.watermark.keys import (
     WatermarkKeyStore,
 )
 from bugpatrol.watermark.reporter import (
+    NO_WATERMARK_NOTE,
     payload_to_compact_json,
     render_payload_summary,
+    watermark_failure_note,
 )
 from bugpatrol.watermark.types import (
     DEFAULT_KEY_ID,
@@ -88,6 +90,7 @@ __all__ = [
     "ERROR_NOT_FOUND",
     "FOUND_CONFIDENCE",
     "MAX_ENVELOPE_BYTES",
+    "NO_WATERMARK_NOTE",
     "PAYLOAD_REQUIRED_FIELDS",
     "PNG_WATERMARK_KEYWORD",
     "WatermarkBadEnvelope",
@@ -111,6 +114,7 @@ __all__ = [
     "payload_to_compact_json",
     "render_payload_summary",
     "validate_payload",
+    "watermark_failure_note",
 ]
 
 

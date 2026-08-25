@@ -85,15 +85,21 @@ bugpatrol watermark decode --image /path/to/screenshot.png --json
 
 解码在**原始下载字节**上、`redactor`/`transformer` 重编码**之前**执行(resize/JPEG 转码会毁掉载体):
 
-`materialize_attachment`(resources.py,RAW bytes→解码→redact→transform→policy→store→describe)→ `Attachment.watermark`(紧凑 JSON)→ issue body `- watermark: <json>` 行 → `extract_media_evidence` → `MediaEvidence.watermark` → triage context 渲染成 `- Watermark: [Watermark] keyId=...` 供 agent 读取。
+`materialize_attachment`(resources.py,RAW bytes→解码→redact→transform→policy→store→describe)→ `Attachment.watermark` → issue body `- watermark: <值>` 行 → `extract_media_evidence` → `MediaEvidence.watermark` → triage context 渲染成 `- Watermark: <摘要>` 供 agent 读取。
+
+图片和视频都是水印候选(resources.py `_is_watermark_candidate`),`Attachment.watermark` 承载四态:
+
+- **找到** → 紧凑 payload JSON,渲染成 `- Watermark: [Watermark] keyId=...`
+- **扫描过、没有** → `未找到水印`,issue body 显式标注「已检查、不存在」,而不是整行缺失
+- **解码失败**(损坏 envelope / 未知 key / 坏 payload)→ `水印解码失败 (<code>)` 并在 stderr 打日志,不阻塞 intake
+- **未尝试**(特性关闭 / 非图片视频)→ `""`,整行省略
 
 - watcher / backfill / event-watcher / mail-watcher 全部接入,`configured_watermark_decoder()` 仅在环境配了 key 时启用(无 key 不产生噪音)。
-- 真实解码失败(损坏 envelope / 未知 key / 坏 payload)在 stderr 打日志并跳过该附件,不阻塞 intake。
 
 ## 实现位置
 
 - `bugpatrol/watermark/` — types / keys / envelope / extractor / decryptor / reporter / `__init__`(公共 API `decode_image`、`WatermarkResourceDecoder`)
 - `bugpatrol/resources.py`、`intake.py`、`triage_context.py`、`backfill.py`、`watcher.py`、`event_watcher.py`、`watch_mail.py`、`__main__.py`
-- 测试:`tests/test_watermark.py`(29 例,含全部失败模式 + 流水线集成 + CLI)
+- 测试:`tests/test_watermark.py`(36 例,含全部失败模式 + 流水线集成 + CLI)
 
 依赖:`cryptography>=42`(lazy-import,不拖慢 import 路径)。

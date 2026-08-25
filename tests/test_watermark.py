@@ -53,12 +53,15 @@ from bugpatrol.watermark import (
     ERROR_KEY_MISSING,
     ERROR_KEY_UNKNOWN,
     ERROR_NOT_FOUND,
+    NO_WATERMARK_NOTE,
     WatermarkKeyStore,
+    WatermarkResourceDecoder,
     build_envelope,
     decode_image,
     embed_envelope_trailer,
     embed_png_text_envelope,
     payload_to_compact_json,
+    watermark_failure_note,
 )
 from bugpatrol.watermark.keys import (
     WatermarkBadKeyConfig,
@@ -378,11 +381,14 @@ class WatermarkPipelineTest(unittest.TestCase):
             )
         self.assertEqual(materialized.watermark, self.compact)
 
-    def test_materialize_skips_non_image_resources(self) -> None:
+    def test_materialize_video_without_watermark_reports_not_found(self) -> None:
+        # Videos are watermark candidates too (the trailer carrier can ride any
+        # media), so a clean video must surface an explicit "checked, absent"
+        # note instead of silently omitting the watermark line.
         class Downloader:
             def download_message_resource(self, **kwargs: object) -> DownloadedLarkResource:
                 return DownloadedLarkResource(
-                    content=WatermarkPipelineTest.watermarked_png,
+                    content=b"clean-video-bytes",
                     content_type="video/mp4",
                     filename="repro.mp4",
                 )
@@ -396,7 +402,65 @@ class WatermarkPipelineTest(unittest.TestCase):
             store=LocalResourceStore(Path(tempfile.mkdtemp())),
             watermark_decoder=self._decoder(),  # type: ignore[arg-type]
         )
+        self.assertEqual(attachment.watermark, NO_WATERMARK_NOTE)
+
+    def test_materialize_image_without_watermark_reports_not_found(self) -> None:
+        class Downloader:
+            def download_message_resource(self, **kwargs: object) -> DownloadedLarkResource:
+                return DownloadedLarkResource(
+                    content=_png_1x1(),
+                    content_type="image/png",
+                    filename="clean.png",
+                )
+
+        attachment = materialize_attachment(
+            attachment=self._watermarked_attachment(),
+            lark=Downloader(),
+            store=LocalResourceStore(Path(tempfile.mkdtemp())),
+            watermark_decoder=self._decoder(),  # type: ignore[arg-type]
+        )
+        self.assertEqual(attachment.watermark, NO_WATERMARK_NOTE)
+
+    def test_materialize_without_decoder_is_silent(self) -> None:
+        # Feature off (no decoder wired) must not fabricate a note: the
+        # watermark line stays absent entirely.
+        class Downloader:
+            def download_message_resource(self, **kwargs: object) -> DownloadedLarkResource:
+                return DownloadedLarkResource(
+                    content=_png_1x1(),
+                    content_type="image/png",
+                    filename="clean.png",
+                )
+
+        attachment = materialize_attachment(
+            attachment=self._watermarked_attachment(),
+            lark=Downloader(),
+            store=LocalResourceStore(Path(tempfile.mkdtemp())),
+        )
         self.assertEqual(attachment.watermark, "")
+
+    def test_materialize_reports_watermark_decode_failure(self) -> None:
+        # An envelope that cannot be decrypted with the configured key must
+        # surface a visible failure note, not silently drop the watermark line.
+        class Downloader:
+            def download_message_resource(self, **kwargs: object) -> DownloadedLarkResource:
+                return DownloadedLarkResource(
+                    content=WatermarkPipelineTest.watermarked_png,
+                    content_type="image/png",
+                    filename="bug screenshot.png",
+                )
+
+        other_private, _other_public = _keypair()
+        wrong_decoder = WatermarkResourceDecoder(
+            key_store=WatermarkKeyStore(keys={DEFAULT_KEY_ID: other_private})
+        )
+        attachment = materialize_attachment(
+            attachment=self._watermarked_attachment(),
+            lark=Downloader(),
+            store=LocalResourceStore(Path(tempfile.mkdtemp())),
+            watermark_decoder=wrong_decoder,
+        )
+        self.assertEqual(attachment.watermark, watermark_failure_note(ERROR_DECRYPT))
 
     def test_render_attachments_markdown_emits_watermark_line(self) -> None:
         copy = {
@@ -470,6 +534,66 @@ class WatermarkPipelineTest(unittest.TestCase):
         }
         restored = intake_record_from_dict(as_dict)
         self.assertEqual(restored.attachments[0].watermark, self.compact)
+
+    def test_render_attachments_markdown_emits_not_found_note(self) -> None:
+        copy = {
+            "open_asset": "open asset",
+            "preview": "preview",
+            "image_alt": "image",
+            "generated_description": "generated description",
+            "none": "none",
+        }
+        markdown = render_attachments_markdown(
+            (Attachment(kind="image", url="https://assets/x.png", watermark=NO_WATERMARK_NOTE),),
+            copy=copy,
+        )
+        self.assertIn(f"- watermark: {NO_WATERMARK_NOTE}", markdown)
+
+    def test_extract_media_evidence_parses_not_found_note(self) -> None:
+        markdown = (
+            "- image: https://assets/x.png\n"
+            f"  - watermark: {NO_WATERMARK_NOTE}\n"
+        )
+        evidence = extract_media_evidence(markdown)
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0].watermark, NO_WATERMARK_NOTE)
+
+    def test_render_triage_context_markdown_renders_not_found_note(self) -> None:
+        issue = GitHubIssue(
+            number=2,
+            url="https://github.test/org/repo/issues/2",
+            title="clean screen",
+            body="report",
+        )
+        context = TriageContext(
+            issue=issue,
+            comments=(),
+            prd_hits=(),
+            media=(
+                MediaEvidence(
+                    kind="image",
+                    url="https://assets/x.png",
+                    watermark=NO_WATERMARK_NOTE,
+                ),
+            ),
+        )
+        markdown = render_triage_context_markdown(context)
+        self.assertIn(f"  - Watermark: {NO_WATERMARK_NOTE}", markdown)
+
+    def test_intake_record_from_dict_round_trips_not_found_note(self) -> None:
+        attachments = (Attachment(kind="image", url="u", watermark=NO_WATERMARK_NOTE),)
+        as_dict = {
+            "reporter_name": "Reporter",
+            "reporter_open_id": "ou_1",
+            "created_at": "2026-08-25T00:00:00Z",
+            "chat_id": "oc_1",
+            "root_id": "om_1",
+            "message_id": "om_1",
+            "original_text": "bug",
+            "attachments": [vars(a) for a in attachments],
+        }
+        restored = intake_record_from_dict(as_dict)
+        self.assertEqual(restored.attachments[0].watermark, NO_WATERMARK_NOTE)
 
 
 class WatermarkCliTest(unittest.TestCase):
