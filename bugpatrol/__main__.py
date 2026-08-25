@@ -75,6 +75,15 @@ from bugpatrol.triage_runner import (
 )
 from bugpatrol.watch_mail import MailIntakeWorkflow, run_mail_watcher
 from bugpatrol.watcher import GitHubTriageStatusReader, run_polling_watcher
+from bugpatrol.watermark import (
+    ENV_KEYS_JSON,
+    ENV_PRIVATE_KEY,
+    ERROR_NOT_FOUND,
+    WatermarkDecodeResult,
+    WatermarkResourceDecoder,
+    decode_image,
+    render_payload_summary,
+)
 from bugpatrol.worktree import (
     SubprocessGitDriver,
     resolve_reference_branch,
@@ -162,6 +171,42 @@ def media_resource_transformer(config) -> ResourceTransformer | None:  # type: i
     if len(transformers) == 1:
         return transformers[0]
     return CompositeResourceTransformer(tuple(transformers))
+
+
+def configured_watermark_decoder() -> WatermarkResourceDecoder | None:
+    """Return a watermark decoder only when a private key is configured.
+
+    The pipeline feature is opt-in via secrets. Without a key the decoder would
+    report ``watermark_private_key_missing`` on every image — noise — so None
+    (the common unconfigured case) makes materialization skip decode entirely.
+    """
+    if os.environ.get(ENV_PRIVATE_KEY, "").strip() or os.environ.get(ENV_KEYS_JSON, "").strip():
+        return WatermarkResourceDecoder()
+    return None
+
+
+def _run_watermark_decode(args) -> int:  # type: ignore[no-untyped-def]
+    path = args.image.expanduser()
+    if not path.is_file():
+        print(
+            json.dumps({"found": False, "confidence": 0, "error": "watermark_image_not_found"}, ensure_ascii=False)
+        )
+        return 2
+    result = decode_image(path)
+    if args.json:
+        print(json.dumps(result.to_dict(), ensure_ascii=False))
+    else:
+        _print_watermark_human(result)
+    return 0 if (result.found or result.error == ERROR_NOT_FOUND) else 1
+
+
+def _print_watermark_human(result: WatermarkDecodeResult) -> None:
+    if not result.found:
+        print(f"no watermark: {result.error}")
+        return
+    print(f"watermark found (keyId={result.key_id}, confidence={result.confidence})")
+    if result.payload is not None:
+        print(render_payload_summary(result.payload))
 
 
 def _optional_lark_client(config) -> LarkOpenApiMessengerClient | None:  # type: ignore[no-untyped-def]
@@ -514,7 +559,18 @@ def main(argv: list[str] | None = None) -> int:
     cleanup_assets.add_argument("--delete", action="store_true", help="delete matching files or directories")
     cleanup_assets.add_argument("--push", action="store_true", help="commit and push after --delete")
 
+    watermark = sub.add_parser("watermark", help="decode diagnostic watermarks from screenshots")
+    watermark_sub = watermark.add_subparsers(dest="watermark_command", required=True)
+    watermark_decode = watermark_sub.add_parser("decode", help="decode and decrypt a watermark from an image")
+    watermark_decode.add_argument("--image", type=Path, required=True, help="path to the screenshot image")
+    watermark_decode.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+
     args = parser.parse_args(argv)
+
+    if args.command == "watermark":
+        if args.watermark_command == "decode":
+            return _run_watermark_decode(args)
+        return 2
 
     if args.command == "validate-config":
         config = load_project_config(args.path)
@@ -594,6 +650,7 @@ def main(argv: list[str] | None = None) -> int:
         resource_redactor = media_resource_redactor(config)
         resource_transformer = media_resource_transformer(config)
         resource_policy = media_resource_policy(config)
+        watermark_decoder = configured_watermark_decoder()
         result = run_lark_backfill(
             root_allowlist=tuple(args.root),
             config=config,
@@ -607,6 +664,7 @@ def main(argv: list[str] | None = None) -> int:
             resource_policy=resource_policy,
             resource_redactor=resource_redactor,
             resource_transformer=resource_transformer,
+            watermark_decoder=watermark_decoder,
         )
         print(
             json.dumps(
@@ -688,6 +746,7 @@ def main(argv: list[str] | None = None) -> int:
         resource_redactor = media_resource_redactor(config)
         resource_transformer = media_resource_transformer(config)
         resource_policy = media_resource_policy(config)
+        watermark_decoder = configured_watermark_decoder()
         slash_handler = SlashCommandHandler(
             config=config,
             github=github,
@@ -715,6 +774,7 @@ def main(argv: list[str] | None = None) -> int:
             resource_policy=resource_policy,
             resource_redactor=resource_redactor,
             resource_transformer=resource_transformer,
+            watermark_decoder=watermark_decoder,
             event_log_path=args.event_log,
             processed_ledger_path=args.processed_ledger,
             lease_file=args.lease_file,
@@ -789,6 +849,7 @@ def main(argv: list[str] | None = None) -> int:
                 branch=config.assets.branch,
                 remote_url=config.assets.remote_url,
             )
+        watermark_decoder = configured_watermark_decoder()
         result = run_mail_watcher(
             config=config,
             mail=mail,
@@ -803,6 +864,7 @@ def main(argv: list[str] | None = None) -> int:
             resource_policy=media_resource_policy(config),
             resource_redactor=media_resource_redactor(config),
             resource_transformer=media_resource_transformer(config),
+            watermark_decoder=watermark_decoder,
             event_log_path=args.event_log,
             processed_ledger_path=args.processed_ledger,
             lease_file=args.lease_file,
@@ -857,6 +919,7 @@ def main(argv: list[str] | None = None) -> int:
         resource_redactor = media_resource_redactor(config)
         resource_transformer = media_resource_transformer(config)
         resource_policy = media_resource_policy(config)
+        watermark_decoder = configured_watermark_decoder()
         result = run_lark_event_watcher(
             config=config,
             event_payloads=iter_json_event_lines(sys.stdin),
@@ -869,6 +932,7 @@ def main(argv: list[str] | None = None) -> int:
             resource_policy=resource_policy,
             resource_redactor=resource_redactor,
             resource_transformer=resource_transformer,
+            watermark_decoder=watermark_decoder,
             event_log_path=args.event_log,
             processed_ledger_path=args.processed_ledger,
             triage_queue_path=args.triage_queue,

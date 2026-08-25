@@ -34,6 +34,7 @@ from bugpatrol.resources import (
     ResourceTransformer,
 )
 from bugpatrol.triage_queue import CommandTriageDispatcher, TriageRequest, TriageRequestQueue
+from bugpatrol.watermark.types import WatermarkDecoder
 
 
 # Transient Lark scan failures tolerated before the watcher gives up and
@@ -169,6 +170,7 @@ def run_polling_watcher(
     resource_policy: ResourcePolicy | None = None,
     resource_redactor: ResourceRedactor | None = None,
     resource_transformer: ResourceTransformer | None = None,
+    watermark_decoder: WatermarkDecoder | None = None,
     event_log_path: Path | None = None,
     event_log: JsonlEventLog | None = None,
     processed_ledger_path: Path | None = None,
@@ -294,6 +296,7 @@ def run_polling_watcher(
                         resource_policy=resource_policy,
                         resource_redactor=resource_redactor,
                         resource_transformer=resource_transformer,
+                        watermark_decoder=watermark_decoder,
                         branch_tip_resolver=branch_tip_resolver,
                         slash_handler=slash_handler,
                     )

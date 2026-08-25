@@ -71,6 +71,7 @@ from bugpatrol.watcher import (
     dispatch_due_triage,
     enqueue_triage_outcomes,
 )
+from bugpatrol.watermark.types import WatermarkDecoder
 
 
 @dataclass(frozen=True)
@@ -468,6 +469,7 @@ def materialize_mail_attachments(
     policy: ResourcePolicy | None = None,
     redactor: ResourceRedactor | None = None,
     transformer: ResourceTransformer | None = None,
+    watermark_decoder: WatermarkDecoder | None = None,
 ) -> tuple[Attachment, ...]:
     """Download non-inline mail attachments through the shared resource pipeline.
 
@@ -494,6 +496,7 @@ def materialize_mail_attachments(
                 policy=policy,
                 redactor=redactor,
                 transformer=transformer,
+                watermark_decoder=watermark_decoder,
             )
         )
     return tuple(result)
@@ -553,6 +556,7 @@ def run_mail_watcher(
     resource_policy: ResourcePolicy | None = None,
     resource_redactor: ResourceRedactor | None = None,
     resource_transformer: ResourceTransformer | None = None,
+    watermark_decoder: WatermarkDecoder | None = None,
     event_log_path: Path | None = None,
     event_log: JsonlEventLog | None = None,
     processed_ledger_path: Path | None = None,
@@ -709,6 +713,7 @@ def run_mail_watcher(
                         policy=resource_policy,
                         redactor=resource_redactor,
                         transformer=resource_transformer,
+                        watermark_decoder=watermark_decoder,
                     )
                 record = build_mail_record(
                     config=config,

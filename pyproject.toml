@@ -12,6 +12,7 @@ authors = [{name = "Verne"}]
 keywords = ["lark", "github", "codex", "triage", "bugops"]
 dependencies = [
   "pillow>=10",
+  "cryptography>=42",
 ]
 
 [project.optional-dependencies]

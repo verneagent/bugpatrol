@@ -22,6 +22,10 @@ class Attachment:
     kind: str
     url: str
     description: str = ""
+    # Compact JSON of a decoded diagnostic watermark payload ("" when absent).
+    # Rendered as a machine-readable `- watermark:` line in the issue body so
+    # triage context can feed it to the agent before downstream analysis.
+    watermark: str = ""
 
 
 @dataclass(frozen=True)
@@ -53,6 +57,7 @@ def intake_record_from_dict(data: dict[str, Any]) -> IntakeRecord:
             kind=_required_str(_required_dict(item, "attachment"), "kind"),
             url=_required_str(_required_dict(item, "attachment"), "url"),
             description=str(_required_dict(item, "attachment").get("description") or ""),
+            watermark=str(_required_dict(item, "attachment").get("watermark") or ""),
         )
         for item in raw_attachments
     )
@@ -329,6 +334,8 @@ def render_attachments_markdown(attachments: tuple[Attachment, ...], *, copy: di
             lines.append(f"    ![{copy['image_alt']} {index}]({url})")
         if item.description:
             lines.append(f"  - {copy['generated_description']}: {item.description}")
+        if item.watermark:
+            lines.append(f"  - watermark: {item.watermark}")
     return "\n".join(lines)
 
 

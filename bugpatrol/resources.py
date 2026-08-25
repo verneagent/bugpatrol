@@ -8,13 +8,15 @@ import sys
 import tempfile
 import threading
 import time
-from io import BytesIO
+from collections.abc import Callable
 from dataclasses import dataclass, replace
+from io import BytesIO
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Protocol
 
 from bugpatrol.intake import Attachment, IntakeRecord
 from bugpatrol.lark import DownloadedLarkResource
+from bugpatrol.watermark.types import ERROR_KEY_MISSING, ERROR_NOT_FOUND, WatermarkDecoder
 
 LARK_RESOURCE_RE = re.compile(r"^lark://message/([^/]+)/([^/]+)/([^/]+)$")
 
@@ -64,27 +66,27 @@ class LarkResourceDownloader(Protocol):
 
 
 class ResourceStore(Protocol):
-    def write(self, *, ref: "LarkResourceRef", resource: DownloadedLarkResource) -> Path | str:
+    def write(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> Path | str:
         """Persist a downloaded resource and return the URL/path to put in intake."""
 
 
 class ResourceDescriber(Protocol):
-    def describe(self, *, ref: "LarkResourceRef", resource: DownloadedLarkResource) -> str:
+    def describe(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> str:
         """Return a textual media description for triage."""
 
 
 class ResourceRedactor(Protocol):
-    def redact(self, *, ref: "LarkResourceRef", resource: DownloadedLarkResource) -> DownloadedLarkResource:
+    def redact(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> DownloadedLarkResource:
         """Return a redacted resource before upload or vision."""
 
 
 class ResourceTransformer(Protocol):
-    def transform(self, *, ref: "LarkResourceRef", resource: DownloadedLarkResource) -> DownloadedLarkResource:
+    def transform(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> DownloadedLarkResource:
         """Return a normalized resource before policy, upload, and vision."""
 
 
 class VideoDurationProbe(Protocol):
-    def duration_seconds(self, *, ref: "LarkResourceRef", resource: DownloadedLarkResource) -> float:
+    def duration_seconds(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> float:
         """Return video duration in seconds."""
 
 
@@ -96,7 +98,7 @@ class ResourcePolicy:
     max_video_duration_seconds: float = 0.0
     video_duration_probe: VideoDurationProbe | None = None
 
-    def rejection_reason(self, *, ref: "LarkResourceRef", resource: DownloadedLarkResource) -> str:
+    def rejection_reason(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> str:
         limit = self._limit_for(ref=ref, resource=resource)
         if limit > 0 and len(resource.content) > limit:
             return f"resource skipped: {ref.kind} is {len(resource.content)} bytes, limit is {limit} bytes"
@@ -112,7 +114,7 @@ class ResourcePolicy:
                 )
         return ""
 
-    def _limit_for(self, *, ref: "LarkResourceRef", resource: DownloadedLarkResource) -> int:
+    def _limit_for(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> int:
         content_type = resource.content_type.split(";", 1)[0].strip().lower()
         if ref.kind == "image" or content_type.startswith("image/"):
             return self.max_image_bytes
@@ -128,7 +130,7 @@ class CompositeResourceTransformer:
     def __init__(self, transformers: tuple[ResourceTransformer, ...]) -> None:
         self._transformers = transformers
 
-    def transform(self, *, ref: "LarkResourceRef", resource: DownloadedLarkResource) -> DownloadedLarkResource:
+    def transform(self, *, ref: LarkResourceRef, resource: DownloadedLarkResource) -> DownloadedLarkResource:
         transformed = resource
         for transformer in self._transformers:
             transformed = transformer.transform(ref=ref, resource=transformed)
@@ -561,6 +563,7 @@ def materialize_lark_attachments(
     policy: ResourcePolicy | None = None,
     redactor: ResourceRedactor | None = None,
     transformer: ResourceTransformer | None = None,
+    watermark_decoder: WatermarkDecoder | None = None,
 ) -> IntakeRecord:
     attachments = tuple(
         materialize_attachment(
@@ -571,6 +574,7 @@ def materialize_lark_attachments(
             policy=policy,
             redactor=redactor,
             transformer=transformer,
+            watermark_decoder=watermark_decoder,
         )
         for attachment in record.attachments
     )
@@ -586,6 +590,7 @@ def materialize_attachment(
     policy: ResourcePolicy | None = None,
     redactor: ResourceRedactor | None = None,
     transformer: ResourceTransformer | None = None,
+    watermark_decoder: WatermarkDecoder | None = None,
 ) -> Attachment:
     ref = parse_lark_resource_url(attachment.url)
     if ref is None:
@@ -595,6 +600,11 @@ def materialize_attachment(
         resource_key=ref.resource_key,
         resource_type=_download_resource_type(ref.kind),
     )
+    # Decode the invisible watermark on the ORIGINAL downloaded bytes, before any
+    # redaction/transform re-encodes the image (which would strip the carrier).
+    # This is "before normal image analysis": the vision describer runs later and
+    # the decoded metadata rides into the issue body via Attachment.watermark.
+    watermark = _decode_watermark(watermark_decoder, ref=ref, resource=resource)
     if redactor is not None:
         resource = redactor.redact(ref=ref, resource=resource)
     if transformer is not None:
@@ -613,6 +623,7 @@ def materialize_attachment(
         kind=attachment.kind,
         url=str(path),
         description=description,
+        watermark=watermark,
     )
 
 
@@ -660,6 +671,36 @@ def _extension_for_content_type(content_type: str) -> str:
 def _is_image_resource(*, ref: LarkResourceRef, resource: DownloadedLarkResource) -> bool:
     content_type = resource.content_type.split(";", 1)[0].strip().lower()
     return ref.kind == "image" or content_type.startswith("image/")
+
+
+def _decode_watermark(
+    decoder: WatermarkDecoder | None,
+    *,
+    ref: LarkResourceRef,
+    resource: DownloadedLarkResource,
+) -> str:
+    """Decode an embedded watermark into a compact JSON string ("" if absent).
+
+    Runs on the raw downloaded bytes, before any re-encode. A missing private
+    key and a watermarked-free image are normal "feature off / no watermark"
+    states and stay silent; genuine decode failures (corrupt envelope, unknown
+    keyId, bad payload) are surfaced on stderr and skipped so a watermark
+    failure never blocks intake.
+    """
+    if decoder is None or not _is_image_resource(ref=ref, resource=resource):
+        return ""
+    from bugpatrol.watermark.reporter import payload_to_compact_json
+
+    result = decoder.decode(resource.content)
+    if result.found and result.payload is not None:
+        return payload_to_compact_json(result.payload)
+    if result.error not in (ERROR_NOT_FOUND, ERROR_KEY_MISSING):
+        print(
+            f"resource watermark decode failed "
+            f"({ref.message_id}/{ref.resource_key}): {result.error}",
+            file=sys.stderr,
+        )
+    return ""
 
 
 def _is_video_resource(*, ref: LarkResourceRef, resource: DownloadedLarkResource) -> bool:

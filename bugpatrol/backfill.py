@@ -26,6 +26,7 @@ from bugpatrol.resources import (
     materialize_lark_attachments,
 )
 from bugpatrol.slash_commands import SlashCommandHandler
+from bugpatrol.watermark.types import WatermarkDecoder
 
 
 # branch name -> best-effort remote tip SHA (or "" when unavailable). Injected
@@ -125,6 +126,7 @@ def run_lark_backfill(
     resource_policy: ResourcePolicy | None = None,
     resource_redactor: ResourceRedactor | None = None,
     resource_transformer: ResourceTransformer | None = None,
+    watermark_decoder: WatermarkDecoder | None = None,
     processed_ledger: MessageLedger | None = None,
     root_allowlist: tuple[str, ...] = (),
     branch_tip_resolver: BranchTipResolver | None = None,
@@ -196,6 +198,7 @@ def run_lark_backfill(
             resource_policy=resource_policy,
             resource_redactor=resource_redactor,
             resource_transformer=resource_transformer,
+            watermark_decoder=watermark_decoder,
             branch_tip_resolver=branch_tip_resolver,
         )
         events.extend(group_events)
@@ -225,6 +228,7 @@ def _build_intake_record(
     resource_policy: ResourcePolicy | None = None,
     resource_redactor: ResourceRedactor | None = None,
     resource_transformer: ResourceTransformer | None = None,
+    watermark_decoder: WatermarkDecoder | None = None,
     branch_tip_resolver: BranchTipResolver | None = None,
 ) -> IntakeRecord | None:
     """Build the intake record for one message (branch resolve + materialize).
@@ -255,6 +259,7 @@ def _build_intake_record(
             policy=resource_policy,
             redactor=resource_redactor,
             transformer=resource_transformer,
+            watermark_decoder=watermark_decoder,
         )
     return record
 
@@ -271,6 +276,7 @@ def _process_message_group(
     resource_policy: ResourcePolicy | None = None,
     resource_redactor: ResourceRedactor | None = None,
     resource_transformer: ResourceTransformer | None = None,
+    watermark_decoder: WatermarkDecoder | None = None,
     branch_tip_resolver: BranchTipResolver | None = None,
     slash_handler: SlashCommandHandler | None = None,
 ) -> tuple[IntakeOutcome | None, list[BackfillEvent], list[str], str]:
@@ -345,6 +351,7 @@ def _process_message_group(
                 resource_policy=resource_policy,
                 resource_redactor=resource_redactor,
                 resource_transformer=resource_transformer,
+                watermark_decoder=watermark_decoder,
                 branch_tip_resolver=branch_tip_resolver,
             )
         except Exception as exc:  # noqa: BLE001 - report and retry the rest next scan
@@ -432,6 +439,7 @@ def process_topic_batch(
     resource_policy: ResourcePolicy | None = None,
     resource_redactor: ResourceRedactor | None = None,
     resource_transformer: ResourceTransformer | None = None,
+    watermark_decoder: WatermarkDecoder | None = None,
     branch_tip_resolver: BranchTipResolver | None = None,
     slash_handler: SlashCommandHandler | None = None,
 ) -> TopicResult:
@@ -449,6 +457,7 @@ def process_topic_batch(
         resource_policy=resource_policy,
         resource_redactor=resource_redactor,
         resource_transformer=resource_transformer,
+        watermark_decoder=watermark_decoder,
         branch_tip_resolver=branch_tip_resolver,
         slash_handler=slash_handler,
     )

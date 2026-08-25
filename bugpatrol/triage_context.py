@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import json
 import re
 
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment
 from bugpatrol.openspec import OpenSpecChange, OpenSpecOwnerHit, score_openspec_changes
 from bugpatrol.prd import PrdSearchHit, load_prd_documents, search_prd_documents
+from bugpatrol.watermark.reporter import render_payload_summary
 
 
 MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\((?P<url>https?://[^)\s]+)\)")
@@ -20,6 +22,8 @@ class MediaEvidence:
     url: str
     description: str = ""
     source: str = ""
+    # Compact JSON of the decoded diagnostic watermark payload ("" when absent).
+    watermark: str = ""
 
 
 @dataclass(frozen=True)
@@ -188,6 +192,8 @@ def render_triage_context_markdown(context: TriageContext) -> str:
         lines.append(f"- {item.kind}: {item.url}")
         if item.description:
             lines.append(f"  - Description: {item.description}")
+        if item.watermark:
+            lines.append(f"  - Watermark: {_watermark_summary(item.watermark)}")
         if item.source:
             lines.append(f"  - Source: {item.source}")
     lines.extend(
@@ -239,7 +245,29 @@ def extract_media_evidence(markdown: str, *, source: str = "") -> tuple[MediaEvi
                 description=description,
                 source=current.source,
             )
+            continue
+        if line.startswith("- watermark:"):
+            watermark = line.split(":", 1)[1].strip()
+            current = items[current_index]
+            items[current_index] = MediaEvidence(
+                kind=current.kind,
+                url=current.url,
+                description=current.description,
+                source=current.source,
+                watermark=watermark,
+            )
     return tuple(items)
+
+
+def _watermark_summary(watermark: str) -> str:
+    """Render a stored compact watermark JSON as a readable triage line."""
+    try:
+        payload = json.loads(watermark)
+    except ValueError:
+        return watermark
+    if isinstance(payload, dict):
+        return render_payload_summary(payload)
+    return watermark
 
 
 def extract_url(value: str) -> str:

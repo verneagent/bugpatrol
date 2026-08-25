@@ -32,6 +32,7 @@ from bugpatrol.resources import (
     materialize_lark_attachments,
 )
 from bugpatrol.triage_queue import CommandTriageDispatcher, TriageRequestQueue
+from bugpatrol.watermark.types import WatermarkDecoder
 from bugpatrol.watcher import (
     TriageDispatcher,
     TriageStatusReader,
@@ -102,6 +103,7 @@ def run_lark_event_watcher(
     resource_policy: ResourcePolicy | None = None,
     resource_redactor: ResourceRedactor | None = None,
     resource_transformer: ResourceTransformer | None = None,
+    watermark_decoder: WatermarkDecoder | None = None,
     event_log_path: Path | None = None,
     event_log: JsonlEventLog | None = None,
     processed_ledger_path: Path | None = None,
@@ -204,6 +206,7 @@ def run_lark_event_watcher(
                 policy=resource_policy,
                 redactor=resource_redactor,
                 transformer=resource_transformer,
+                watermark_decoder=watermark_decoder,
             )
         outcome = workflow.process(record)
         outcomes.append(outcome)
