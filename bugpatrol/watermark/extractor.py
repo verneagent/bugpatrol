@@ -1,13 +1,17 @@
 """Extract an encrypted watermark envelope from image bytes.
 
-The app embeds the encrypted envelope (a base64-encoded JSON object) into a
-screenshot using a deterministic carrier. Two carriers are supported, both of
-which survive normal image capture:
+The app embeds the encrypted envelope JSON into a screenshot using a
+deterministic pixel carrier. Legacy byte carriers are still supported for
+existing fixtures and reference tools:
 
-1. **Trailer carrier** (canonical): the bytes ``BUGPATROL_WM1:<b64>:BUGPATROL_WM1``
-   are appended after the image's natural end. PNG viewers stop at IEND and JPEG
-   decoders stop at EOI, so the trailer is invisible but present in the file.
-2. **PNG text-chunk carrier**: a PNG ``tEXt`` chunk with keyword
+1. **Screenshot pixel carrier** (canonical): the app renders a root overlay
+   into every native screenshot. Adjacent light/dark cells encode the encrypted
+   envelope while mostly cancelling out visually against the page.
+2. **Trailer carrier** (legacy/reference): the bytes
+   ``BUGPATROL_WM1:<b64>:BUGPATROL_WM1`` are appended after the image's natural
+   end. PNG viewers stop at IEND and JPEG decoders stop at EOI, so the trailer is
+   invisible but present in the file.
+3. **PNG text-chunk carrier** (legacy/reference): a PNG ``tEXt`` chunk with keyword
    ``bugpatrol.watermark`` whose value is the base64 envelope.
 
 This module is deterministic — it only locates and decodes the carrier. It does
@@ -17,9 +21,14 @@ not decrypt (see ``decryptor``) and never runs a model.
 from __future__ import annotations
 
 import base64
+import io
 import json
+import math
 import struct
 import zlib
+from typing import cast
+
+from PIL import Image, ImageDraw, UnidentifiedImageError
 
 CARRIER_START = b"BUGPATROL_WM1:"
 CARRIER_END = b":BUGPATROL_WM1"
@@ -30,6 +39,14 @@ PNG_WATERMARK_KEYWORD = b"bugpatrol.watermark"
 MAX_ENVELOPE_BYTES = 512 * 1024
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+PIXEL_BIT_COLUMNS = 128
+PIXEL_BIT_ROWS = 256
+PIXEL_LENGTH_BITS = 16
+PIXEL_WIDTH_MODULES = PIXEL_BIT_COLUMNS * 2
+PIXEL_HEIGHT_MODULES = PIXEL_BIT_ROWS
+PIXEL_OFFSET_MODULES = 6
+PIXEL_MAX_ENVELOPE_BYTES = (PIXEL_BIT_COLUMNS * PIXEL_BIT_ROWS - PIXEL_LENGTH_BITS) // 8
+PIXEL_SCALE_CANDIDATES = tuple(1.0 + index * 0.125 for index in range(25))
 
 
 class WatermarkInvalidEnvelope(Exception):
@@ -49,6 +66,9 @@ def extract_envelope_bytes(data: bytes) -> bytes | None:
         from_chunk = _extract_from_png_text_chunk(data)
         if from_chunk is not None:
             return from_chunk
+    from_pixels = _extract_from_screenshot_pixels(data)
+    if from_pixels is not None:
+        return from_pixels
     return None
 
 
@@ -65,6 +85,36 @@ def embed_png_text_envelope(png_bytes: bytes, envelope: dict[str, object]) -> by
     encoded = base64.b64encode(_compact_json_bytes(envelope))
     text_chunk = _png_text_chunk(keyword=PNG_WATERMARK_KEYWORD, text=encoded)
     return _insert_chunk_before_iend(png_bytes, text_chunk)
+
+
+def embed_screenshot_pixel_envelope(
+    image_bytes: bytes,
+    envelope: dict[str, object],
+    *,
+    scale: float = 2,
+    corner: str = "top_left",
+) -> bytes:
+    """Overlay the screenshot-time paired-cell pixel carrier on a PNG fixture.
+
+    This mirrors the app's root overlay: each bit is encoded as adjacent
+    light/dark cells so local background cancels out during extraction.
+    """
+    envelope_bytes = _compact_json_bytes(envelope)
+    if len(envelope_bytes) > PIXEL_MAX_ENVELOPE_BYTES:
+        raise ValueError("envelope is too large for screenshot pixel carrier")
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    origin_x, origin_y = _pixel_origin(image.width, image.height, scale, corner)
+    draw = ImageDraw.Draw(image, "RGBA")
+    for bit_index, bit in enumerate(_pixel_bits(envelope_bytes)):
+        x = origin_x + (bit_index % PIXEL_BIT_COLUMNS) * 2 * scale
+        y = origin_y + (bit_index // PIXEL_BIT_COLUMNS) * scale
+        dark_x = x if bit == 1 else x + scale
+        light_x = x + scale if bit == 1 else x
+        draw.rectangle((light_x, y, light_x + scale - 1, y + scale - 1), fill=(255, 255, 255, 13))
+        draw.rectangle((dark_x, y, dark_x + scale - 1, y + scale - 1), fill=(0, 0, 0, 13))
+    out = io.BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
 
 
 def _extract_from_markers(data: bytes) -> bytes | None:
@@ -133,6 +183,127 @@ def _decode_envelope_raw(raw: bytes) -> bytes | None:
     if not isinstance(parsed, dict):
         raise WatermarkInvalidEnvelope("watermark envelope must be a JSON object")
     return _compact_json_bytes(parsed)
+
+
+def _extract_from_screenshot_pixels(data: bytes) -> bytes | None:
+    try:
+        image = Image.open(io.BytesIO(data)).convert("RGB")
+    except (UnidentifiedImageError, OSError):
+        return None
+    for scale in PIXEL_SCALE_CANDIDATES:
+        if image.width < PIXEL_WIDTH_MODULES * scale or image.height < PIXEL_HEIGHT_MODULES * scale:
+            continue
+        for corner in ("top_left", "bottom_right"):
+            raw = _read_pixel_carrier_at(image, scale=scale, corner=corner)
+            if raw is None:
+                continue
+            try:
+                return _decode_pixel_envelope(raw)
+            except WatermarkInvalidEnvelope:
+                continue
+    return None
+
+
+def _read_pixel_carrier_at(image: Image.Image, *, scale: float, corner: str) -> bytes | None:
+    origin_x, origin_y = _pixel_origin(image.width, image.height, scale, corner)
+    length = 0
+    for bit_index in range(PIXEL_LENGTH_BITS):
+        bit = _read_pixel_bit(image, origin_x=origin_x, origin_y=origin_y, scale=scale, bit_index=bit_index)
+        if bit is None:
+            return None
+        length = (length << 1) | bit
+    if length <= 0 or length > PIXEL_MAX_ENVELOPE_BYTES:
+        return None
+    values = bytearray()
+    for byte_index in range(length):
+        value = 0
+        for bit_in_byte in range(8):
+            bit_index = PIXEL_LENGTH_BITS + byte_index * 8 + bit_in_byte
+            bit = _read_pixel_bit(image, origin_x=origin_x, origin_y=origin_y, scale=scale, bit_index=bit_index)
+            if bit is None:
+                return None
+            value = (value << 1) | bit
+        values.append(value)
+    return bytes(values)
+
+
+def _read_pixel_bit(
+    image: Image.Image,
+    *,
+    origin_x: int,
+    origin_y: int,
+    scale: float,
+    bit_index: int,
+) -> int | None:
+    x = origin_x + (bit_index % PIXEL_BIT_COLUMNS) * 2 * scale
+    y = origin_y + (bit_index // PIXEL_BIT_COLUMNS) * scale
+    left = _sample_cell_luma(image, x, y, scale)
+    right = _sample_cell_luma(image, x + scale, y, scale)
+    if left is None or right is None:
+        return None
+    delta = left - right
+    if abs(delta) < 0.25:
+        return None
+    return 1 if delta < 0 else 0
+
+
+def _sample_cell_luma(image: Image.Image, x: float, y: float, scale: float) -> float | None:
+    start_x = max(0, math.floor(x))
+    end_x = min(image.width - 1, math.ceil(x + scale) - 1)
+    start_y = max(0, math.floor(y))
+    end_y = min(image.height - 1, math.ceil(y + scale) - 1)
+    if start_x > end_x or start_y > end_y:
+        return None
+    total = 0.0
+    count = 0
+    for py in range(start_y, end_y + 1):
+        for px in range(start_x, end_x + 1):
+            value = _sample_luma(image, px, py)
+            if value is None:
+                continue
+            total += value
+            count += 1
+    return total / count if count > 0 else None
+
+
+def _sample_luma(image: Image.Image, x: float, y: float) -> float | None:
+    px = round(x)
+    py = round(y)
+    if px < 0 or py < 0 or px >= image.width or py >= image.height:
+        return None
+    r, g, b = cast(tuple[int, int, int], image.getpixel((px, py)))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _decode_pixel_envelope(raw: bytes) -> bytes:
+    if len(raw) > MAX_ENVELOPE_BYTES:
+        raise WatermarkInvalidEnvelope("watermark payload is too large")
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WatermarkInvalidEnvelope("watermark pixel payload is not valid envelope JSON") from exc
+    if not isinstance(parsed, dict):
+        raise WatermarkInvalidEnvelope("watermark pixel envelope must be a JSON object")
+    return _compact_json_bytes(parsed)
+
+
+def _pixel_origin(width: int, height: int, scale: float, corner: str) -> tuple[int, int]:
+    offset = round(PIXEL_OFFSET_MODULES * scale)
+    carrier_width = round(PIXEL_WIDTH_MODULES * scale)
+    carrier_height = round(PIXEL_HEIGHT_MODULES * scale)
+    if corner == "bottom_right":
+        return width - carrier_width - offset, height - carrier_height - offset
+    return offset, offset
+
+
+def _pixel_bits(envelope_bytes: bytes) -> tuple[int, ...]:
+    bits: list[int] = []
+    for shift in range(PIXEL_LENGTH_BITS - 1, -1, -1):
+        bits.append((len(envelope_bytes) >> shift) & 1)
+    for byte in envelope_bytes:
+        for shift in range(7, -1, -1):
+            bits.append((byte >> shift) & 1)
+    return tuple(bits)
 
 
 def _compact_json_bytes(obj: dict[str, object]) -> bytes:

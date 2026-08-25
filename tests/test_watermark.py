@@ -60,6 +60,7 @@ from bugpatrol.watermark import (
     decode_image,
     embed_envelope_trailer,
     embed_png_text_envelope,
+    embed_screenshot_pixel_envelope,
     payload_to_compact_json,
     watermark_failure_note,
 )
@@ -115,6 +116,15 @@ def _png_1x1() -> bytes:
     return signature + ihdr + idat + iend
 
 
+def _png_canvas(width: int = 900, height: int = 600) -> bytes:
+    from PIL import Image
+
+    image = Image.new("RGB", (width, height), (142, 137, 129))
+    out = io.BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
+
+
 def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
     length = struct.pack(">I", len(data))
     crc = zlib.crc32(chunk_type + data) & 0xFFFFFFFF
@@ -157,6 +167,18 @@ class WatermarkDecodeTest(unittest.TestCase):
 
     def test_png_text_chunk_carrier_round_trips(self) -> None:
         embedded = embed_png_text_envelope(_png_1x1(), self._envelope())
+        result = decode_image(embedded, key_store=self._store())
+        self.assertTrue(result.found)
+        self.assertEqual(result.payload, _payload())
+
+    def test_screenshot_pixel_carrier_round_trips(self) -> None:
+        embedded = embed_screenshot_pixel_envelope(_png_canvas(), self._envelope(), scale=2)
+        result = decode_image(embedded, key_store=self._store())
+        self.assertTrue(result.found)
+        self.assertEqual(result.payload, _payload())
+
+    def test_screenshot_pixel_carrier_handles_fractional_android_scale(self) -> None:
+        embedded = embed_screenshot_pixel_envelope(_png_canvas(width=1200, height=900), self._envelope(), scale=2.625)
         result = decode_image(embedded, key_store=self._store())
         self.assertTrue(result.found)
         self.assertEqual(result.payload, _payload())

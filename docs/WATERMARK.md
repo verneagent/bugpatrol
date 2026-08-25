@@ -36,12 +36,13 @@ Five Degrees app 在截图里嵌入不可见诊断水印(BugPatrol / app 协作�
 
 ## 载体契约(embedding)
 
-app 把加密 envelope(base64 的 JSON)确定性嵌入截图,两种载体都支持:
+app 把加密 envelope 确定性嵌入截图,三种载体都支持:
 
-1. **Trailer(canonical)**:图片自然结束处追加 `BUGPATROL_WM1:<b64-envelope>:BUGPATROL_WM1`。PNG/JPEG 解码器在 IEND/EOI 处停下,trailer 对用户不可见但文件里存在。
-2. **PNG tEXt chunk**:关键字 `bugpatrol.watermark`,值为 base64 envelope。
+1. **Screenshot pixel carrier(canonical)**:app root 渲染两个低 alpha 的 paired-cell 网格(top-left / bottom-right)。每个 bit 用相邻 light/dark cell 的亮度差编码,所以普通 iOS/Android 系统截图会天然包含水印,不依赖 app 拿到截图文件字节。BugPatrol 用 Pillow 在固定角落/scale 候选上采样并还原 envelope JSON。
+2. **Trailer(legacy/reference)**:图片自然结束处追加 `BUGPATROL_WM1:<b64-envelope>:BUGPATROL_WM1`。PNG/JPEG 解码器在 IEND/EOI 处停下,trailer 对用户不可见但文件里存在。
+3. **PNG tEXt chunk(legacy/reference)**:关键字 `bugpatrol.watermark`,值为 base64 envelope。
 
-提取逻辑:先扫 trailer 标记,再试 PNG tEXt/iTXt chunk。envelope 上限 512KB。
+提取逻辑:先扫 trailer 标记,再试 PNG tEXt/iTXt chunk,最后试 screenshot pixel carrier。byte carrier envelope 上限 512KB;pixel carrier 受屏幕载体容量限制,当前约 4094 bytes。
 
 ## Envelope 格式
 
@@ -83,7 +84,7 @@ bugpatrol watermark decode --image /path/to/screenshot.png --json
 
 ## 流水线接入点
 
-解码在**原始下载字节**上、`redactor`/`transformer` 重编码**之前**执行(resize/JPEG 转码会毁掉载体):
+解码在**原始下载字节**上、`redactor`/`transformer` 重编码**之前**执行(resize/JPEG 转码可能毁掉低 alpha pixel carrier):
 
 `materialize_attachment`(resources.py,RAW bytes→解码→redact→transform→policy→store→describe)→ `Attachment.watermark` → issue body `- watermark: <值>` 行 → `extract_media_evidence` → `MediaEvidence.watermark` → triage context 渲染成 `- Watermark: <摘要>` 供 agent 读取。
 
@@ -100,6 +101,6 @@ bugpatrol watermark decode --image /path/to/screenshot.png --json
 
 - `bugpatrol/watermark/` — types / keys / envelope / extractor / decryptor / reporter / `__init__`(公共 API `decode_image`、`WatermarkResourceDecoder`)
 - `bugpatrol/resources.py`、`intake.py`、`triage_context.py`、`backfill.py`、`watcher.py`、`event_watcher.py`、`watch_mail.py`、`__main__.py`
-- 测试:`tests/test_watermark.py`(36 例,含全部失败模式 + 流水线集成 + CLI)
+- 测试:`tests/test_watermark.py`(37 例,含全部失败模式 + pixel/trailer/tEXt carriers + 流水线集成 + CLI)
 
 依赖:`cryptography>=42`(lazy-import,不拖慢 import 路径)。

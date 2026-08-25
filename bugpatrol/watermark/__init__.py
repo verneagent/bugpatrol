@@ -44,6 +44,7 @@ from bugpatrol.watermark.extractor import (
     WatermarkInvalidEnvelope,
     embed_envelope_trailer,
     embed_png_text_envelope,
+    embed_screenshot_pixel_envelope,
     extract_envelope_bytes,
 )
 from bugpatrol.watermark.keys import (
@@ -109,6 +110,7 @@ __all__ = [
     "decrypt_envelope",
     "embed_envelope_trailer",
     "embed_png_text_envelope",
+    "embed_screenshot_pixel_envelope",
     "extract_envelope_bytes",
     "parse_envelope",
     "payload_to_compact_json",
