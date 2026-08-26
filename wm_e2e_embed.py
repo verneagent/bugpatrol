@@ -15,7 +15,8 @@ import io, json, os, random, re, subprocess, sys
 
 TMP = os.environ.get("TMPDIR", "/tmp/claude-501").rstrip("/")
 CELL = 3
-GRID = 768  # viewBox size: 128 cols × 2 cells × 3px
+GRID_W = 768  # viewBox width: 128 cols × 2 cells × 3px
+GRID_H = 864  # viewBox height: 288 rows × 3px (6-block carrier grid)
 OFFSET = 18
 ENVELOPE = json.load(open(f"{TMP}/wm-e2e-envelope.json"))
 PRIV = open(f"{TMP}/wm-e2e-private.pem").read()
@@ -45,7 +46,7 @@ def render_screenshot(size: tuple[int, int], corner: str = "both") -> bytes:
     if corner in ("top_left", "both"):
         origins.append((OFFSET, OFFSET))
     if corner in ("bottom_right", "both"):
-        origins.append((W - GRID - OFFSET, H - GRID - OFFSET))
+        origins.append((W - GRID_W - OFFSET, H - GRID_H - OFFSET))
     for ox, oy in origins:
         for x, y in dark:
             d.rectangle((ox + x, oy + y, ox + x + CELL - 1, oy + y + CELL - 1), fill=(0, 0, 0, 13))

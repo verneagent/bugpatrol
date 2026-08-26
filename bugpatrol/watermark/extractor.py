@@ -44,7 +44,7 @@ PNG_WATERMARK_KEYWORD = b"bugpatrol.watermark"
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 PIXEL_BIT_COLUMNS = 128
-PIXEL_BIT_ROWS = 256
+PIXEL_BIT_ROWS = 288
 PIXEL_WIDTH_MODULES = PIXEL_BIT_COLUMNS * 2
 PIXEL_HEIGHT_MODULES = PIXEL_BIT_ROWS
 PIXEL_OFFSET_MODULES = 6
@@ -60,39 +60,40 @@ PIXEL_SCALE_CANDIDATES = tuple(1.0 + index * 0.125 for index in range(25))
 # downscale → JPEG re-encode) through three layers:
 #
 # 1. Reed-Solomon RS(255,223): the payload is [magic 0x4D57][len 2B BE][envelope]
-#    zero-padded to 5×223 bytes, each block RS-encoded (32 parity bytes → up to
-#    16 corrupted bytes per block corrected). 1275 encoded bytes total.
+#    zero-padded to 6×223 bytes, each block RS-encoded (32 parity bytes → up to
+#    16 corrupted bytes per block corrected). 1530 encoded bytes total. (6 blocks
+#    instead of 5 so the gzip'd dev-mode envelope fits: budget 1111B → 1334B.)
 # 2. 2D-toroidal copy spread: copy `c` of scrambled bit `j` sits at cell index
-#    `s + c*N` (N = 10200), so the three copies are ~79 rows + ~88 cols apart —
+#    `s + c*N` (N = 12240), so the three copies are ~95 rows + ~96 cols apart —
 #    a single horizontal band or vertical edge flips at most ONE copy.
 # 3. Coprime bit-scramble (K=8191): layout position `s = (j*K) % N` distributes
-#    dense-UI-band byte errors evenly across all five RS blocks (each well under
+#    dense-UI-band byte errors evenly across all six RS blocks (each well under
 #    the 16-byte budget), instead of clumping them into one fatal block.
 #
-# Grid layout (128 cols × 256 rows = 32768 cells; 30648 used):
+# Grid layout (128 cols × 288 rows = 36864 cells; 36768 used):
 #   positions 0..47       — 16-bit magic prefix, 0x4D57, 3 interleaved copies.
 #                             Cheap flat/no-carrier bail for watermark-less
 #                             images (0.2 ms vs a 165 ms full read).
-#   positions 48..30647   — the 1275 RS-encoded bytes, scrambled + 2D spread.
+#   positions 48..36767   — the 1530 RS-encoded bytes, scrambled + 2D spread.
 #
 # Constants MUST match the app's TypeScript builder
 # (app/lib/dev/diagnosticScreenshotWatermarkPixels.ts) exactly.
 _RS_NSYM = 32
-RS_BLOCK_COUNT = 5
+RS_BLOCK_COUNT = 6
 _RS_DATA_BYTES = 255 - _RS_NSYM  # 223
-_RS_ENCODED_BYTES = RS_BLOCK_COUNT * 255  # 1275
+_RS_ENCODED_BYTES = RS_BLOCK_COUNT * 255  # 1530
 _RS_MAGIC = b"\x4d\x57"
-RS_DATA_TOTAL = RS_BLOCK_COUNT * _RS_DATA_BYTES  # 1115
+RS_DATA_TOTAL = RS_BLOCK_COUNT * _RS_DATA_BYTES  # 1338
 PIXEL_MAGIC_BITS = 16
 PIXEL_MAGIC_WORD = 0x4D57
 PIXEL_MAGIC_CELLS = PIXEL_MAGIC_BITS * PIXEL_COPY_COUNT  # 48
-PIXEL_LOGICAL_BITS = _RS_ENCODED_BYTES * 8  # 10200
-PIXEL_DATA_CELLS = PIXEL_LOGICAL_BITS * PIXEL_COPY_COUNT  # 30600
-PIXEL_CELL_TOTAL = PIXEL_MAGIC_CELLS + PIXEL_DATA_CELLS  # 30648
+PIXEL_LOGICAL_BITS = _RS_ENCODED_BYTES * 8  # 12240
+PIXEL_DATA_CELLS = PIXEL_LOGICAL_BITS * PIXEL_COPY_COUNT  # 36720
+PIXEL_CELL_TOTAL = PIXEL_MAGIC_CELLS + PIXEL_DATA_CELLS  # 36768
 PIXEL_SCRAMBLE_K = 8191
 PIXEL_SCRAMBLE_K_INV = 1711  # (K * K_INV) % PIXEL_LOGICAL_BITS == 1
-# [magic 2B][len 2B] + payload, shared across the 5 RS data blocks.
-PIXEL_MAX_ENVELOPE_BYTES = RS_DATA_TOTAL - 2 - 2  # 1111
+# [magic 2B][len 2B] + payload, shared across the 6 RS data blocks.
+PIXEL_MAX_ENVELOPE_BYTES = RS_DATA_TOTAL - 2 - 2  # 1334
 # Magic-canary thresholds (see _read_carrier_bytes).
 PIXEL_MAGIC_READABLE_MIN = 13
 PIXEL_MAGIC_MISMATCH_CONFIDENT = 4
@@ -602,9 +603,9 @@ def _pixel_cells(envelope_bytes: bytes) -> list[int]:
 
 
 def _rs_encode_payload(envelope_bytes: bytes) -> bytes:
-    """RS-encode [magic][len 2B BE][envelope] zero-padded to 5×223 bytes.
+    """RS-encode [magic][len 2B BE][envelope] zero-padded to 6×223 bytes.
 
-    Returns 1275 bytes (5 RS(255,223) codewords). ``envelope_bytes`` must be
+    Returns 1530 bytes (6 RS(255,223) codewords). ``envelope_bytes`` must be
     ≤ PIXEL_MAX_ENVELOPE_BYTES (checked by callers).
     """
     data = _RS_MAGIC + len(envelope_bytes).to_bytes(2, "big") + envelope_bytes
@@ -616,7 +617,7 @@ def _rs_encode_payload(envelope_bytes: bytes) -> bytes:
 
 
 def _rs_decode_payload(encoded: bytes) -> bytes | None:
-    """RS-decode the 1275-byte carrier stream; return the envelope or None.
+    """RS-decode the 1530-byte carrier stream; return the envelope or None.
 
     Every block must correct within its 16-byte budget; the decoded data must
     open with the magic and a plausible length. A watermark-less read (or a

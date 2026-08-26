@@ -42,8 +42,8 @@ app 把加密 envelope 确定性嵌入截图。**canonical = 隐形 paired-cell 
 1. **Screenshot pixel carrier(canonical, invisible)**:app 渲染 root overlay,每 bit = 相邻的深/浅两格(alpha 13),视觉上互相抵消、对页面几乎不可见(δ≈13/255 亮度)。几何是**固定 3 物理像素 cell**(`app/lib/dev/diagnosticScreenshotWatermarkPixels.ts`:CELL=3、viewBox 768×768、距角 18px),任何 DPR(2 / 2.625 / 3 / …)都落在整数像素边界,无亚像素混叠;提取端固定 scale=3 读取,并用 **±1px 偏移探测**吸收 RN 布局舍入。双角冗余(top_left + bottom_right 各嵌一份)。所有构建(含 prod)都嵌——隐形载体对用户无感知,prod 截图也能追溯。
 
    **三层 ECC(RS + 2D 扩展 + 置乱)**:Lark 会把截图压成 1080 宽再重编码 JPEG,cells 从 3px 缩到 2.75px、每 bit 有 JPEG 量化误差——单靠 3× 多数不够,格式升级为错误纠正载体(`rs256.py` + extractor,与 app TS builder 逐字节一致):
-   - **RS(255,223)×5**:payload = `[magic 0x4D57][len 2B BE][envelope]` 零填充到 5×223=1115B,分 5 块 RS 编码 → 1275B,每块可纠 **16 个字节错**(实际经真实 Lark 渠道的每块错误 [9,10,8,8,13] 全部低于预算)。envelope 上限 **1111B**(prod 压缩后 ≈876B)。
-   - **Payload gzip 压缩(加密前)**:app 在 AES-GCM **之前**对 payload JSON 做 gzip(RFC1952,magic `1f 8b`)。信封里的大头(ciphertext/wrappedKey)是 base64 高熵密文压不动,压缩只发生在明文 payload JSON——dev 全字段 payload 的信封从 1420B 压到 ~950B 以内,跌破 1111B 上限。解密端 `decrypt_envelope` 按 gzip magic 透明解压,向后兼容未压缩旧信封。
+   - **RS(255,223)×6**:payload = `[magic 0x4D57][len 2B BE][envelope]` 零填充到 6×223=1338B,分 6 块 RS 编码 → 1530B,每块可纠 **16 个字节错**(实际经真实 Lark 渠道的每块错误 [9,10,8,8,13] 全部低于预算)。envelope 上限 **1334B**(prod 压缩后 ≈876B)。原 5 块(上限 1111B)对 dev 全字段 payload 太挤——gzip 后真机仍 1180B,6 块才有余量。
+   - **Payload gzip 压缩(加密前)**:app 在 AES-GCM **之前**对 payload JSON 做 gzip(RFC1952,magic `1f 8b`)。信封里的大头(ciphertext/wrappedKey)是 base64 高熵密文压不动,压缩只发生在明文 payload JSON——dev 全字段 payload 的信封从 1420B 压到 ~1180B,配合 6 块载体(1334B)放进预算。解密端 `decrypt_envelope` 按 gzip magic 透明解压,向后兼容未压缩旧信封。**注意**:dev payload 里的 `rawDeviceId`(sha256 hex,64 字符)/ `rawDeviceIdThree`(shumei 设备 ID,~100 字符)是压不动的高熵字段,预算测试必须用真实长度桩,短桩会假绿。
    - **2D toroidal 扩展**:逻辑位 `j` 经置乱 `s=(j·8191)%10200` 后,副本 c 写在格位 `48 + s + c·10200` —— 三副本相隔 ~79 行 + ~88 列,单条横带/竖边至多翻转一份。
    - **提取端**:先读 **magic canary**(前 48 格,0.2ms)——纯色页全不可读直接平走;忙碌页多数 magic 离 0x4D57 远则自信判定无载波;5-8 位模糊时用 **RS 保护的 block-0 检查**(30ms)定夺;对齐几何读出后 RS 逐块纠错,不可读 cell 弃权。无载波图 ~300ms,干净截图 ~1.3s。
 2. **QR/Data Matrix(fallback)**:BugPatrol 用 zxing-cpp 扫图,只认内容能解析成 envelope JSON 的条码(屏幕上的分享二维码被忽略),多候选取离左上角最近者。app 侧已不渲染 QR badge,此 leg 供屏幕截图里恰好有信封 JSON 条码的场景。
@@ -119,6 +119,6 @@ watcher / backfill / event-watcher / mail-watcher 全部接入(无 key 提取,`c
 
 - `bugpatrol/watermark/` — types / keys / envelope / extractor / decryptor / reporter / `rs256.py`(Reed-Solomon 编解码)/ `__init__`(公共 API `decode_image`、`WatermarkResourceDecoder`、`candidates_to_compact_json`)
 - `bugpatrol/resources.py`(watcher 无 key 提取)、`intake.py`(issue body 渲染)、`triage_context.py`(`resolve_media_watermarks` runner 解密)、`backfill.py`、`watcher.py`、`event_watcher.py`、`watch_mail.py`、`__main__.py`(CLI decode)
-- 测试:`tests/test_watermark.py`(55 例,含全部失败模式 + QR/pixel/trailer/tEXt carriers + 固定 3px ±1px 偏移 + 背景阶跃多数恢复 + JPEG q85 弃权 + UI edge + JPEG + RS 预算 + magic canary + split 流程 + 流水线集成 + CLI)+ `tests/test_rs256.py`(6 例)
+- 测试:`tests/test_watermark.py`(59 例,含全部失败模式 + QR/pixel/trailer/tEXt carriers + 固定 3px ±1px 偏移 + 背景阶跃多数恢复 + JPEG q85 弃权 + UI edge + JPEG + RS 预算 + magic canary + split 流程 + 流水线集成 + CLI + gzip 压缩回归)+ `tests/test_rs256.py`(6 例)
 
 依赖:`cryptography>=42`、`zxing-cpp>=3.1` + `numpy>=1.26`(均 lazy-import,不拖慢 import 路径;测试夹具还用 `qrcode`(dev extra)生成 QR 图)。

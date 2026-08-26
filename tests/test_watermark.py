@@ -397,7 +397,8 @@ class WatermarkDecodeTest(unittest.TestCase):
                 self.assertEqual(cells[3 * i + c], bit)
 
     def test_pixel_scramble_is_a_permutation(self) -> None:
-        """K=8191 is coprime to 10200, so scramble/unscramble are inverses over
+        """K=8191 is coprime to PIXEL_LOGICAL_BITS (10200 → 12240 after the
+        5→6 RS-block carrier growth), so scramble/unscramble are inverses over
         the whole logical-bit space (the 2D spread depends on it)."""
         from bugpatrol.watermark import extractor as _ext
 
@@ -632,8 +633,9 @@ class WatermarkCompressionTest(unittest.TestCase):
 
     def test_dev_mode_payload_fits_pixel_carrier_budget(self) -> None:
         """Regression for the 1420B > 1111B dev-build overflow: the full dev
-        payload (testing fields included) must fit the pixel carrier budget,
-        and it must still pixel-embed + decode end to end."""
+        payload (testing fields + realistic-length high-entropy device ids,
+        which gzip cannot shrink) must fit the pixel carrier budget (gzip +
+        6-block carrier → 1334B), and must still pixel-embed + decode end to end."""
         payload = _payload(
             nickname="Tester",
             socialId="tester_01",
@@ -641,8 +643,8 @@ class WatermarkCompressionTest(unittest.TestCase):
             buildInfoSecondary="feature-watermark",
             gitBranch="sys-wm",
             manufacturer="Apple",
-            rawDeviceId="hashed-device-id",
-            rawDeviceIdThree="shumei-device-id",
+            rawDeviceId="ab" * 32,  # sha256 hex digest: 64 incompressible chars
+            rawDeviceIdThree="b" * 100,  # shumei tracking id: up to 100 incompressible chars
             wsStatus="open",
             inflightRequests=2,
             timezone="Asia/Shanghai",
