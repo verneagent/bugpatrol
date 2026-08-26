@@ -27,11 +27,11 @@ import math
 import struct
 import typing
 import zlib
-from typing import cast
 
 from PIL import Image, ImageDraw, UnidentifiedImageError
 
 from bugpatrol.watermark.qr import extract_qr_envelope_bytes
+from bugpatrol.watermark.rs256 import rs_correct_msg, rs_encode_msg
 from bugpatrol.watermark.types import MAX_ENVELOPE_BYTES
 
 CARRIER_START = b"BUGPATROL_WM1:"
@@ -45,19 +45,58 @@ PNG_WATERMARK_KEYWORD = b"bugpatrol.watermark"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 PIXEL_BIT_COLUMNS = 128
 PIXEL_BIT_ROWS = 256
-PIXEL_LENGTH_BITS = 16
 PIXEL_WIDTH_MODULES = PIXEL_BIT_COLUMNS * 2
 PIXEL_HEIGHT_MODULES = PIXEL_BIT_ROWS
 PIXEL_OFFSET_MODULES = 6
-# The envelope is embedded 3× so a background edge that inverts one cell's
-# polarity (underlying UI pixels >13 luma apart flip the light/dark pair) is
-# out-voted byte-wise by the two clean copies. Grid capacity / 3 bounds the
-# single-copy size.
 PIXEL_COPY_COUNT = 3
-PIXEL_MAX_ENVELOPE_BYTES = (
-    (PIXEL_BIT_COLUMNS * PIXEL_BIT_ROWS - PIXEL_LENGTH_BITS) // 8
-) // PIXEL_COPY_COUNT
 PIXEL_SCALE_CANDIDATES = tuple(1.0 + index * 0.125 for index in range(25))
+
+# --- Error-corrected pixel carrier (RS(255,223) + 2D spread + coprime scramble)
+#
+# The 3× interleave alone failed on real screenshots: a wide horizontal UI band
+# flips all three adjacent copies of a bit in the same row, and the old
+# 16-bit length header / JSON payload had zero tolerance for even one wrong
+# bit. The carrier now survives the real production channel (native render →
+# downscale → JPEG re-encode) through three layers:
+#
+# 1. Reed-Solomon RS(255,223): the payload is [magic 0x4D57][len 2B BE][envelope]
+#    zero-padded to 5×223 bytes, each block RS-encoded (32 parity bytes → up to
+#    16 corrupted bytes per block corrected). 1275 encoded bytes total.
+# 2. 2D-toroidal copy spread: copy `c` of scrambled bit `j` sits at cell index
+#    `s + c*N` (N = 10200), so the three copies are ~79 rows + ~88 cols apart —
+#    a single horizontal band or vertical edge flips at most ONE copy.
+# 3. Coprime bit-scramble (K=8191): layout position `s = (j*K) % N` distributes
+#    dense-UI-band byte errors evenly across all five RS blocks (each well under
+#    the 16-byte budget), instead of clumping them into one fatal block.
+#
+# Grid layout (128 cols × 256 rows = 32768 cells; 30648 used):
+#   positions 0..47       — 16-bit magic prefix, 0x4D57, 3 interleaved copies.
+#                             Cheap flat/no-carrier bail for watermark-less
+#                             images (0.2 ms vs a 165 ms full read).
+#   positions 48..30647   — the 1275 RS-encoded bytes, scrambled + 2D spread.
+#
+# Constants MUST match the app's TypeScript builder
+# (app/lib/dev/diagnosticScreenshotWatermarkPixels.ts) exactly.
+_RS_NSYM = 32
+RS_BLOCK_COUNT = 5
+_RS_DATA_BYTES = 255 - _RS_NSYM  # 223
+_RS_ENCODED_BYTES = RS_BLOCK_COUNT * 255  # 1275
+_RS_MAGIC = b"\x4d\x57"
+RS_DATA_TOTAL = RS_BLOCK_COUNT * _RS_DATA_BYTES  # 1115
+PIXEL_MAGIC_BITS = 16
+PIXEL_MAGIC_WORD = 0x4D57
+PIXEL_MAGIC_CELLS = PIXEL_MAGIC_BITS * PIXEL_COPY_COUNT  # 48
+PIXEL_LOGICAL_BITS = _RS_ENCODED_BYTES * 8  # 10200
+PIXEL_DATA_CELLS = PIXEL_LOGICAL_BITS * PIXEL_COPY_COUNT  # 30600
+PIXEL_CELL_TOTAL = PIXEL_MAGIC_CELLS + PIXEL_DATA_CELLS  # 30648
+PIXEL_SCRAMBLE_K = 8191
+PIXEL_SCRAMBLE_K_INV = 1711  # (K * K_INV) % PIXEL_LOGICAL_BITS == 1
+# [magic 2B][len 2B] + payload, shared across the 5 RS data blocks.
+PIXEL_MAX_ENVELOPE_BYTES = RS_DATA_TOTAL - 2 - 2  # 1111
+# Magic-canary thresholds (see _read_carrier_bytes).
+PIXEL_MAGIC_READABLE_MIN = 13
+PIXEL_MAGIC_MISMATCH_CONFIDENT = 4
+PIXEL_MAGIC_MISMATCH_BAIL = 8
 
 
 def extract_envelope_bytes(data: bytes) -> bytes | None:
@@ -152,11 +191,12 @@ def embed_screenshot_pixel_envelope(
         raise ValueError("envelope is too large for screenshot pixel carrier")
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     draw = ImageDraw.Draw(image, "RGBA")
+    cells = _pixel_cells(envelope_bytes)
     for current in (("top_left", "bottom_right") if corner == "both" else (corner,)):
         origin_x, origin_y = _pixel_origin(image.width, image.height, scale, current)
         origin_x += shift[0]
         origin_y += shift[1]
-        for bit_index, bit in enumerate(_pixel_bits(envelope_bytes)):
+        for bit_index, bit in enumerate(cells):
             x = origin_x + (bit_index % PIXEL_BIT_COLUMNS) * 2 * scale
             y = origin_y + (bit_index // PIXEL_BIT_COLUMNS) * scale
             dark_x = x if bit == 1 else x + scale
@@ -241,17 +281,31 @@ def _iter_pixel_candidates(data: bytes) -> typing.Iterator[bytes]:
 
     The app's fixed-3px cells decode at ``scale=3``; probe that first so a real
     screenshot succeeds on the first offset read. The remaining scales follow
-    for alternative/legacy cell geometries.
+    for re-encoded (downscaled) cell geometries.
+
+    A scale stops probing once ANY corner reads a valid envelope: RS decoding
+    is deterministic and rejects garbage reads, so the first RS-valid envelope
+    at the app's nominal geometry IS the true payload — probing the mirrored
+    corner or every scale would only re-find the same bytes.
     """
     try:
         image = Image.open(io.BytesIO(data)).convert("RGB")
     except (UnidentifiedImageError, OSError):
         return
+    # One C-pass luminance buffer for the whole probe space. Every cell sample
+    # below is a flat-buffer index instead of a per-pixel PIL access + per-pixel
+    # RGB->luma math, which is what keeps scale x corner x offset affordable.
+    luma = _luma_buffer(image)
     for scale in _pixel_scale_order():
         if image.width < PIXEL_WIDTH_MODULES * scale or image.height < PIXEL_HEIGHT_MODULES * scale:
             continue
         for corner in ("top_left", "bottom_right"):
-            yield from _iter_pixel_carrier_candidates(image, scale=scale, corner=corner)
+            found = False
+            for decoded in _iter_pixel_carrier_candidates(image, luma=luma, scale=scale, corner=corner):
+                found = True
+                yield decoded
+            if found:
+                return
 
 
 def _pixel_scale_order() -> tuple[float, ...]:
@@ -259,21 +313,21 @@ def _pixel_scale_order() -> tuple[float, ...]:
 
 
 def _iter_pixel_carrier_candidates(
-    image: Image.Image, *, scale: float, corner: str
+    image: Image.Image, *, luma: bytes, scale: float, corner: str
 ) -> typing.Iterator[bytes]:
-    """Yield each offset whose read decodes to a valid envelope at ``corner``.
+    """Yield the first offset whose read decodes to a valid envelope.
 
     The app renders cells at whole physical px, but a device's layout rounding
-    can shift the grid by a pixel or two. Probe a small neighborhood of offsets
-    and keep every read whose header + payload decode to valid envelope JSON:
-    a misaligned offset can produce JSON that *parses* but carries corrupted
-    ciphertext, so the decoder keeps all candidates and lets GCM auth pick.
+    can shift the grid by a pixel or two, so probe a small neighborhood of
+    offsets nearest-first. ``_read_carrier_bytes`` only returns an envelope it
+    RS-validated (garbage reads decode to ``None``), so the first offset that
+    reads is the true payload — unlike the old JSON-parse candidates, an RS
+    read cannot "parse but carry corrupted ciphertext".
     """
     origin_x, origin_y = _pixel_origin(image.width, image.height, scale, corner)
-    pix = image.load()
     for offset_x, offset_y in _carrier_offset_candidates():
         raw = _read_carrier_bytes(
-            image, pix,
+            image, luma,
             origin_x=origin_x + offset_x,
             origin_y=origin_y + offset_y,
             scale=scale,
@@ -281,10 +335,11 @@ def _iter_pixel_carrier_candidates(
         if raw is None:
             continue
         try:
-            decoded = _decode_pixel_envelope(raw)
+            yield _decode_pixel_envelope(raw)
         except WatermarkInvalidEnvelope:
             continue
-        yield decoded
+        return
+    return
 
 
 def _carrier_offset_candidates() -> tuple[tuple[int, int], ...]:
@@ -301,76 +356,151 @@ def _carrier_offset_candidates() -> tuple[tuple[int, int], ...]:
 
 
 def _read_carrier_bytes(
-    image: Image.Image, pix: typing.Any,
+    image: Image.Image, luma: bytes,
     *, origin_x: int, origin_y: int, scale: float,
 ) -> bytes | None:
-    """De-interleave + majority-vote the 3 interleaved copies.
+    """RS-decode the error-corrected pixel carrier, or None if absent.
 
-    Bit position ``pos`` holds logical bit ``pos // 3`` of copy ``pos % 3``.
-    The header is read first (3 copies of 16 bits, majority-voted per bit) to
-    learn the payload length, then the payload span is read and every logical
-    bit is majority-voted over its 3 copies. Unreadable cells (JPEG washing a
-    pair's luma delta below the detection threshold) abstain instead of killing
-    the whole read: a logical bit survives as long as at least one of its three
-    adjacent copy positions is readable.
+    Fast path first: read the 16-bit magic prefix (48 cells). A flat page
+    leaves every cell unreadable (cheap bail — the hot path for watermark-less
+    images); a busy page reads garbage whose majority magic is far from
+    0x4D57 (confident no-carrier bail). Ambiguous magic (partially corrupted by
+    the background) is double-checked with an RS-protected read of data block 0
+    before paying for the full 30600-cell read.
+
+    A carrier present at the right geometry reads the magic cleanly and is
+    confirmed by RS decoding the full span; any residual bit errors (a band
+    flipping cells) are corrected by RS(255,223) per block. Unreadable cells
+    (JPEG washing a pair's luma delta below threshold) abstain during voting
+    rather than killing the read.
     """
-    length = 0
-    for j in range(PIXEL_LENGTH_BITS):
-        votes: list[int] = []
-        for copy_index in range(PIXEL_COPY_COUNT):
-            bit = _read_pixel_bit(
-                image, pix, origin_x=origin_x, origin_y=origin_y,
-                scale=scale, bit_index=j * PIXEL_COPY_COUNT + copy_index,
-            )
-            if bit is not None:
-                votes.append(bit)
-        # A triple with no readable cell means the carrier isn't here (flat
-        # page, wrong scale, or misaligned grid) — bail before reading the
-        # whole payload span, which is the hot path for watermark-less images.
-        if not votes:
-            return None
-        length = (length << 1) | _majority_values(votes)
-    if length <= 0 or length > PIXEL_MAX_ENVELOPE_BYTES:
-        return None
-    payload = _read_pixel_span(
-        image, pix, origin_x=origin_x, origin_y=origin_y, scale=scale,
-        start_bit=PIXEL_LENGTH_BITS * PIXEL_COPY_COUNT,
-        bit_count=length * 8 * PIXEL_COPY_COUNT,
-    )
-    merged = bytearray(length)
-    for j in range(length * 8):
-        votes = [
-            payload[j * PIXEL_COPY_COUNT + c]
+    magic_votes = [
+        [
+            _read_pixel_bit(image, luma, origin_x=origin_x, origin_y=origin_y, scale=scale, bit_index=3 * i + c)
             for c in range(PIXEL_COPY_COUNT)
-            if payload[j * PIXEL_COPY_COUNT + c] is not None
         ]
-        if not votes:
-            return None
-        bit = _majority_values(votes)
-        merged[j // 8] |= bit << (7 - (j % 8))
-    return bytes(merged)
+        for i in range(PIXEL_MAGIC_BITS)
+    ]
+    readable = [i for i, votes in enumerate(magic_votes) if any(v is not None for v in votes)]
+    if not readable:
+        # Uniform grid region (flat page, wrong scale) — nothing to read.
+        return None
+    if len(readable) < PIXEL_MAGIC_READABLE_MIN:
+        # Fewer than 13 of 16 magic bits readable: the grid is not aligned to
+        # this scale/offset/corner. A real carrier reads its magic strip
+        # cleanly (16/16) at the aligned geometry, and the extractor probes the
+        # mirrored corner + ±1px offsets, so bail here instead of paying for an
+        # RS-protected block-0 read that would only confirm the misalignment.
+        return None
+    mismatches = sum(
+        1
+        for i in readable
+        if _majority_values([v for v in magic_votes[i] if v is not None])
+        != ((PIXEL_MAGIC_WORD >> (PIXEL_MAGIC_BITS - 1 - i)) & 1)
+    )
+    if mismatches <= PIXEL_MAGIC_MISMATCH_CONFIDENT:
+        return _rs_decode_payload(
+            _read_pixel_logical_bits(image, luma, origin_x=origin_x, origin_y=origin_y, scale=scale)
+        )
+    if mismatches > PIXEL_MAGIC_MISMATCH_BAIL:
+        # Confident no-carrier (busy background reading as non-magic).
+        return None
+    # Ambiguous magic (5-8 bits off): a background feature may have flipped it
+    # while the carrier is present. RS-protected block 0 settles it cheaply
+    # (~30 ms) before committing to the full ~165 ms read.
+    if not _pixel_block0_valid(image, luma, origin_x=origin_x, origin_y=origin_y, scale=scale):
+        return None
+    return _rs_decode_payload(
+        _read_pixel_logical_bits(image, luma, origin_x=origin_x, origin_y=origin_y, scale=scale)
+    )
 
 
-def _read_pixel_span(
-    image: Image.Image,
-    pix: typing.Any,
-    *,
-    origin_x: int,
-    origin_y: int,
-    scale: float,
-    start_bit: int,
-    bit_count: int,
-) -> list[int | None]:
-    """Read ``bit_count`` consecutive bit cells (0, 1, or None if unreadable).
+def _pixel_block0_valid(
+    image: Image.Image, luma: bytes, *, origin_x: int, origin_y: int, scale: float
+) -> bool:
+    """True if RS-decoding data block 0 yields [magic 0x4D57][valid length].
 
-    JPEG re-encoding can wash a cell pair's luma delta below the detection
-    threshold; such cells read as ``None`` and callers abstain during voting
-    rather than discarding the whole carrier.
+    Reads only the 1784 logical bits of block 0 (5352 cells, ~30 ms vs ~165 ms
+    for the full span) and lets RS(255,223) decide whether the carrier is
+    really here — the same magic+length check the full read performs, but cheap
+    enough to run as the ambiguous-magic safety net.
     """
-    values: list[int | None] = []
-    for bit_index in range(start_bit, start_bit + bit_count):
-        values.append(_read_pixel_bit(image, pix, origin_x=origin_x, origin_y=origin_y, scale=scale, bit_index=bit_index))
-    return values
+    raw = bytearray(_RS_DATA_BYTES)
+    for j in range(_RS_DATA_BYTES * 8):
+        votes = _read_copy_votes(image, luma, origin_x=origin_x, origin_y=origin_y, scale=scale, logical_bit=j)
+        if not votes:
+            continue
+        bit = _majority_values(votes)
+        raw[j // 8] |= bit << (7 - (j % 8))
+    decoded = rs_correct_msg(bytes(raw), _RS_NSYM)
+    if decoded is None or decoded[:2] != _RS_MAGIC:
+        return False
+    length = int.from_bytes(decoded[2:4], "big")
+    return 0 < length <= PIXEL_MAX_ENVELOPE_BYTES
+
+
+def _read_pixel_logical_bits(
+    image: Image.Image, luma: bytes, *, origin_x: int, origin_y: int, scale: float
+) -> bytes:
+    """Read all 10200 logical bits (3 copies each, unscrambled), majority-voted."""
+    out = bytearray(_RS_ENCODED_BYTES)
+    for s in range(PIXEL_LOGICAL_BITS):
+        votes = _read_copy_votes_scrambled(
+            image, luma, origin_x=origin_x, origin_y=origin_y, scale=scale, scrambled=s
+        )
+        if not votes:
+            continue
+        bit = _majority_values(votes)
+        j = _pixel_unscramble(s)
+        out[j // 8] |= bit << (7 - (j % 8))
+    return bytes(out)
+
+
+def _read_copy_votes(
+    image: Image.Image, luma: bytes, *, origin_x: int, origin_y: int, scale: float, logical_bit: int
+) -> list[int]:
+    """The 3 copy votes for a scrambled logical bit (readable cells only)."""
+    s = _pixel_scramble(logical_bit)
+    return _read_copy_votes_scrambled(
+        image, luma, origin_x=origin_x, origin_y=origin_y, scale=scale, scrambled=s
+    )
+
+
+def _read_copy_votes_scrambled(
+    image: Image.Image, luma: bytes, *, origin_x: int, origin_y: int, scale: float, scrambled: int
+) -> list[int]:
+    """The 3 copy votes at grid position ``PIXEL_MAGIC_CELLS + s + c*N``.
+
+    Copies are 10200 cells apart (~79 rows + ~88 cols), so a single horizontal
+    band or vertical edge flips at most one of the three — majority voting then
+    recovers the bit. JPEG-washed cells abstain (None), and a bit survives as
+    long as at least one copy is readable.
+    """
+    votes: list[int] = []
+    for c in range(PIXEL_COPY_COUNT):
+        bit = _read_pixel_bit(
+            image, luma,
+            origin_x=origin_x, origin_y=origin_y, scale=scale,
+            bit_index=PIXEL_MAGIC_CELLS + scrambled + c * PIXEL_LOGICAL_BITS,
+        )
+        if bit is not None:
+            votes.append(bit)
+    return votes
+
+
+def _pixel_scramble(logical_bit: int) -> int:
+    """Coprime permutation: layout position ``s`` for logical bit ``j``.
+
+    A dense UI band corrupts a contiguous run of layout cells; unscrambling
+    spreads those errors evenly across the five RS blocks (measured per-block
+    errors [9,10,8,8,13] on a real screenshot vs [0,7,0,0,22] unscrambled) so
+    no single block exceeds the 16-byte correction budget.
+    """
+    return (logical_bit * PIXEL_SCRAMBLE_K) % PIXEL_LOGICAL_BITS
+
+
+def _pixel_unscramble(scrambled: int) -> int:
+    return (scrambled * PIXEL_SCRAMBLE_K_INV) % PIXEL_LOGICAL_BITS
 
 
 def _majority_values(bits: list[int]) -> int:
@@ -379,7 +509,7 @@ def _majority_values(bits: list[int]) -> int:
 
 def _read_pixel_bit(
     image: Image.Image,
-    pix: typing.Any,
+    luma: bytes,
     *,
     origin_x: int,
     origin_y: int,
@@ -388,8 +518,8 @@ def _read_pixel_bit(
 ) -> int | None:
     x = origin_x + (bit_index % PIXEL_BIT_COLUMNS) * 2 * scale
     y = origin_y + (bit_index // PIXEL_BIT_COLUMNS) * scale
-    left = _sample_cell_luma(image, pix, x, y, scale)
-    right = _sample_cell_luma(image, pix, x + scale, y, scale)
+    left = _sample_cell_luma(luma, image.width, image.height, x, y, scale)
+    right = _sample_cell_luma(luma, image.width, image.height, x + scale, y, scale)
     if left is None or right is None:
         return None
     delta = left - right
@@ -399,33 +529,34 @@ def _read_pixel_bit(
 
 
 def _sample_cell_luma(
-    image: Image.Image, pix: typing.Any, x: float, y: float, scale: float
+    luma: bytes, width: int, height: int, x: float, y: float, scale: float
 ) -> float | None:
     start_x = max(0, math.floor(x))
-    end_x = min(image.width - 1, math.ceil(x + scale) - 1)
+    end_x = min(width - 1, math.ceil(x + scale) - 1)
     start_y = max(0, math.floor(y))
-    end_y = min(image.height - 1, math.ceil(y + scale) - 1)
+    end_y = min(height - 1, math.ceil(y + scale) - 1)
     if start_x > end_x or start_y > end_y:
         return None
-    total = 0.0
+    total = 0
     count = 0
     for py in range(start_y, end_y + 1):
+        base = py * width
         for px in range(start_x, end_x + 1):
-            value = _sample_luma(pix, px, py, image.width, image.height)
-            if value is None:
-                continue
-            total += value
+            total += luma[base + px]
             count += 1
-    return total / count if count > 0 else None
+    return total / count
 
 
-def _sample_luma(pix: typing.Any, x: float, y: float, width: int, height: int) -> float | None:
-    px = round(x)
-    py = round(y)
-    if px < 0 or py < 0 or px >= width or py >= height:
-        return None
-    r, g, b = cast(tuple[int, int, int], pix[px, py])
-    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+def _luma_buffer(image: Image.Image) -> bytes:
+    """Flat per-pixel luminance (0-255), indexed ``y * width + x``.
+
+    Computed once per image as a single C pass; every later cell sample is a
+    buffer index instead of a per-pixel PIL access + per-pixel RGB->luma math.
+    (PIL's ``L`` uses ITU-R 601-2 luma vs the old Rec.709 weights — both are
+    monotone positive linear combos, so cell deltas keep their sign and the
+    0.25 readability threshold stays far below real signal.)
+    """
+    return image.convert("L").tobytes()
 
 
 def _decode_pixel_envelope(raw: bytes) -> bytes:
@@ -449,27 +580,66 @@ def _pixel_origin(width: int, height: int, scale: float, corner: str) -> tuple[i
     return offset, offset
 
 
-def _pixel_bits(envelope_bytes: bytes) -> tuple[int, ...]:
-    """3 bit-interleaved copies of (16-bit length header + envelope bytes).
+def _pixel_cells(envelope_bytes: bytes) -> list[int]:
+    """Grid cells for the error-corrected carrier (magic prefix + RS data).
 
-    Each logical bit ``j`` is written three times — ``c0[j] c1[j] c2[j]`` — so a
-    background feature that flips a contiguous run of cells (a UI edge, a text
-    run, a separator bar) damages bits spread across all three copies at
-    *different byte positions*. Byte-wise majority then always has two clean
-    votes per byte. Interleaving (not sequential blocks) matters: a blob
-    spanning the old copy boundary corrupted the same byte columns in two
-    sequential copies and defeated a simple block-majority.
+    Returns ``PIXEL_CELL_TOTAL`` cells: positions 0..47 hold the 16-bit magic
+    (3 interleaved copies), positions 48..30647 hold the 1275 RS-encoded bytes
+    scrambled + 2D-spread. Callers draw cell ``p`` at
+    ``(p % 128, p // 128)`` grid coords — the same geometry the app renders.
     """
-    logical: list[int] = []
-    for shift in range(PIXEL_LENGTH_BITS - 1, -1, -1):
-        logical.append((len(envelope_bytes) >> shift) & 1)
-    for byte in envelope_bytes:
-        for shift in range(7, -1, -1):
-            logical.append((byte >> shift) & 1)
-    interleaved: list[int] = []
-    for bit in logical:
-        interleaved.extend([bit] * PIXEL_COPY_COUNT)
-    return tuple(interleaved)
+    cells = [0] * PIXEL_CELL_TOTAL
+    for i in range(PIXEL_MAGIC_BITS):
+        bit = (PIXEL_MAGIC_WORD >> (PIXEL_MAGIC_BITS - 1 - i)) & 1
+        for c in range(PIXEL_COPY_COUNT):
+            cells[3 * i + c] = bit
+    encoded = _rs_encode_payload(envelope_bytes)
+    for j, bit in enumerate(_bytes_to_logical_bits(encoded)):
+        s = _pixel_scramble(j)
+        for c in range(PIXEL_COPY_COUNT):
+            cells[PIXEL_MAGIC_CELLS + s + c * PIXEL_LOGICAL_BITS] = bit
+    return cells
+
+
+def _rs_encode_payload(envelope_bytes: bytes) -> bytes:
+    """RS-encode [magic][len 2B BE][envelope] zero-padded to 5×223 bytes.
+
+    Returns 1275 bytes (5 RS(255,223) codewords). ``envelope_bytes`` must be
+    ≤ PIXEL_MAX_ENVELOPE_BYTES (checked by callers).
+    """
+    data = _RS_MAGIC + len(envelope_bytes).to_bytes(2, "big") + envelope_bytes
+    data += b"\x00" * (RS_DATA_TOTAL - len(data))
+    encoded = bytearray()
+    for block in range(RS_BLOCK_COUNT):
+        encoded += rs_encode_msg(data[block * _RS_DATA_BYTES: (block + 1) * _RS_DATA_BYTES], _RS_NSYM)
+    return bytes(encoded)
+
+
+def _rs_decode_payload(encoded: bytes) -> bytes | None:
+    """RS-decode the 1275-byte carrier stream; return the envelope or None.
+
+    Every block must correct within its 16-byte budget; the decoded data must
+    open with the magic and a plausible length. A watermark-less read (or a
+    carrier corrupted past capacity) returns ``None``.
+    """
+    if len(encoded) != _RS_ENCODED_BYTES:
+        return None
+    data = bytearray()
+    for block in range(RS_BLOCK_COUNT):
+        decoded = rs_correct_msg(encoded[block * 255: (block + 1) * 255], _RS_NSYM)
+        if decoded is None:
+            return None
+        data += decoded[:_RS_DATA_BYTES]
+    if data[:2] != _RS_MAGIC:
+        return None
+    length = int.from_bytes(data[2:4], "big")
+    if length <= 0 or length > PIXEL_MAX_ENVELOPE_BYTES or len(data) < 4 + length:
+        return None
+    return bytes(data[4:4 + length])
+
+
+def _bytes_to_logical_bits(data: bytes) -> list[int]:
+    return [bit for byte in data for bit in ((byte >> shift) & 1 for shift in range(7, -1, -1))]
 
 
 def _compact_json_bytes(obj: dict[str, object]) -> bytes:

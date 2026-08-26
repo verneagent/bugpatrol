@@ -45,6 +45,7 @@ from bugpatrol.watermark.extractor import (
     embed_png_text_envelope,
     embed_screenshot_pixel_envelope,
     extract_envelope_bytes,
+    extract_envelope_candidates,
     iter_envelope_candidates,
 )
 from bugpatrol.watermark.keys import (
@@ -115,6 +116,7 @@ __all__ = [
     "embed_png_text_envelope",
     "embed_screenshot_pixel_envelope",
     "extract_envelope_bytes",
+    "extract_envelope_candidates",
     "iter_envelope_candidates",
     "parse_envelope",
     "payload_to_compact_json",

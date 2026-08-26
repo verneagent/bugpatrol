@@ -64,6 +64,7 @@ from bugpatrol.watermark import (
     embed_envelope_trailer,
     embed_png_text_envelope,
     embed_screenshot_pixel_envelope,
+    extract_envelope_candidates,
     payload_to_compact_json,
     watermark_failure_note,
 )
@@ -132,6 +133,29 @@ def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
     length = struct.pack(">I", len(data))
     crc = zlib.crc32(chunk_type + data) & 0xFFFFFFFF
     return length + chunk_type + data + struct.pack(">I", crc)
+
+
+def _invert_encoded_byte(image, *, scale: float, corner: str, encoded_pos: int) -> None:
+    """Flip every cell (all 3 copies) of one encoded byte, inverting its value.
+
+    Stages byte errors for the RS-budget tests: flipping all 3 copies guarantees
+    the majority vote flips, so each call is exactly one corrupted byte in the
+    carrier's RS(255,223) codeword (the magic prefix cells are untouched, so the
+    canary still reads clean and the full read is what exercises RS).
+    """
+    from bugpatrol.watermark import extractor as _ext
+
+    origin_x, origin_y = _ext._pixel_origin(image.width, image.height, scale, corner)
+    for c in range(_ext.PIXEL_COPY_COUNT):
+        for j in range(encoded_pos * 8, encoded_pos * 8 + 8):
+            s = _ext._pixel_scramble(j)
+            cell = _ext.PIXEL_MAGIC_CELLS + s + c * _ext.PIXEL_LOGICAL_BITS
+            x = origin_x + (cell % _ext.PIXEL_BIT_COLUMNS) * 2 * scale
+            y = origin_y + (cell // _ext.PIXEL_BIT_COLUMNS) * scale
+            left = image.crop((x, y, x + scale, y + scale))
+            right = image.crop((x + scale, y, x + 2 * scale, y + scale))
+            image.paste(right, (x, y))
+            image.paste(left, (x + scale, y))
 
 
 try:
@@ -316,6 +340,57 @@ class WatermarkDecodeTest(unittest.TestCase):
         result = decode_image(jpeg.getvalue(), key_store=self._store())
         self.assertTrue(result.found, msg="UI edge + JPEG should still decode")
         self.assertEqual(result.payload, _payload())
+
+    def test_pixel_cells_magic_prefix_layout(self) -> None:
+        """The 16-bit magic word 0x4D57 occupies cells 0..47, bit i replicated
+        3× at positions 3i, 3i+1, 3i+2 — the canary the extractor reads first."""
+        from bugpatrol.watermark import extractor as _ext
+
+        payload = b"\x4d\x57" + b"\x00" * _ext.PIXEL_MAX_ENVELOPE_BYTES
+        cells = _ext._pixel_cells(payload)
+        self.assertEqual(len(cells), _ext.PIXEL_CELL_TOTAL)
+        for i in range(_ext.PIXEL_MAGIC_BITS):
+            bit = (_ext.PIXEL_MAGIC_WORD >> (_ext.PIXEL_MAGIC_BITS - 1 - i)) & 1
+            for c in range(_ext.PIXEL_COPY_COUNT):
+                self.assertEqual(cells[3 * i + c], bit)
+
+    def test_pixel_scramble_is_a_permutation(self) -> None:
+        """K=8191 is coprime to 10200, so scramble/unscramble are inverses over
+        the whole logical-bit space (the 2D spread depends on it)."""
+        from bugpatrol.watermark import extractor as _ext
+
+        for j in range(_ext.PIXEL_LOGICAL_BITS):
+            self.assertEqual(_ext._pixel_unscramble(_ext._pixel_scramble(j)), j)
+
+    def test_pixel_carrier_corrects_up_to_16_byte_errors_per_block(self) -> None:
+        """RS(255,223) budget: 8 and 16 corrupted bytes in data block 0 still
+        decode (single corner, so there is no mirrored copy to lean on); 17
+        bytes is uncorrectable and the carrier is rejected outright."""
+        from PIL import Image
+
+        embedded = embed_screenshot_pixel_envelope(
+            _png_canvas(width=1080, height=2340), self._envelope(), scale=3, corner="top_left"
+        )
+        for nbytes in (8, 16):
+            image = Image.open(io.BytesIO(embedded)).convert("RGB")
+            for pos in range(nbytes):
+                _invert_encoded_byte(image, scale=3, corner="top_left", encoded_pos=pos)
+            out = io.BytesIO()
+            image.save(out, format="PNG")
+            result = decode_image(out.getvalue(), key_store=self._store())
+            self.assertTrue(result.found, msg=f"{nbytes} corrupted bytes should correct")
+            self.assertEqual(result.payload, _payload())
+        image = Image.open(io.BytesIO(embedded)).convert("RGB")
+        for pos in range(17):
+            _invert_encoded_byte(image, scale=3, corner="top_left", encoded_pos=pos)
+        out = io.BytesIO()
+        image.save(out, format="PNG")
+        self.assertEqual(extract_envelope_candidates(out.getvalue()), [])
+
+    def test_flat_page_bails_via_magic_canary(self) -> None:
+        """A uniform screenshot leaves every canary cell unreadable: the cheap
+        flat bail returns no candidates without touching the RS full read."""
+        self.assertEqual(extract_envelope_candidates(_png_canvas(width=1080, height=2340)), [])
 
     def test_qr_carrier_round_trips(self) -> None:
         envelope = self._envelope()
