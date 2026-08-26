@@ -57,10 +57,12 @@ from bugpatrol.watermark import (
     ERROR_KEY_UNKNOWN,
     ERROR_NOT_FOUND,
     NO_WATERMARK_NOTE,
+    WatermarkBadPayload,
     WatermarkKeyStore,
     build_envelope,
     candidates_to_compact_json,
     decode_image,
+    decrypt_envelope,
     embed_envelope_trailer,
     embed_png_text_envelope,
     embed_screenshot_pixel_envelope,
@@ -68,6 +70,7 @@ from bugpatrol.watermark import (
     payload_to_compact_json,
     watermark_failure_note,
 )
+from bugpatrol.watermark.extractor import PIXEL_MAX_ENVELOPE_BYTES
 from bugpatrol.watermark.keys import (
     WatermarkBadKeyConfig,
     WatermarkKeyNotFound,
@@ -109,6 +112,45 @@ def _payload(**overrides: object) -> dict[str, object]:
     }
     base.update(overrides)
     return base
+
+
+def _envelope_with_plaintext(public_pem: str, plaintext: bytes) -> dict[str, object]:
+    """Build an envelope whose AES plaintext is exactly ``plaintext`` bytes.
+
+    Lets tests mint a corrupt-gzip / arbitrary-plaintext envelope directly
+    (``build_envelope`` always gzips, so it cannot inject raw plaintext).
+    """
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
+    aes_key = b"\x01" * 32
+    iv = b"\x02" * 12
+    ciphertext_and_tag = AESGCM(aes_key).encrypt(iv, plaintext, None)
+    public_key = load_pem_public_key(public_pem.encode("utf-8"))
+    if not isinstance(public_key, RSAPublicKey):
+        raise ValueError("not an RSA public key")
+    wrapped_key = public_key.encrypt(
+        aes_key,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None,
+        ),
+    )
+    return {
+        "v": 1,
+        "keyId": DEFAULT_KEY_ID,
+        "alg": "RSA-OAEP-256+AES-256-GCM",
+        "data": {
+            "ciphertext": base64.b64encode(ciphertext_and_tag[:-16]).decode("ascii"),
+            "iv": base64.b64encode(iv).decode("ascii"),
+            "tag": base64.b64encode(ciphertext_and_tag[-16:]).decode("ascii"),
+            "wrappedKey": base64.b64encode(wrapped_key).decode("ascii"),
+        },
+    }
 
 
 def _png_1x1() -> bytes:
@@ -537,6 +579,83 @@ class WatermarkDecodeTest(unittest.TestCase):
         )
         self.assertFalse(result.found)
         self.assertEqual(result.error, "watermark_invalid_payload")
+
+
+class WatermarkCompressionTest(unittest.TestCase):
+    """Payload gzip compression (RFC1952) before AES-GCM.
+
+    The app compresses the payload JSON so the dev-mode payload (with its extra
+    testing fields) fits the pixel carrier budget; the decryptor transparently
+    decompresses and still accepts legacy uncompressed plaintext.
+    """
+
+    private_pem: str
+    public_pem: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.private_pem, cls.public_pem = _keypair()
+
+    def _store(self) -> WatermarkKeyStore:
+        return WatermarkKeyStore(keys={DEFAULT_KEY_ID: self.private_pem})
+
+    def test_gzip_compressed_payload_round_trips(self) -> None:
+        envelope = build_envelope(
+            _payload(),
+            public_key_pem=self.public_pem,
+            key_id=DEFAULT_KEY_ID,
+        )
+        embedded = embed_screenshot_pixel_envelope(_png_canvas(), envelope, scale=2)
+        result = decode_image(embedded, key_store=self._store())
+        self.assertTrue(result.found)
+        self.assertEqual(result.payload, _payload())
+
+    def test_legacy_uncompressed_payload_still_decrypts(self) -> None:
+        envelope = build_envelope(
+            _payload(),
+            public_key_pem=self.public_pem,
+            key_id=DEFAULT_KEY_ID,
+            compress=False,
+        )
+        embedded = embed_screenshot_pixel_envelope(_png_canvas(), envelope, scale=2)
+        result = decode_image(embedded, key_store=self._store())
+        self.assertTrue(result.found)
+        self.assertEqual(result.payload, _payload())
+
+    def test_corrupt_gzip_plaintext_fails_as_bad_payload(self) -> None:
+        envelope = _envelope_with_plaintext(
+            self.public_pem,
+            b"\x1f\x8b" + b"definitely-not-a-valid-gzip-stream-xxxxxxxx",
+        )
+        with self.assertRaises(WatermarkBadPayload):
+            decrypt_envelope(envelope, self._store())
+
+    def test_dev_mode_payload_fits_pixel_carrier_budget(self) -> None:
+        """Regression for the 1420B > 1111B dev-build overflow: the full dev
+        payload (testing fields included) must fit the pixel carrier budget,
+        and it must still pixel-embed + decode end to end."""
+        payload = _payload(
+            nickname="Tester",
+            socialId="tester_01",
+            pageDebug={"uid": "99", "sessionId": "buddy-session", "threadId": "123", "isBuddy": "true"},
+            buildInfoSecondary="feature-watermark",
+            gitBranch="sys-wm",
+            manufacturer="Apple",
+            rawDeviceId="hashed-device-id",
+            rawDeviceIdThree="shumei-device-id",
+            wsStatus="open",
+            inflightRequests=2,
+            timezone="Asia/Shanghai",
+        )
+        envelope = build_envelope(payload, public_key_pem=self.public_pem, key_id=DEFAULT_KEY_ID)
+        envelope_bytes = json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        self.assertLessEqual(len(envelope_bytes), PIXEL_MAX_ENVELOPE_BYTES)
+        embedded = embed_screenshot_pixel_envelope(
+            _png_canvas(width=1080, height=2340), envelope, scale=3,
+        )
+        result = decode_image(embedded, key_store=self._store())
+        self.assertTrue(result.found)
+        self.assertEqual(result.payload, payload)
 
 
 class WatermarkKeyStoreTest(unittest.TestCase):

@@ -27,6 +27,7 @@ key — the private key never touches this module.
 from __future__ import annotations
 
 import base64
+import gzip
 import json
 import os
 
@@ -45,11 +46,17 @@ def build_envelope(
     *,
     public_key_pem: str,
     key_id: str,
+    compress: bool = True,
 ) -> dict[str, object]:
     """Encrypt a payload into a watermark envelope (reference implementation).
 
     Uses the public key for the given ``keyId`` only. Mirrors the contract the
     app must implement; the private key is never required here.
+
+    The payload JSON is gzip-compressed (RFC1952, deterministic mtime=0) before
+    AES-GCM, matching the app — this keeps the dev-mode payload (with its extra
+    testing fields) under the pixel carrier budget. Pass ``compress=False`` to
+    mint a legacy uncompressed envelope.
     """
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
@@ -63,6 +70,8 @@ def build_envelope(
     aes_key = os.urandom(32)
     iv = os.urandom(12)
     plaintext = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if compress:
+        plaintext = gzip.compress(plaintext, mtime=0)
     ciphertext_and_tag = AESGCM(aes_key).encrypt(iv, plaintext, None)
     wrapped_key = public_key.encrypt(
         aes_key,

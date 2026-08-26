@@ -42,7 +42,8 @@ app 把加密 envelope 确定性嵌入截图。**canonical = 隐形 paired-cell 
 1. **Screenshot pixel carrier(canonical, invisible)**:app 渲染 root overlay,每 bit = 相邻的深/浅两格(alpha 13),视觉上互相抵消、对页面几乎不可见(δ≈13/255 亮度)。几何是**固定 3 物理像素 cell**(`app/lib/dev/diagnosticScreenshotWatermarkPixels.ts`:CELL=3、viewBox 768×768、距角 18px),任何 DPR(2 / 2.625 / 3 / …)都落在整数像素边界,无亚像素混叠;提取端固定 scale=3 读取,并用 **±1px 偏移探测**吸收 RN 布局舍入。双角冗余(top_left + bottom_right 各嵌一份)。所有构建(含 prod)都嵌——隐形载体对用户无感知,prod 截图也能追溯。
 
    **三层 ECC(RS + 2D 扩展 + 置乱)**:Lark 会把截图压成 1080 宽再重编码 JPEG,cells 从 3px 缩到 2.75px、每 bit 有 JPEG 量化误差——单靠 3× 多数不够,格式升级为错误纠正载体(`rs256.py` + extractor,与 app TS builder 逐字节一致):
-   - **RS(255,223)×5**:payload = `[magic 0x4D57][len 2B BE][envelope]` 零填充到 5×223=1115B,分 5 块 RS 编码 → 1275B,每块可纠 **16 个字节错**(实际经真实 Lark 渠道的每块错误 [9,10,8,8,13] 全部低于预算)。envelope 上限 **1111B**(实际 prod ≈1028B)。
+   - **RS(255,223)×5**:payload = `[magic 0x4D57][len 2B BE][envelope]` 零填充到 5×223=1115B,分 5 块 RS 编码 → 1275B,每块可纠 **16 个字节错**(实际经真实 Lark 渠道的每块错误 [9,10,8,8,13] 全部低于预算)。envelope 上限 **1111B**(prod 压缩后 ≈876B)。
+   - **Payload gzip 压缩(加密前)**:app 在 AES-GCM **之前**对 payload JSON 做 gzip(RFC1952,magic `1f 8b`)。信封里的大头(ciphertext/wrappedKey)是 base64 高熵密文压不动,压缩只发生在明文 payload JSON——dev 全字段 payload 的信封从 1420B 压到 ~950B 以内,跌破 1111B 上限。解密端 `decrypt_envelope` 按 gzip magic 透明解压,向后兼容未压缩旧信封。
    - **2D toroidal 扩展**:逻辑位 `j` 经置乱 `s=(j·8191)%10200` 后,副本 c 写在格位 `48 + s + c·10200` —— 三副本相隔 ~79 行 + ~88 列,单条横带/竖边至多翻转一份。
    - **提取端**:先读 **magic canary**(前 48 格,0.2ms)——纯色页全不可读直接平走;忙碌页多数 magic 离 0x4D57 远则自信判定无载波;5-8 位模糊时用 **RS 保护的 block-0 检查**(30ms)定夺;对齐几何读出后 RS 逐块纠错,不可读 cell 弃权。无载波图 ~300ms,干净截图 ~1.3s。
 2. **QR/Data Matrix(fallback)**:BugPatrol 用 zxing-cpp 扫图,只认内容能解析成 envelope JSON 的条码(屏幕上的分享二维码被忽略),多候选取离左上角最近者。app 侧已不渲染 QR badge,此 leg 供屏幕截图里恰好有信封 JSON 条码的场景。
@@ -61,7 +62,7 @@ app 把加密 envelope 确定性嵌入截图。**canonical = 隐形 paired-cell 
   "keyId": "diagnostic-watermark-v1",
   "alg": "RSA-OAEP-256+AES-256-GCM",
   "data": {
-    "ciphertext": "<base64 AES-256-GCM 密文(payload JSON)>",
+    "ciphertext": "<base64 AES-256-GCM 密文(gzip 后的 payload JSON)>",
     "iv": "<base64 12-byte nonce>",
     "tag": "<base64 16-byte GCM tag>",
     "wrappedKey": "<base64 RSA-OAEP-256 包裹的 AES-256 key>"

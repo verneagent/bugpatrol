@@ -9,6 +9,7 @@ ciphertexts all fail loudly with distinct error codes.
 from __future__ import annotations
 
 import base64
+import gzip
 import json
 from typing import cast
 
@@ -67,6 +68,14 @@ def decrypt_envelope(envelope: dict[str, object], key_store: WatermarkKeyStore) 
         plaintext = AESGCM(aes_key).decrypt(iv, ciphertext + tag, None)
     except Exception as exc:
         raise WatermarkDecryptError(f"envelope decrypt failed for keyId {key_id!r}: {exc}") from exc
+    # The app gzip-compresses the payload JSON (RFC1952) before AES-GCM so the
+    # dev-mode payload fits the pixel carrier budget. Legacy uncompressed
+    # plaintext (JSON starting with '{') is still accepted.
+    if plaintext.startswith(b"\x1f\x8b"):
+        try:
+            plaintext = gzip.decompress(plaintext)
+        except (OSError, EOFError) as exc:
+            raise WatermarkBadPayload("decrypted payload is not valid gzip") from exc
     try:
         payload = json.loads(plaintext.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
