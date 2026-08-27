@@ -42,6 +42,10 @@ REQUIRED_FIELDS = PAYLOAD_REQUIRED_FIELDS  # canonical contract (uid is dev-only
 
 EXPECTED_PAYLOAD = json.load(open(f"{TMP}/wm-e2e-payload.json"))
 PATHS = json.load(open(f"{TMP}/wm-e2e-paths.json"))
+# The renderer alpha comes from the app (fived exports it in wm-e2e-paths.json
+# via DIAGNOSTIC_SCREENSHOT_WATERMARK_ALPHA); 0.18 is the legacy fallback.
+RENDER_ALPHA = float(PATHS.get("alpha", 0.18))
+RENDER_DELTA = max(1, round(RENDER_ALPHA * 255))
 
 _CELL_RE = re.compile(r"M(\d+) (\d+)h3v3h-3z")
 
@@ -84,10 +88,10 @@ def render_screenshot(
     light = parse_cells(PATHS["lightPath"])
     for x, y in dark:
         px, py = round(x * sx), round(y * sy)
-        d.rectangle((px, py, px + CELL - 1, py + CELL - 1), fill=(0, 0, 0, 46))
+        d.rectangle((px, py, px + CELL - 1, py + CELL - 1), fill=(0, 0, 0, RENDER_DELTA))
     for x, y in light:
         px, py = round(x * sx), round(y * sy)
-        d.rectangle((px, py, px + CELL - 1, py + CELL - 1), fill=(255, 255, 255, 46))
+        d.rectangle((px, py, px + CELL - 1, py + CELL - 1), fill=(255, 255, 255, RENDER_DELTA))
     if occlude:
         # A dark sidebar at the screen edge plus text-like runs crossing the
         # carrier; inverted-edges and full-occlusion cells corrupt reads that
