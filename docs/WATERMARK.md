@@ -31,13 +31,13 @@ app 把**明文 payload JSON** 确定性嵌入截图。canonical = **扩频 pair
 - **H2 pair**:每 bit 由 N=4 对 chip 承载。pair = 两个 3×3 chip,中心距 4px(水平相邻,1px 间隙):
   - bit=1 → pa(cx−2, cy) 深色、pb(cx+2, cy) 浅色
   - bit=0 → 相反
-  - 深色 fill = `rgba(0,0,0,0.18)`、浅色 fill = `rgba(255,255,255,0.18)`,亮度差 δ ≈ 0.18×255 ≈ 46(与背景无关,α 不变式)。
+  - 深色 fill = `rgba(0,0,0,0.08)`、浅色 fill = `rgba(255,255,255,0.08)`,亮度差 δ ≈ 0.08×255 ≈ 20(与背景无关,α 不变式)。α=0.18 在真机上呈可见点阵磨砂,已降至 0.08(2026-08-27):解码在真实聊天 UI 背景下经 α 扫描(0.18→0.05)全形态仍过,**0.08 ≈ 2.3× 不易见 + 3× 余量**;极端全屏随机噪点照片背景在 <0.18 失败,非真实 app 屏幕。
 - **坐标生成(LCG,TS↔Python 必须逐字节一致)**:种子 `0x5EEDCAFE`,`state=(mul(1103515245,state)+12345)&0xFFFFFFFF`,`mul` = 16-bit 分解 32 位乘法(= JS `Math.imul`)。网格间距 `g=floor(sqrt(usable/nchips))`,`usable` 四周留 2% margin,不足时 g 递减;每个格点 jitter ±g/4;Fisher-Yates 洗牌取前 nchips。bit i → `centers[4i..4i+3]`。
 - **覆盖 11.6%**(4080 bit × 4 pair × 2 chip × 9px / 2527200)。与 RS 参数无关 → 用最大纠错余量。
 
 ### ECC:RS(255,135)×2
 
-`payload = [magic 0x4D58][len 2B BE][payload]` 零填充到 2×135=270B,分 2 块 `rs_encode_msg(block, nsym=120)` → 510B 编码流 → 4080 bit。每块可纠 **60 字节错**(t=60;测试证明 α0.18 下 54/54 全过,含 native 1440 + 密集文本 + 照片纹理的极端场景;t=56 在 text/l/1440 失败)。**纯多数投票**解码(不做弃权/擦除 —— 实测弃权反而放大错误)。payload 上限 **266B**(实测 234B,余量 32B)。
+`payload = [magic 0x4D58][len 2B BE][payload]` 零填充到 2×135=270B,分 2 块 `rs_encode_msg(block, nsym=120)` → 510B 编码流 → 4080 bit。每块可纠 **60 字节错**(t=60;测试证明 α0.08 下 5/5 通道形态 + 真实聊天 UI 背景全过,含 native 1440 + 密集文本 + 照片纹理;t=56 在 text/l/1440 失败)。**纯多数投票**解码(不做弃权/擦除 —— 实测弃权反而放大错误)。payload 上限 **266B**(实测 234B,余量 32B)。
 
 ### 提取端
 
