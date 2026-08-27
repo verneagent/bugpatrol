@@ -24,11 +24,10 @@ class Attachment:
     url: str
     description: str = ""
     # Watermark status for this attachment, rendered verbatim as the issue
-    # body's `- watermark-candidates:` line. The relay watcher stores every
-    # extracted encrypted envelope as a compact JSON array (unverified — the
-    # triage runner decrypts them with the GH Actions key); `未找到水印` when
+    # body's `- watermark:` line. The relay watcher stores the extracted
+    # plaintext payload as compact JSON (no encryption); `未找到水印` when
     # media was scanned and carried none; "" when not attempted (not
-    # image/video media). Decryption results are never persisted here.
+    # image/video media).
     watermark: str = ""
 
 
@@ -339,10 +338,7 @@ def render_attachments_markdown(attachments: tuple[Attachment, ...], *, copy: di
         if item.description:
             lines.append(f"  - {copy['generated_description']}: {item.description}")
         if item.watermark:
-            if item.watermark == NO_WATERMARK_NOTE:
-                lines.append(f"  - watermark: {item.watermark}")
-            else:
-                lines.append(f"  - watermark-candidates: {item.watermark}")
+            lines.append(f"  - watermark: {item.watermark}")
     return "\n".join(lines)
 
 

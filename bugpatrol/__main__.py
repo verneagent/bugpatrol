@@ -189,7 +189,7 @@ def _print_watermark_human(result: WatermarkDecodeResult) -> None:
     if not result.found:
         print(f"no watermark: {result.error}")
         return
-    print(f"watermark found (keyId={result.key_id}, confidence={result.confidence})")
+    print(f"watermark found (confidence={result.confidence})")
     if result.payload is not None:
         print(render_payload_summary(result.payload))
 

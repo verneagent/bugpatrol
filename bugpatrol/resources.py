@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -689,16 +690,15 @@ def _decode_watermark(
 ) -> str:
     """Return the watermark issue-line value for a media attachment.
 
-    The relay watcher has NO private key: it only extracts every structurally
-    valid encrypted envelope (candidates) from the raw bytes and stores them
-    unverified. The triage runner later decrypts each candidate with the
-    GH Actions private key and GCM auth picks the clean payload.
+    The payload is PLAINTEXT (no encryption, no private key): the watcher
+    extracts the RS-verified payload JSON directly from the raw bytes and
+    stores it compacted.
 
     Three states, rendered verbatim into the issue body:
 
-    - compact JSON array of envelope dicts -> carrier found (encrypted)
-    - ``未找到水印``                        -> scanned, no carrier present
-    - ``""``                               -> not attempted (not media)
+    - compact payload JSON            -> carrier found (plaintext)
+    - ``未找到水印``                   -> scanned, no carrier present
+    - ``""``                          -> not attempted (not media)
 
     A corrupt carrier surfaces as ``水印解码失败 (<code>)``. Runs on the raw
     downloaded bytes, before any re-encode (resize/JPEG convert would strip the
@@ -708,17 +708,17 @@ def _decode_watermark(
         return ""
     from bugpatrol.watermark.extractor import (
         WatermarkInvalidEnvelope,
-        extract_envelope_candidates,
+        extract_plaintext_payload,
     )
     from bugpatrol.watermark.reporter import (
         NO_WATERMARK_NOTE,
-        candidates_to_compact_json,
+        payload_to_compact_json,
         watermark_failure_note,
     )
     from bugpatrol.watermark.types import ERROR_BAD_ENVELOPE
 
     try:
-        candidates = extract_envelope_candidates(resource.content)
+        payload_bytes = extract_plaintext_payload(resource.content)
     except WatermarkInvalidEnvelope as exc:
         # A carrier was present but unreadable; surface it AND log, but never
         # block intake.
@@ -728,9 +728,20 @@ def _decode_watermark(
             file=sys.stderr,
         )
         return watermark_failure_note(ERROR_BAD_ENVELOPE)
-    if not candidates:
+    if payload_bytes is None:
         return NO_WATERMARK_NOTE
-    return candidates_to_compact_json(candidates)
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        print(
+            f"resource watermark payload unreadable "
+            f"({ref.message_id}/{ref.resource_key}): {exc}",
+            file=sys.stderr,
+        )
+        return watermark_failure_note(ERROR_BAD_ENVELOPE)
+    if not isinstance(payload, dict):
+        return watermark_failure_note(ERROR_BAD_ENVELOPE)
+    return payload_to_compact_json(payload)
 
 
 def _is_video_resource(*, ref: LarkResourceRef, resource: DownloadedLarkResource) -> bool:

@@ -10,19 +10,7 @@ import re
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment
 from bugpatrol.openspec import OpenSpecChange, OpenSpecOwnerHit, score_openspec_changes
 from bugpatrol.prd import PrdSearchHit, load_prd_documents, search_prd_documents
-from bugpatrol.watermark.decryptor import (
-    WatermarkBadPayload,
-    WatermarkDecryptError,
-    decrypt_envelope,
-)
-from bugpatrol.watermark.envelope import WatermarkBadEnvelope
-from bugpatrol.watermark.keys import WatermarkKeyNotFound, WatermarkKeyStore
-from bugpatrol.watermark.reporter import (
-    payload_to_compact_json,
-    render_payload_summary,
-    watermark_failure_note,
-)
-from bugpatrol.watermark.types import ERROR_BAD_PAYLOAD, ERROR_DECRYPT, ERROR_KEY_UNKNOWN
+from bugpatrol.watermark.reporter import render_payload_summary
 
 
 MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\((?P<url>https?://[^)\s]+)\)")
@@ -35,10 +23,8 @@ class MediaEvidence:
     description: str = ""
     source: str = ""
     # Watermark status of this attachment, as read from the issue body's
-    # `- watermark:` / `- watermark-candidates:` line. Holds a compact payload
-    # JSON when the runner decrypted it, a compact JSON array of encrypted
-    # candidate envelopes before decryption, `未找到水印` / a decode failure
-    # note, or "" when never scanned.
+    # `- watermark:` line. Holds the plaintext payload's compact JSON,
+    # `未找到水印` / a decode failure note, or "" when never scanned.
     watermark: str = ""
 
 
@@ -84,15 +70,13 @@ def build_triage_context(
     query = f"{issue.title}\n{issue.body}\n{comments_text}"
     hits = search_prd_documents(query, docs, limit=prd_limit)
     openspec_hits = score_openspec_changes(query, openspec_changes, limit=openspec_limit)
-    media = resolve_media_watermarks(
-        (
-            *extract_media_evidence(issue.body, source="issue body"),
-            *(
-                item
-                for comment in comments
-                for item in extract_media_evidence(comment.body, source=f"comment {comment.id}")
-            ),
-        )
+    media = (
+        *extract_media_evidence(issue.body, source="issue body"),
+        *(
+            item
+            for comment in comments
+            for item in extract_media_evidence(comment.body, source=f"comment {comment.id}")
+        ),
     )
     return TriageContext(
         issue=issue,
@@ -264,17 +248,6 @@ def extract_media_evidence(markdown: str, *, source: str = "") -> tuple[MediaEvi
                 source=current.source,
             )
             continue
-        if line.startswith("- watermark-candidates:"):
-            watermark = line.removeprefix("- watermark-candidates:").strip()
-            current = items[current_index]
-            items[current_index] = MediaEvidence(
-                kind=current.kind,
-                url=current.url,
-                description=current.description,
-                source=current.source,
-                watermark=watermark,
-            )
-            continue
         if line.startswith("- watermark:"):
             watermark = line.split(":", 1)[1].strip()
             current = items[current_index]
@@ -288,95 +261,14 @@ def extract_media_evidence(markdown: str, *, source: str = "") -> tuple[MediaEvi
     return tuple(items)
 
 
-def resolve_media_watermarks(
-    media: tuple[MediaEvidence, ...],
-    *,
-    key_store: WatermarkKeyStore | None = None,
-) -> tuple[MediaEvidence, ...]:
-    """Decrypt candidate watermarks into triage context on the runner.
-
-    The relay watcher stores every extracted encrypted envelope unverified as a
-    compact JSON array (`- watermark-candidates:`), because it holds no private
-    key. Decryption happens HERE — on the triage runner, which gets the key from
-    the workflow's ``FIVED_WATERMARK_PRIVATE_KEY_PEM`` / ``FIVED_WATERMARK_KEYS_JSON``
-    secrets. Each candidate is tried best-first and GCM authentication picks the
-    clean one; unknown-key and all-failed cases become failure notes. Without a
-    configured key this is a no-op (feature off), leaving candidates intact.
-    """
-    store = key_store if key_store is not None else WatermarkKeyStore.from_env()
-    if not store.has_keys():
-        return media
-    resolved: list[MediaEvidence] = []
-    for item in media:
-        candidates = _candidate_envelopes(item.watermark)
-        if candidates is None:
-            resolved.append(item)
-            continue
-        resolved.append(_resolve_candidates(item, candidates, store))
-    return tuple(resolved)
-
-
-def _candidate_envelopes(watermark: str) -> list[dict[str, object]] | None:
-    """Return envelope dicts when ``watermark`` is a candidate JSON array.
-
-    ``None`` when the line is not a candidate list — `未找到水印`, a failure
-    note, an already-decrypted payload, or a non-JSON leftover.
-    """
-    if not watermark:
-        return None
-    try:
-        value = json.loads(watermark)
-    except ValueError:
-        return None
-    if not isinstance(value, list):
-        return None
-    return [item for item in value if isinstance(item, dict)]
-
-
-def _resolve_candidates(
-    item: MediaEvidence,
-    candidates: list[dict[str, object]],
-    store: WatermarkKeyStore,
-) -> MediaEvidence:
-    """Try each envelope; the first GCM-clean decrypt wins, else a failure note."""
-    last_error = ERROR_DECRYPT
-    for envelope in candidates:
-        try:
-            payload = decrypt_envelope(envelope, store)
-        except WatermarkKeyNotFound:
-            return _with_watermark(item, watermark_failure_note(ERROR_KEY_UNKNOWN))
-        except WatermarkBadEnvelope:
-            last_error = ERROR_DECRYPT
-            continue
-        except WatermarkDecryptError:
-            continue
-        except WatermarkBadPayload:
-            last_error = ERROR_BAD_PAYLOAD
-            continue
-        return _with_watermark(item, payload_to_compact_json(payload))
-    return _with_watermark(item, watermark_failure_note(last_error))
-
-
-def _with_watermark(item: MediaEvidence, watermark: str) -> MediaEvidence:
-    return MediaEvidence(
-        kind=item.kind,
-        url=item.url,
-        description=item.description,
-        source=item.source,
-        watermark=watermark,
-    )
-
-
 def _watermark_summary(watermark: str) -> str:
-    """Render a stored compact watermark JSON as a readable triage line."""
+    """Render a stored compact plaintext payload JSON as a readable triage line."""
     try:
         payload = json.loads(watermark)
     except ValueError:
         return watermark
     if isinstance(payload, dict):
         return render_payload_summary(payload)
-    if isinstance(payload, list):
-        return f"[Watermark] {len(payload)} candidate envelope(s) (encrypted)"
     return watermark
 
 

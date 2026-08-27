@@ -1,80 +1,61 @@
 # 隐形水印解码 — 截图诊断元数据接入
 
-状态:已实现
-日期:2026-08-25
+状态:已实现(扩频明文 v2,2026-08-27)
+日期:2026-08-27
 
 ## 目的
 
 Five Degrees app 在截图里嵌入不可见诊断水印(BugPatrol / app 协作方案,payload 契约见 `app/lib/dev/diagnosticsClipboard.ts`)。BugPatrol 负责**确定性**解码:
 
-1. **提取**(image bytes → 加密 envelope):`bugpatrol/watermark/extractor.py`
-2. **解密**(envelope → JSON payload):`bugpatrol/watermark/decryptor.py`
-3. **上报**(payload → triage 上下文):`bugpatrol/watermark/reporter.py`
+1. **提取**(image bytes → 明文 payload):`bugpatrol/watermark/extractor.py`
+2. **上报**(payload → triage 上下文):`bugpatrol/watermark/reporter.py`
 
-整条链是**纯代码**,不走任何 prompt 识别 —— agent 只消费确定性输出。
+整条链是**纯代码**,不走任何 prompt 识别 —— agent 只消费确定性输出。**不加密、无密钥** —— payload 直接明本写进 issue body;`uid` 只在开发环境出现(用户已确认开发环境 issue body 明文 uid 可接受)。
 
-## 密钥 / 环境变量
+## 设计决策(v2,扩频明文)
 
-私钥**永远不进仓库**。只从环境 / secret 读取:
+用户决定:生产/开发**都不加密,直接明本**;`uid` 只在开发环境加。由此:
 
-| 变量 | 用途 |
-|---|---|
-| `FIVED_WATERMARK_PRIVATE_KEY_PEM` | 当前主私钥,服务默认 `keyId` = `diagnostic-watermark-v1` |
-| `FIVED_WATERMARK_KEYS_JSON` | (可选)keyId → PEM 的 JSON 对象,用于**密钥轮换** |
-
-- **解密发生在 GH Actions runner,不是 relay**:watcher 无 key 只提取候选密文写进 issue body;私钥**只**存在于 fived repo 的 **GitHub Actions secret**,由 workflow env 注入 runner,在 `build_triage_context` 里解密。Mac Studio **不存私钥**。
-- **生产**:deploy 时把正式私钥设成 fived repo 的 GH secret `FIVED_WATERMARK_PRIVATE_KEY_PEM`(轮换另加 `FIVED_WATERMARK_KEYS_JSON`),并在 `.github/workflows/bugpatrol-triage.yml` 的 provision step env 注入(secret 未设 = 空串,特性关闭,无害)。
-- **本地 / dev**:同名环境变量(E2E / 单测用测试 key pair),例:`~/.zshrc` 或命令行 `export`。
-- **无 key = 特性关闭**:runner 端没配私钥时 `resolve_media_watermarks` 原样保留候选密文(渲染成 `[Watermark] N candidate envelope(s)`),流水线照常走,不报错不阻塞。
-
-### 轮换流程
-
-1. 生成新 RSA-2048 key pair,把新私钥设为 `FIVED_WATERMARK_PRIVATE_KEY_PEM`(新 payload 用它)。
-2. 旧私钥以 `{"<old-keyId>": "<old PEM>"}` 写进 `FIVED_WATERMARK_KEYS_JSON`,保证旧截图仍能解。
-3. app 侧 `keyId` 改为新 id 后,旧 keyId 的 payload 继续按 envelope 的 `keyId` 命中 `KEYS_JSON`。
-
-> 私钥泄露应急:立刻换 `FIVED_WATERMARK_PRIVATE_KEY_PEM` + 在 `KEYS_JSON` 里保留一段时间旧 key,回滚到新 key 之前自动失效。
+- **密钥层整体删除**:`keys.py`、`envelope.py`、`decryptor.py`、fived 的 `diagnosticWatermarkEncryption.ts` 全部移除。不再有 GH Actions secret / workflow env 注入 / 轮换流程。
+- **keyId 字段删除**:它是加密时代的密钥轮换标记,明文下无意义 —— 格式契约已由 `schemaVersion: 2` 承担。若保留真实值 `diagnostic-watermark-v1`(22 字符)payload 会到 268B,超出 RS(255,135)×2 容量(266B);删除后 234B,余量 32B。
+- **split 流程折叠回单流**:watcher 无 key 提取 → 明文 payload 直接进 issue body(`- watermark:` 行);runner 直接解析,不再解密。
+- **QR/Data Matrix fallback 移除**:旧 QR leg 是给加密 envelope 大容量的兜底;明文 234B 由 pixel carrier 全包,QR 只会引入误读风险。
 
 ## 载体契约(embedding)
 
-app 把加密 envelope 确定性嵌入截图。**canonical = 隐形 paired-cell pixel carrier**(用户完全感知不到,只有 BugPatrol 分析时能读出来);旧载体保留兼容:
+app 把**明文 payload JSON** 确定性嵌入截图。canonical = **扩频 paired-cell pixel carrier**(磨砂质感,只放开发环境截图;prod 也嵌——用户确认 prod 也走扩频明文)。
 
-1. **Screenshot pixel carrier(canonical, invisible)**:app 渲染 root overlay,每 bit = 相邻的深/浅两格(alpha 13),视觉上互相抵消、对页面几乎不可见(δ≈13/255 亮度)。几何是**固定 3 物理像素 cell**(`app/lib/dev/diagnosticScreenshotWatermarkPixels.ts`:CELL=3、viewBox 768×768、距角 18px),任何 DPR(2 / 2.625 / 3 / …)都落在整数像素边界,无亚像素混叠;提取端固定 scale=3 读取,并用 **±1px 偏移探测**吸收 RN 布局舍入。双角冗余(top_left + bottom_right 各嵌一份)。所有构建(含 prod)都嵌——隐形载体对用户无感知,prod 截图也能追溯。
+### 几何(nominal-canvas zero-remap)
 
-   **三层 ECC(RS + 2D 扩展 + 置乱)**:Lark 会把截图压成 1080 宽再重编码 JPEG,cells 从 3px 缩到 2.75px、每 bit 有 JPEG 量化误差——单靠 3× 多数不够,格式升级为错误纠正载体(`rs256.py` + extractor,与 app TS builder 逐字节一致):
-   - **RS(255,223)×6**:payload = `[magic 0x4D57][len 2B BE][envelope]` 零填充到 6×223=1338B,分 6 块 RS 编码 → 1530B,每块可纠 **16 个字节错**(实际经真实 Lark 渠道的每块错误 [9,10,8,8,13] 全部低于预算)。envelope 上限 **1334B**(prod 压缩后 ≈876B)。原 5 块(上限 1111B)对 dev 全字段 payload 太挤——gzip 后真机仍 1180B,6 块才有余量。
-   - **Payload gzip 压缩(加密前)**:app 在 AES-GCM **之前**对 payload JSON 做 gzip(RFC1952,magic `1f 8b`)。信封里的大头(ciphertext/wrappedKey)是 base64 高熵密文压不动,压缩只发生在明文 payload JSON——dev 全字段 payload 的信封从 1420B 压到 ~1180B,配合 6 块载体(1334B)放进预算。解密端 `decrypt_envelope` 按 gzip magic 透明解压,向后兼容未压缩旧信封。**注意**:dev payload 里的 `rawDeviceId`(sha256 hex,64 字符)/ `rawDeviceIdThree`(shumei 设备 ID,~100 字符)是压不动的高熵字段,预算测试必须用真实长度桩,短桩会假绿。
-   - **2D toroidal 扩展**:逻辑位 `j` 经置乱 `s=(j·8191)%10200` 后,副本 c 写在格位 `48 + s + c·10200` —— 三副本相隔 ~79 行 + ~88 列,单条横带/竖边至多翻转一份。
-   - **提取端**:先读 **magic canary**(前 48 格,0.2ms)——纯色页全不可读直接平走;忙碌页多数 magic 离 0x4D57 远则自信判定无载波;5-8 位模糊时用 **RS 保护的 block-0 检查**(30ms)定夺;对齐几何读出后 RS 逐块纠错,不可读 cell 弃权。无载波图 ~300ms,干净截图 ~1.3s。
-2. **QR/Data Matrix(fallback)**:BugPatrol 用 zxing-cpp 扫图,只认内容能解析成 envelope JSON 的条码(屏幕上的分享二维码被忽略),多候选取离左上角最近者。app 侧已不渲染 QR badge,此 leg 供屏幕截图里恰好有信封 JSON 条码的场景。
-3. **Trailer(legacy/reference)**:图片自然结束处追加 `BUGPATROL_WM1:<b64-envelope>:BUGPATROL_WM1`。PNG/JPEG 解码器在 IEND/EOI 处停下,trailer 对用户不可见但文件里存在。
-4. **PNG tEXt chunk(legacy/reference)**:关键字 `bugpatrol.watermark`,值为 base64 envelope。
+- **名义画布 1080×2340**,所有 chip 坐标在名义画布上算。fived 渲染**全屏单 SVG**,`viewBox="0 0 1080 2340"`,`preserveAspectRatio="xMidYMid meet"`,absoluteFill。SVG 缩放到 native;Lark 把截图下采样到 1080 宽。两次缩放的因子**精确抵消** → chip 在最终 1080 宽图上落在**名义坐标原处**,decoder 直接按名义坐标读,**无需知道 native 分辨率、无需 remap**。
+- **H2 pair**:每 bit 由 N=4 对 chip 承载。pair = 两个 3×3 chip,中心距 4px(水平相邻,1px 间隙):
+  - bit=1 → pa(cx−2, cy) 深色、pb(cx+2, cy) 浅色
+  - bit=0 → 相反
+  - 深色 fill = `rgba(0,0,0,0.18)`、浅色 fill = `rgba(255,255,255,0.18)`,亮度差 δ ≈ 0.18×255 ≈ 46(与背景无关,α 不变式)。
+- **坐标生成(LCG,TS↔Python 必须逐字节一致)**:种子 `0x5EEDCAFE`,`state=(mul(1103515245,state)+12345)&0xFFFFFFFF`,`mul` = 16-bit 分解 32 位乘法(= JS `Math.imul`)。网格间距 `g=floor(sqrt(usable/nchips))`,`usable` 四周留 2% margin,不足时 g 递减;每个格点 jitter ±g/4;Fisher-Yates 洗牌取前 nchips。bit i → `centers[4i..4i+3]`。
+- **覆盖 11.6%**(4080 bit × 4 pair × 2 chip × 9px / 2527200)。与 RS 参数无关 → 用最大纠错余量。
 
-提取逻辑:先扫 trailer 标记,再试 PNG tEXt/iTXt chunk,再试 pixel carrier(scale=3 优先,双角,每个 ±1px 偏移),最后扫 QR/Data Matrix。byte carrier envelope 上限 512KB。
+### ECC:RS(255,135)×2
 
-**候选提取 + 解密(抗错读)**:±1px 偏移读错时可能产出「结构合法但密文损坏」的 envelope(base64 里 2 个字符错位仍能解析成 JSON)。**watcher 无 key 收集所有结构合法候选**写进 issue body;runner 端 `resolve_media_watermarks` 逐个用私钥试,以 **GCM auth 为 ground truth** —— 干净的那份(比如另一角)赢过解析得出但解不了密的冒牌货。迭代是**惰性 best-first** 的,干净截图只读一次就停下,无载波图 ~300ms(扁平 canary 0.2ms 直接平走)。
+`payload = [magic 0x4D58][len 2B BE][payload]` 零填充到 2×135=270B,分 2 块 `rs_encode_msg(block, nsym=120)` → 510B 编码流 → 4080 bit。每块可纠 **60 字节错**(t=60;测试证明 α0.18 下 54/54 全过,含 native 1440 + 密集文本 + 照片纹理的极端场景;t=56 在 text/l/1440 失败)。**纯多数投票**解码(不做弃权/擦除 —— 实测弃权反而放大错误)。payload 上限 **266B**(实测 234B,余量 32B)。
 
-## Envelope 格式
+### 提取端
 
-```json
-{
-  "v": 1,
-  "keyId": "diagnostic-watermark-v1",
-  "alg": "RSA-OAEP-256+AES-256-GCM",
-  "data": {
-    "ciphertext": "<base64 AES-256-GCM 密文(gzip 后的 payload JSON)>",
-    "iv": "<base64 12-byte nonce>",
-    "tag": "<base64 16-byte GCM tag>",
-    "wrappedKey": "<base64 RSA-OAEP-256 包裹的 AES-256 key>"
-  }
-}
-```
+1. 打开图 → 转 L → 宽度 ≠ 1080 则 LANCZOS 缩到 1080 宽。
+2. 同 seed 生成 LCG centers。
+3. 每 bit:读 4 对 chip 的 3×3 均值,`delta = bv − av`(pa 在 cx−2、pb 在 cx+2),多数投票取符号(平局 → 0)。
+4. 组装 510B → 每块 `rs_correct_msg(..., 120)`,任一失败 → 无载波/拒读。
+5. `[magic 0x4D58][len]` → payload bytes → JSON。
 
-## Payload 契约(core 字段)
+无载波图快速失败:magic 不符或 RS 解不出即返回 None。
 
-解码后的 payload 必须含全部字段,`schemaVersion` 必须为 1:
+## Payload 契约(v2,明文)
 
-`schemaVersion, keyId, watermarkId, uid, pathname, platform, appVersion, buildVersion, buildInfo, gitCommit, buildTime, modelName, osName, osVersion, capturedAt`
+`schemaVersion` 必须为 `2`。字段(uid 仅开发环境,prod 省略):
+
+`schemaVersion, appVersion, buildVersion, buildTime, modelName, osName, osVersion, capturedAt` + `uid`(dev only)
+
+删除:`keyId`(加密产物)、`watermarkId`、`pathname`、`platform`、`buildInfo`、`gitCommit` 及全部 testing 字段(nickname/socialId/pageDebug/rawDeviceId 等)。
 
 ## CLI(agent 调用入口)
 
@@ -82,43 +63,39 @@ app 把加密 envelope 确定性嵌入截图。**canonical = 隐形 paired-cell 
 bugpatrol watermark decode --image /path/to/screenshot.png --json
 ```
 
-- **成功**(找到 + 解密成功):exit 0
-  ```json
-  {"found": true, "confidence": 1.0, "keyId": "diagnostic-watermark-v1", "payload": { ...14 个字段... }}
-  ```
+- **成功**:exit 0,`{"found": true, "confidence": 1.0, "payload": { ...8 个字段... }}`
 - **无水印**:exit 0,`{"found": false, "confidence": 0, "error": "watermark_not_found"}`
-- **密钥缺失 / 解密失败 / 未知 keyId**:exit 1,`error` 区分:`watermark_private_key_missing` / `watermark_decrypt_failed` / `watermark_key_not_found`
 - **图片不存在**:exit 2,`watermark_image_not_found`
 
-去掉 `--json` 输出人类可读的 `[Watermark] keyId=... watermarkId=...` 摘要行。
+去掉 `--json` 输出人类可读的 `[Watermark] schemaVersion=2 appVersion=...` 摘要行。
 
 ## 流水线接入点
 
-提取在**原始下载字节**上、`redactor`/`transformer` 重编码**之前**执行(resize/JPEG 转码可能毁掉低 alpha pixel carrier),且**不需要私钥**:
+提取在**原始下载字节**上、`redactor`/`transformer` 重编码**之前**执行(resize/JPEG 转码会毁掉低 alpha pixel carrier):
 
-- **watcher 侧(无 key)**:`materialize_attachment`(resources.py,RAW bytes → 提取候选 → redact → transform → policy → store → describe)→ `Attachment.watermark` = 候选密文 JSON 数组 → issue body `- watermark-candidates: <JSON 数组>` 行。
-- **runner 侧(有 key)**:`extract_media_evidence`(triage_context.py)解析候选 → `resolve_media_watermarks` 逐个 `decrypt_envelope`(GCM auth 挑干净)→ `MediaEvidence.watermark` = payload → triage context 渲染成 `- Watermark: [Watermark] keyId=...` 供 agent 读取。
+- **watcher 侧**:`materialize_attachment`(resources.py,RAW bytes → 提取明文 payload → redact → transform → policy → store → describe)→ `Attachment.watermark` = payload compact JSON → issue body `- watermark: <JSON>` 行。
+- **runner 侧**:`extract_media_evidence`(triage_context.py)解析 `- watermark:` → `MediaEvidence.watermark` = payload → triage context 渲染成 `- Watermark: [Watermark] appVersion=... uid=...` 供 agent 读取。**无解密、无 key。**
 
-图片和视频都是水印候选(resources.py `_is_watermark_candidate`)。**issue body** 只表达三态:
+issue body 三态:
 
-- **有候选(加密)** → `- watermark-candidates: <JSON 数组>`,打开 issue 看不到明文
-- **扫描过、没有** → `- watermark: 未找到水印`,显式标注「已检查、不存在」,而不是整行缺失
+- **有水印** → `- watermark: <明文 payload JSON>`
+- **扫描过、没有** → `- watermark: 未找到水印`,显式标注「已检查、不存在」
 - **未尝试**(非图片视频)→ `""`,整行省略
 
-**解密失败 / 未知 key / 坏 payload** 不落 issue body,在 **runner context** 里变成 `水印解码失败 (<code>)`;无 key 时 runner 原样保留候选,渲染成 `[Watermark] N candidate envelope(s) (encrypted)`。watermark 任何阶段失败都不阻塞 intake / triage。
-
-watcher / backfill / event-watcher / mail-watcher 全部接入(无 key 提取,`configured_watermark_decoder()` 已删除)。
+坏载体 → `水印解码失败 (<code>)`。watermark 任何阶段失败都不阻塞 intake / triage。watcher / backfill / event-watcher / mail-watcher 全部接入。
 
 ## 验证(端到端)
 
-- **fived jest harness**(`app/lib/__tests__/verify-watermark-e2e.test.ts`):用 app 真实代码构建 prod-mode envelope,导出加密 envelope + 匹配私钥 + **真实渲染的 darkPath/lightPath**(RS 纠错 + 置乱 + 2D 扩展几何)到 `$TMPDIR/wm-e2e-{envelope,private,paths}.*`。断言 prod payload = 15 字段(含 `uid`,不含敏感字段)。
-- **BugPatrol E2E harness**(`wm_e2e_embed.py`):解析 fived 导出的真实 path 字符串,把 cell 渲染到 1080×2340 截图(双角 + 页面噪声),跑 `bugpatrol watermark decode`。PNG、JPEG q85、UI 遮挡 + JPEG q85 四种形态全部解码出完整 prod payload。**同时跑 split 流程**:watcher 无 key 提取候选 → 构造 `- watermark-candidates:` issue body 行 → `extract_media_evidence` + `resolve_media_watermarks`(测试 key)→ 断言 14 个 required 字段全在。消费的是 app 真实几何,不是 Python 重实现——TS RS 编码与 Python 解码逐字节一致由此证明。
-- 单测:`tests/test_watermark.py`(55 例,含全部失败模式 + QR/pixel/trailer/tEXt carriers + 固定 3px ±1px 偏移 + 背景阶跃多数恢复 + JPEG q85 弃权 + UI edge + JPEG + **RS 16 字节/块预算 + 超预算拒读 + magic canary 布局 + 置乱置换 + flat 快路径** + **watcher 提取 / runner 解密 split + 候选优先 + 未知 key + 无 key 原样** + 流水线集成 + CLI)+ `tests/test_rs256.py`(6 例 RS 单测:300 随机 0-16 字节纠错、超预算 → None、GF 域约定)。
+- **单测载体**(`tests/test_watermark.py`):trailer / PNG tEXt / 扩频 pixel 三载波 round-trip、prod(无 uid)payload、**半 native 缩放**(540 宽渲染 → 提取器 LANCZOS 回 1080)、RS 预算边界(60 字节错纠正 / 61 → 拒读)、坏载体 `ERROR_BAD_ENVELOPE`、watcher 提取 / runner 解析 / intake 渲染 / triage context / CLI / 明文契约,33 例。
+- **RS 单测**(`tests/test_rs256.py`):clean 直通、60 字节错纠正、300 例随机损坏在预算内纠正、远超预算拒读、前缀保留、域约定。
+- **fived jest harness**(`app/lib/__tests__/verify-watermark-e2e.test.ts`):用 app 真实代码构建明文 payload + path 几何(dev 带 uid / prod 无 uid),导出到 `$TMPDIR/wm-e2e-*`。
+- **BugPatrol E2E harness**(`wm_e2e_embed.py`):**直接解析 fived jest 导出的真实 `darkPath`/`lightPath`**(非重推导),渲染到名义 1080×2340 截图,跑 `bugpatrol watermark decode --json` + watcher→runner split 流程。5 种形态:PNG、JPEG q85、UI 遮挡、UI+q85、**native 1170×2532 q85**(Lark 1080 下采样往返)。全部解出完整明文 payload,与 fived 导出**逐字节相等**。
 
 ## 实现位置
 
-- `bugpatrol/watermark/` — types / keys / envelope / extractor / decryptor / reporter / `rs256.py`(Reed-Solomon 编解码)/ `__init__`(公共 API `decode_image`、`WatermarkResourceDecoder`、`candidates_to_compact_json`)
-- `bugpatrol/resources.py`(watcher 无 key 提取)、`intake.py`(issue body 渲染)、`triage_context.py`(`resolve_media_watermarks` runner 解密)、`backfill.py`、`watcher.py`、`event_watcher.py`、`watch_mail.py`、`__main__.py`(CLI decode)
-- 测试:`tests/test_watermark.py`(59 例,含全部失败模式 + QR/pixel/trailer/tEXt carriers + 固定 3px ±1px 偏移 + 背景阶跃多数恢复 + JPEG q85 弃权 + UI edge + JPEG + RS 预算 + magic canary + split 流程 + 流水线集成 + CLI + gzip 压缩回归)+ `tests/test_rs256.py`(6 例)
+- `bugpatrol/watermark/` — types / extractor / reporter / `rs256.py`(Reed-Solomon 编解码)/ `__init__`(公共 API `decode_image`、`WatermarkResourceDecoder`)
+- `bugpatrol/resources.py`(watcher 提取明文)、`intake.py`(issue body 渲染)、`triage_context.py`(runner 解析)、`__main__.py`(CLI decode)
+- fived:`app/lib/dev/diagnosticScreenshotWatermarkPixels.ts`(扩频 path builder)、`app/components/dev/DiagnosticScreenshotWatermark.tsx`(全屏单 SVG)、`app/lib/dev/diagnosticsClipboard.ts`(8 字段明文 payload)
+- 测试:`tests/test_watermark.py` + `tests/test_rs256.py` + fived `app/lib/__tests__/verify-watermark-e2e.test.ts`
 
-依赖:`cryptography>=42`、`zxing-cpp>=3.1` + `numpy>=1.26`(均 lazy-import,不拖慢 import 路径;测试夹具还用 `qrcode`(dev extra)生成 QR 图)。
+依赖:`cryptography` 不再需要(无加密)。PIL + rs256 自带。
