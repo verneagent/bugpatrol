@@ -280,6 +280,26 @@ class MailConfig:
 
 
 @dataclass(frozen=True)
+class ReconcileConfig:
+    """Periodic reconcile sweep, triggered by the watcher instead of GitHub cron.
+
+    GitHub's `schedule` dispatch for bugpatrol-reconcile.yml proved unreliable:
+    over late Aug 2026 its scheduled events arrived 40min->4h late, then stopped
+    firing entirely (the 08-28 stall that left issue #5458 untriaged). The
+    watcher already runs 24x7 on the relay and dispatches the triage workflow
+    reliably, so it now dispatches the reconcile workflow on a timer too — the
+    GitHub cron stays as a backup (reconcile is idempotent, so an overlap is a
+    harmless no-op). Empty `dispatch_command` = reconcile sweep disabled.
+    """
+
+    # Command (argv, no shell) that dispatches the project's reconcile workflow.
+    dispatch_command: tuple[str, ...] = ()
+    # How often to dispatch it, seconds. Default 4h = a tighter safety net than
+    # the 6h cron, without monopolizing the shared self-hosted runner queue.
+    interval_seconds: int = 4 * 3600
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     github_repo: str
     github_cli: str
@@ -297,6 +317,9 @@ class ProjectConfig:
     close_audit: CloseAuditConfig = CloseAuditConfig()
     # Optional [mail] public-mailbox intake. None = no mail watcher for the project.
     mail: MailConfig | None = None
+    # Periodic reconcile sweep driven by the watcher. Empty dispatch_command =
+    # no reconcile (the GitHub cron alone is then the safety net).
+    reconcile: ReconcileConfig = ReconcileConfig()
 
     @property
     def project(self) -> str:
@@ -482,6 +505,7 @@ def parse_project_config(data: dict[str, Any]) -> ProjectConfig:
         fix=_parse_fix(data),
         close_audit=_parse_close_audit(data),
         mail=_parse_mail(data),
+        reconcile=_parse_reconcile(data),
     )
 
 
@@ -509,6 +533,27 @@ def _parse_mail(data: dict[str, Any]) -> MailConfig | None:
         app_secret_env=_required_str(table, "app_secret_env"),
         user_emails=dict(user_emails),
     )
+
+
+def _parse_reconcile(data: dict[str, Any]) -> ReconcileConfig:
+    """Parse the optional `[reconcile]` table (watcher-driven reconcile sweep).
+
+    Absent/empty `[reconcile]` -> disabled (GitHub cron alone is the safety
+    net). A dispatch_command with no arguments is rejected loudly rather than
+    silently dispatching nothing every interval.
+    """
+    table = data.get("reconcile")
+    if table is None:
+        return ReconcileConfig()
+    if not isinstance(table, dict):
+        raise ValueError("[reconcile] must be a table")
+    dispatch = tuple(_optional_str_list(table, "dispatch_command"))
+    interval = _num(table, "interval_seconds", ReconcileConfig.interval_seconds)
+    if interval <= 0:
+        raise ValueError("reconcile.interval_seconds must be > 0")
+    if dispatch and len(dispatch) == 1 and not dispatch[0]:
+        raise ValueError("reconcile.dispatch_command must not be empty")
+    return ReconcileConfig(dispatch_command=dispatch, interval_seconds=int(interval))
 
 
 def _parse_close_audit(data: dict[str, Any]) -> CloseAuditConfig:

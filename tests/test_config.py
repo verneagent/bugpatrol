@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from bugpatrol.config import load_project_config, parse_project_config
+from bugpatrol.config import ReconcileConfig, load_project_config, parse_project_config
 from bugpatrol.fields import default_field_specs
 
 
@@ -148,6 +148,69 @@ class ConfigTest(unittest.TestCase):
         config = load_project_config(Path("projects/fived.toml"))
 
         self.assertTrue(config.close_audit.reopen_completed_without_evidence)
+
+    def test_reconcile_defaults_disabled(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        parsed = parse_project_config(self._minimal_data(config))
+
+        self.assertEqual(parsed.reconcile.dispatch_command, ())
+        self.assertEqual(parsed.reconcile.interval_seconds, ReconcileConfig.interval_seconds)
+
+    def test_reconcile_parses_command_and_interval(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["reconcile"] = {
+            "dispatch_command": ["gh", "workflow", "run", "bugpatrol-reconcile.yml"],
+            "interval_seconds": 7200,
+        }
+        parsed = parse_project_config(data)
+
+        self.assertEqual(
+            parsed.reconcile.dispatch_command,
+            ("gh", "workflow", "run", "bugpatrol-reconcile.yml"),
+        )
+        self.assertEqual(parsed.reconcile.interval_seconds, 7200)
+
+    def test_reconcile_rejects_non_table(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["reconcile"] = "yes"
+        with self.assertRaisesRegex(ValueError, r"\[reconcile\] must be a table"):
+            parse_project_config(data)
+
+    def test_reconcile_rejects_non_positive_interval(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["reconcile"] = {"interval_seconds": 0}
+        with self.assertRaisesRegex(ValueError, r"reconcile.interval_seconds must be > 0"):
+            parse_project_config(data)
+
+    def test_reconcile_rejects_empty_command(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        data = self._minimal_data(config)
+        data["reconcile"] = {"dispatch_command": [""]}
+        with self.assertRaisesRegex(ValueError, r"reconcile.dispatch_command must not be empty"):
+            parse_project_config(data)
+
+    def test_fived_config_wires_reconcile_dispatch(self) -> None:
+        config = load_project_config(Path("projects/fived.toml"))
+
+        self.assertEqual(
+            config.reconcile.dispatch_command,
+            (
+                "gh",
+                "workflow",
+                "run",
+                "bugpatrol-reconcile.yml",
+                "--repo",
+                "TheCloverLab/fived",
+                "--ref",
+                "main",
+                "-f",
+                "target=both",
+            ),
+        )
+        self.assertEqual(config.reconcile.interval_seconds, 14400)
 
     def test_fix_gate_max_conflict_files_defaults_and_overrides(self) -> None:
         config = load_project_config(Path("projects/example.toml"))

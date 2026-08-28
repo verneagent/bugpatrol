@@ -763,6 +763,8 @@ def main(argv: list[str] | None = None) -> int:
             triage_queue_path=args.triage_queue,
             triage_quiet_seconds=args.triage_quiet_seconds,
             triage_dispatch_command=args.triage_dispatch_command,
+            reconcile_dispatch_command=config.reconcile.dispatch_command or None,
+            reconcile_interval_seconds=config.reconcile.interval_seconds,
             triage_status_reader=GitHubTriageStatusReader(
                 config=config,
                 issue_fields=GitHubIssueFieldsClient(gh=config.github_cli),

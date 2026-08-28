@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shlex
+import subprocess
 import sys
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -52,6 +54,12 @@ TOPIC_FAILURE_ALERT_THRESHOLD = 3
 # would otherwise only be visible to whoever happens to open each topic.
 TOPIC_OUTAGE_CHAT_SUMMARY_TOPICS = 3
 
+# Backoff before retrying a failed reconcile dispatch. GitHub cron for
+# bugpatrol-reconcile.yml silently stopped firing (08-28), so the watcher is
+# now the primary trigger; a transient dispatch failure must retry soon (not
+# wait a full interval) while never crashing the poll loop.
+RECONCILE_DISPATCH_RETRY_SECONDS = 600
+
 
 @dataclass(frozen=True)
 class WatchResult:
@@ -61,6 +69,7 @@ class WatchResult:
     skipped: int
     queued_triage: int = 0
     dispatched_triage: int = 0
+    dispatched_reconcile: int = 0
 
 
 class TriageDispatcher(Protocol):
@@ -181,6 +190,11 @@ def run_polling_watcher(
     triage_dispatch_command: str | Sequence[str] | None = None,
     triage_dispatcher: TriageDispatcher | None = None,
     triage_status_reader: TriageStatusReader | None = None,
+    # Periodic reconcile sweep. GitHub's `schedule` cron for the reconcile
+    # workflow proved unreliable (silently stopped firing 08-28), so the watcher
+    # dispatches it on a timer as the primary safety net; empty command = off.
+    reconcile_dispatch_command: str | Sequence[str] | None = None,
+    reconcile_interval_seconds: float = 4 * 3600,
     parallel_topics: int = 1,
     branch_tip_resolver: BranchTipResolver | None = None,
     slash_handler: SlashCommandHandler | None = None,
@@ -219,12 +233,23 @@ def run_polling_watcher(
     if store is None and resource_dir is not None:
         store = LocalResourceStore(resource_dir)
 
+    if reconcile_dispatch_command is not None and reconcile_interval_seconds <= 0:
+        raise ValueError("reconcile_interval_seconds must be > 0 when a reconcile dispatch command is set")
+    if isinstance(reconcile_dispatch_command, str):
+        reconcile_dispatch_command = tuple(shlex.split(reconcile_dispatch_command))
+    elif reconcile_dispatch_command is not None:
+        reconcile_dispatch_command = tuple(reconcile_dispatch_command)
+    next_reconcile_at = (
+        time.monotonic() + reconcile_interval_seconds if reconcile_dispatch_command else None
+    )
+
     iterations = 0
     scanned = 0
     processed = 0
     skipped = 0
     queued_triage = 0
     dispatched_triage = 0
+    dispatched_reconcile = 0
     in_flight: dict[str, Future[TopicResult]] = {}
     if lease is not None:
         lease.acquire()
@@ -360,6 +385,19 @@ def run_polling_watcher(
                             triage_quiet_seconds=triage_quiet_seconds,
                             status_reader=triage_status_reader,
                         )
+                if (
+                    reconcile_dispatch_command is not None
+                    and not final_iteration
+                    and time.monotonic() >= next_reconcile_at
+                ):
+                    if _dispatch_reconcile(reconcile_dispatch_command, logger=logger, iteration=iterations):
+                        next_reconcile_at = time.monotonic() + reconcile_interval_seconds
+                        dispatched_reconcile += 1
+                    else:
+                        # Transient failure: retry on the backoff, not the full
+                        # interval, so a down network doesn't silently extend the
+                        # safety-net gap (No-Silent-Failures: it is logged too).
+                        next_reconcile_at = time.monotonic() + RECONCILE_DISPATCH_RETRY_SECONDS
                 if lease is not None:
                     lease.refresh()
                 if final_iteration:
@@ -370,6 +408,7 @@ def run_polling_watcher(
                         skipped=skipped,
                         queued_triage=queued_triage,
                         dispatched_triage=dispatched_triage,
+                        dispatched_reconcile=dispatched_reconcile,
                     )
                 time.sleep(interval_seconds)
     finally:
@@ -572,6 +611,52 @@ def dispatch_due_triage(
         queue.mark_dispatched(request)
         dispatched += 1
     return dispatched
+
+
+def _dispatch_reconcile(
+    command: Sequence[str],
+    *,
+    logger: JsonlEventLog | None,
+    iteration: int,
+) -> bool:
+    """Run one reconcile dispatch command; never raises.
+
+    Reconcile is the safety net that re-dispatches triage for intook-but-untriaged
+    issues. It runs on a timer in the watcher (GitHub cron is only a backup), so a
+    failure must not crash the loop — it is logged and retried on a short backoff.
+    """
+    completed = subprocess.run(
+        list(command),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode == 0:
+        if logger is not None:
+            logger.write(
+                {
+                    "event": "watch_reconcile_dispatch",
+                    "iteration": iteration,
+                    "command": " ".join(command),
+                }
+            )
+        return True
+    print(
+        f"watch-lark: reconcile dispatch failed (exit {completed.returncode}): "
+        f"{completed.stderr.strip() or completed.stdout.strip()}",
+        file=sys.stderr,
+    )
+    if logger is not None:
+        logger.write(
+            {
+                "event": "watch_reconcile_dispatch_error",
+                "iteration": iteration,
+                "command": " ".join(command),
+                "returncode": completed.returncode,
+                "stderr": completed.stderr.strip()[-500:],
+            }
+        )
+    return False
 
 
 def render_topic_outage_reply(*, error: str, consecutive_iterations: int) -> str:

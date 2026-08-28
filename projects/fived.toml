@@ -150,6 +150,18 @@ app_secret_env = "BUGPATROL_LARK_APP_SECRET"
 # [mail.user_emails]
 # dinghaozeng@fivedegrees.ai = "ou_xxx"
 
+[reconcile]
+# Reconcile = the safety net that re-dispatches triage for intook-but-untriaged
+# issues and overdue fix notifications. Trigger it from THIS watcher on a timer
+# instead of GitHub cron: GitHub's scheduler silently dropped reconcile's
+# scheduled events (delays grew 40min->4h over 4 days, then zero runs on
+# 2026-08-28), while the watcher is 24x7 and already dispatches triage. The
+# GitHub cron in bugpatrol-reconcile.yml stays as an idempotent backup (the
+# workflow's concurrency group cancels duplicate runs).
+dispatch_command = ["gh", "workflow", "run", "bugpatrol-reconcile.yml", "--repo", "TheCloverLab/fived", "--ref", "main", "-f", "target=both"]
+# Every 4 hours; a failed dispatch retries on a short backoff, not the full interval.
+interval_seconds = 14400
+
 [issue_field_names]
 Priority = "Priority"
 "Triage status" = "Triage status"

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import concurrent.futures
+import io
 import json
+import sys
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,6 +23,7 @@ from bugpatrol.triage_queue import TriageRequest, TriageRequestQueue
 from bugpatrol.watcher import (
     MAX_CONSECUTIVE_SCAN_FAILURES,
     TOPIC_OUTAGE_CHAT_SUMMARY_TOPICS,
+    _dispatch_reconcile,
     _harvest_topic_results,
     dispatch_due_triage,
     render_topic_outage_alert,
@@ -809,6 +813,108 @@ class WatcherTest(unittest.TestCase):
             self.assertEqual(len(dispatcher.requests), 1)
             self.assertTrue(due[0].pending_review)
             self.assertIn("pending_review_running", due[0].reasons)
+
+    def test_dispatch_reconcile_runs_command_and_writes_success_event(self) -> None:
+        logger = RecordingLogger()
+
+        ok = _dispatch_reconcile([sys.executable, "-c", "pass"], logger=logger, iteration=3)
+
+        self.assertTrue(ok)
+        self.assertEqual(len(logger.written), 1)
+        event = logger.written[0]
+        self.assertEqual(event["event"], "watch_reconcile_dispatch")
+        self.assertEqual(event["iteration"], 3)
+
+    def test_dispatch_reconcile_returns_false_and_logs_on_failure(self) -> None:
+        logger = RecordingLogger()
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            ok = _dispatch_reconcile(
+                [sys.executable, "-c", "raise SystemExit(3)"],
+                logger=logger,
+                iteration=3,
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("reconcile dispatch failed", stderr.getvalue())
+        self.assertEqual(len(logger.written), 1)
+        event = logger.written[0]
+        self.assertEqual(event["event"], "watch_reconcile_dispatch_error")
+        self.assertEqual(event["returncode"], 3)
+
+    def test_run_polling_watcher_dispatches_reconcile_when_due(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeHistoryLark()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        dispatched: list[tuple] = []
+
+        def fake_dispatch(command: object, *, logger: object, iteration: int) -> bool:
+            dispatched.append(command)  # type: ignore[arg-type]
+            return True
+
+        with patch(
+            "bugpatrol.watcher.time.monotonic",
+            side_effect=iter(range(100, 1000)).__next__,
+        ), patch(
+            "bugpatrol.watcher._dispatch_reconcile",
+            side_effect=fake_dispatch,
+        ):
+            result = run_polling_watcher(
+                config=config,
+                lark=lark,  # type: ignore[arg-type]
+                workflow=workflow,
+                max_iterations=2,
+                interval_seconds=0,
+                reconcile_dispatch_command=["true"],
+                reconcile_interval_seconds=0.5,
+            )
+
+        self.assertEqual(result.dispatched_reconcile, 1)
+        self.assertEqual(dispatched, [("true",)])
+
+    def test_run_polling_watcher_failed_reconcile_is_retried_not_crashed(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeHistoryLark()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        calls: list[int] = []
+
+        def failing_dispatch(command: object, *, logger: object, iteration: int) -> bool:
+            calls.append(iteration)
+            return False
+
+        with patch(
+            "bugpatrol.watcher.time.monotonic",
+            side_effect=iter(range(100, 1000)).__next__,
+        ), patch(
+            "bugpatrol.watcher._dispatch_reconcile",
+            side_effect=failing_dispatch,
+        ):
+            result = run_polling_watcher(
+                config=config,
+                lark=lark,  # type: ignore[arg-type]
+                workflow=workflow,
+                max_iterations=3,
+                interval_seconds=0,
+                reconcile_dispatch_command=["true"],
+                reconcile_interval_seconds=0.5,
+            )
+
+        # Failure was logged+backed off, not counted as dispatched, and did not
+        # crash the loop (iteration 2 re-checks but is past the backoff window).
+        self.assertEqual(result.dispatched_reconcile, 0)
+        self.assertEqual(calls, [1])
+
+
+class RecordingLogger:
+    def __init__(self) -> None:
+        self.written: list[dict] = []
+
+    def write(self, event: dict) -> None:
+        self.written.append(event)
 
 
 class RecordingDispatcher:
