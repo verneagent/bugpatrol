@@ -15,7 +15,7 @@ from bugpatrol.config import ProjectConfig
 from bugpatrol.intake import Attachment, IntakeRecord
 from bugpatrol.intake_workflow import IntakeOutcome, IntakeWorkflow
 from bugpatrol.ledger import MessageLedger
-from bugpatrol.lark import LarkMessage, LarkOpenApiMessengerClient
+from bugpatrol.lark import LarkMessage, LarkOpenApiMessengerClient, parse_lark_message
 from bugpatrol.resources import (
     LocalResourceStore,
     ResourceDescriber,
@@ -69,6 +69,79 @@ def chat_member_names(
     with _chat_members_lock:
         _chat_members_cache[chat_id] = (time.monotonic(), names)
     return names
+
+
+# Lark delivers a "merged forward" (someone forwards a chat record into the
+# group) as a `merge_forward` message whose body is an empty placeholder — the
+# real content only comes back from GET /im/v1/messages/{envelope}. The scanners
+# expand these into one reportable text message so a forwarded chat intakes
+# like any other bug report instead of vanishing as an unsupported msg_type.
+MERGE_FORWARD_MSG_TYPE = "merge_forward"
+# A merged forward can carry a whole conversation; bound what becomes issue
+# text so one forward can't drown a bug body.
+_MAX_FORWARDED_ITEMS = 100
+
+
+def expand_merge_forward(
+    lark: LarkOpenApiMessengerClient,
+    envelope: LarkMessage,
+) -> LarkMessage | None:
+    """Replay a `merge_forward` envelope as one reportable text message.
+
+    Returns a synthetic message that keeps the envelope's id/root/sender (the
+    forwarder is the reporter in the watched group) but whose text is the merged
+    transcript: each source message as "<name>：<text>" in chronological order.
+    Later replies to the forward's topic keep the same root_id, so they append
+    to the same issue once this root intakes.
+
+    Media inside a forward is not fetchable — the source chat is usually one the
+    bot is not a member of and Lark rejects the resource download — so each
+    image/file becomes an inline marker instead of an Attachment. Returns None
+    when there is nothing reportable (no inner content, or the expansion call
+    fails and the message should be retried on the next scan).
+    """
+    try:
+        items = lark.fetch_forwarded_messages(message_id=envelope.message_id)
+    except Exception:  # noqa: BLE001 - expansion is best-effort; retry next scan
+        return None
+    inner = [
+        item
+        for item in items
+        if isinstance(item, dict) and str(item.get("message_id") or "") != envelope.message_id
+    ]
+    if not inner:
+        return None
+    names = chat_member_names(lark, envelope.chat_id)
+    parts: list[str] = []
+    for item in inner[:_MAX_FORWARDED_ITEMS]:
+        message = parse_lark_message(item, default_chat_id=envelope.chat_id)
+        if message.msg_type in {"image", "media", "file", "audio"}:
+            parts.append("[图片/附件（转发源会话不可访问，未自动拉取）]")
+            continue
+        text = (message.text or "").strip()
+        if not text:
+            continue
+        name = names.get(message.sender_open_id) or ""
+        parts.append((f"{name}：" if name else "") + text)
+    if not parts:
+        return None
+    transcript = "\n".join(parts)
+    if len(inner) > _MAX_FORWARDED_ITEMS:
+        transcript += f"\n…（仅展开前 {_MAX_FORWARDED_ITEMS} 条，共 {len(inner)} 条）"
+    return LarkMessage(
+        message_id=envelope.message_id,
+        chat_id=envelope.chat_id,
+        root_id=envelope.root_id or envelope.message_id,
+        sender_open_id=envelope.sender_open_id,
+        sender_type=envelope.sender_type,
+        create_time=envelope.create_time,
+        msg_type="text",
+        text=transcript,
+        raw_content=json.dumps({"text": transcript}, ensure_ascii=False),
+        sender_id=envelope.sender_id,
+        sender_id_type=envelope.sender_id_type,
+        deleted=False,
+    )
 
 
 @dataclass(frozen=True)
@@ -154,6 +227,27 @@ def run_lark_backfill(
                 )
             )
             continue
+        if (
+            message.msg_type == MERGE_FORWARD_MSG_TYPE
+            and processed_ledger is not None
+            and processed_ledger.is_processed(message.message_id)
+        ):
+            events.append(
+                BackfillEvent(message_id=message.message_id, action="skipped", reason="processed_ledger")
+            )
+            continue
+        if message.msg_type == MERGE_FORWARD_MSG_TYPE:
+            expanded = expand_merge_forward(lark, message)
+            if expanded is None:
+                events.append(
+                    BackfillEvent(
+                        message_id=message.message_id,
+                        action="skipped",
+                        reason="merge_forward_unexpandable",
+                    )
+                )
+                continue
+            message = expanded
         if should_skip_message(
             message,
             bot_open_id=config.lark.bot_open_id,
@@ -396,6 +490,27 @@ def scan_topic_batches(
     groups: dict[str, list[LarkMessage]] = {}
     since_ms = config.intake.since_ms()
     for message in reversed(messages):
+        if (
+            message.msg_type == MERGE_FORWARD_MSG_TYPE
+            and processed_ledger is not None
+            and processed_ledger.is_processed(message.message_id)
+        ):
+            skipped_events.append(
+                BackfillEvent(message_id=message.message_id, action="skipped", reason="processed_ledger")
+            )
+            continue
+        if message.msg_type == MERGE_FORWARD_MSG_TYPE:
+            expanded = expand_merge_forward(lark, message)
+            if expanded is None:
+                skipped_events.append(
+                    BackfillEvent(
+                        message_id=message.message_id,
+                        action="skipped",
+                        reason="merge_forward_unexpandable",
+                    )
+                )
+                continue
+            message = expanded
         reason = skip_reason(
             message,
             bot_open_id=config.lark.bot_open_id,

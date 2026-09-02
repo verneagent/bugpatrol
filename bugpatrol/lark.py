@@ -392,6 +392,25 @@ class LarkOpenApiMessengerClient(_TenantApiClient):
             return parse_lark_message(single, default_chat_id=default_chat_id)
         raise LarkOpenApiError(f"message not found in response: {data}")
 
+    def fetch_forwarded_messages(self, *, message_id: str) -> list[dict[str, object]]:
+        """Raw items behind a `merge_forward` (merged forwarded chat record).
+
+        A merged forward is delivered as an empty shell: `body.content` is just a
+        placeholder and the real content only comes back from
+        GET /im/v1/messages/{envelope}, which returns a flat list containing the
+        envelope itself followed by every merged source message — each keeping its
+        own body, sender, and original chat_id. Returns the raw item dicts so the
+        caller can replay them (typically dropping the envelope item).
+        """
+        data = self._request("GET", f"/im/v1/messages/{message_id}")
+        items = data.get("data", {}).get("items")
+        if isinstance(items, list):
+            return [item for item in items if isinstance(item, dict)]
+        single = data.get("data", {}).get("message")
+        if isinstance(single, dict):
+            return [single]
+        raise LarkOpenApiError(f"forwarded message not found in response: {data}")
+
     def download_message_resource(
         self,
         *,

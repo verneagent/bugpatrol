@@ -9,9 +9,11 @@ from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
 from bugpatrol.backfill import (
+    MERGE_FORWARD_MSG_TYPE,
     BackfillEvent,
     BackfillResult,
     chat_member_names,
+    expand_merge_forward,
     intake_record_from_lark_message,
     should_skip_message,
     skip_reason,
@@ -146,6 +148,23 @@ def run_lark_event_watcher(
             skipped += 1
             events.append(BackfillEvent(message_id=message.message_id, action="skipped", reason="wrong_chat"))
             continue
+        if (
+            message.msg_type == MERGE_FORWARD_MSG_TYPE
+            and ledger is not None
+            and ledger.is_processed(message.message_id)
+        ):
+            skipped += 1
+            events.append(BackfillEvent(message_id=message.message_id, action="skipped", reason="processed_ledger"))
+            continue
+        if message.msg_type == MERGE_FORWARD_MSG_TYPE:
+            expanded = expand_merge_forward(lark, message)
+            if expanded is None:
+                skipped += 1
+                events.append(
+                    BackfillEvent(message_id=message.message_id, action="skipped", reason="merge_forward_unexpandable")
+                )
+                continue
+            message = expanded
         if should_skip_message(
             message,
             bot_open_id=config.lark.bot_open_id,

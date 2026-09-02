@@ -9,6 +9,7 @@ from pathlib import Path
 from bugpatrol.backfill import (
     TopicBatch,
     attachments_from_lark_message,
+    expand_merge_forward,
     intake_record_from_lark_message,
     process_topic_batch,
     run_lark_backfill,
@@ -16,6 +17,7 @@ from bugpatrol.backfill import (
     should_skip_message,
     skip_reason,
 )
+from bugpatrol import backfill as backfill_module
 from bugpatrol.config import load_project_config
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.ledger import JsonMessageLedger
@@ -60,6 +62,56 @@ class FakeLarkHistory(FakeLarkMessengerClient):
             content_type="image/png",
             filename="bug.png",
         )
+
+
+def raw_lark_item(
+    *,
+    message_id: str,
+    msg_type: str,
+    content: str,
+    sender_id: str = "ou_user",
+    chat_id: str = "oc_source",
+) -> dict[str, object]:
+    """A raw Lark message item as returned inside a merged-forward detail."""
+    return {
+        "message_id": message_id,
+        "chat_id": chat_id,
+        "msg_type": msg_type,
+        "create_time": "1788322389929",
+        "body": {"content": content},
+        "sender": {"id": sender_id, "id_type": "open_id", "sender_type": "user"},
+    }
+
+
+def merged_forward_message(**overrides: object) -> LarkMessage:
+    return message(
+        message_id="om_env",
+        root_id="om_env",
+        sender_open_id="ou_irisy",
+        msg_type="merge_forward",
+        text="Merged and Forwarded Message",
+        **overrides,
+    )
+
+
+class FakeLarkMergedForward(FakeLarkHistory):
+    def __init__(
+        self,
+        messages: list[LarkMessage],
+        forward_items: list[dict[str, object]],
+        member_names: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(messages)
+        self._forward_items = list(forward_items)
+        self._member_names = dict(member_names or {})
+        self.forward_fetches: list[str] = []
+
+    def fetch_forwarded_messages(self, *, message_id: str) -> list[dict[str, object]]:
+        self.forward_fetches.append(message_id)
+        return list(self._forward_items)
+
+    def list_chat_members(self, *, chat_id: str) -> dict[str, str]:
+        return dict(self._member_names)
 
 
 class FakeResourceStore:
@@ -804,6 +856,158 @@ class TopicBatchTest(unittest.TestCase):
         self.assertEqual(calls, [1])
         # Only the pre-registered issue exists; /fix did not create a new one.
         self.assertEqual(len(github.created), 1)
+
+    # --- merged forward (转发聊天记录) ---
+
+    def _forward_items(self) -> list[dict[str, object]]:
+        return [
+            raw_lark_item(
+                message_id="om_a",
+                msg_type="text",
+                content=json.dumps({"text": "post有标题只展示两行正文，这个算bug么"}, ensure_ascii=False),
+                sender_id="ou_azer",
+            ),
+            raw_lark_item(
+                message_id="om_b",
+                msg_type="image",
+                content=json.dumps({"image_key": "img_v2_x"}),
+                sender_id="ou_azer",
+            ),
+            raw_lark_item(
+                message_id="om_c",
+                msg_type="text",
+                content=json.dumps({"text": "不会显示全部正文，最多显示4行"}, ensure_ascii=False),
+                sender_id="ou_irisy",
+            ),
+        ]
+
+    def test_expand_merge_forward_replays_transcript(self) -> None:
+        backfill_module._chat_members_cache.clear()
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        envelope = merged_forward_message()
+        lark = FakeLarkMergedForward(
+            [envelope],
+            self._forward_items(),
+            member_names={"ou_azer": "Azer", "ou_irisy": "Irisy"},
+        )
+
+        expanded = expand_merge_forward(lark, envelope)
+
+        self.assertIsNotNone(expanded)
+        self.assertEqual(expanded.message_id, "om_env")
+        self.assertEqual(expanded.root_id, "om_env")
+        self.assertEqual(expanded.msg_type, "text")
+        self.assertIn("Azer：post有标题只展示两行正文，这个算bug么", expanded.text)
+        self.assertIn("Irisy：不会显示全部正文，最多显示4行", expanded.text)
+        self.assertIn("[图片/附件", expanded.text)
+        self.assertEqual(lark.forward_fetches, ["om_env"])
+
+    def test_expand_merge_forward_returns_none_when_unexpandable(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        envelope = merged_forward_message()
+        # Detail returns only the envelope itself -> nothing reportable inside.
+        lark = FakeLarkMergedForward(
+            [envelope],
+            [raw_lark_item(message_id="om_env", msg_type="merge_forward", content="Merged and Forwarded Message")],
+        )
+
+        self.assertIsNone(expand_merge_forward(lark, envelope))
+        # A client that cannot expand (raises) is also a None, retried next scan.
+        self.assertIsNone(expand_merge_forward(FakeLarkHistory([envelope]), envelope))
+
+    def test_scan_topic_batches_expands_merged_forward_with_its_followups(self) -> None:
+        backfill_module._chat_members_cache.clear()
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        chat_id = config.lark.chat_id
+        followup = message(
+            message_id="om_follow",
+            root_id="om_env",
+            chat_id=chat_id,
+            sender_open_id="ou_irisy",
+            create_time="1788322391000",
+            msg_type="text",
+            text="@Lucy 这个我们补一个UI样式",
+        )
+        lark = FakeLarkMergedForward(
+            [followup, merged_forward_message(chat_id=chat_id, create_time="1788322389929")],
+            self._forward_items(),
+            member_names={"ou_azer": "Azer", "ou_irisy": "Irisy"},
+        )
+
+        result = scan_topic_batches(config=config, lark=lark, limit=10, chat_id=chat_id)
+
+        self.assertEqual(result.skipped_events, ())
+        self.assertEqual(len(result.topics), 1)
+        batch = result.topics[0]
+        self.assertEqual(batch.root_key, "om_env")
+        self.assertEqual([m.message_id for m in batch.messages], ["om_env", "om_follow"])
+        self.assertEqual(batch.messages[0].msg_type, "text")
+        self.assertIn("Azer：post有标题只展示两行正文，这个算bug么", batch.messages[0].text)
+        self.assertEqual(batch.messages[1].text, "@Lucy 这个我们补一个UI样式")
+        self.assertEqual(lark.forward_fetches, ["om_env"])
+
+    def test_scan_topic_batches_skips_processed_merged_forward_without_re_fetch(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        envelope = merged_forward_message()
+        lark = FakeLarkMergedForward([envelope], self._forward_items())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = JsonMessageLedger.load(Path(tmp) / "processed.json")
+            ledger.mark_processed("om_env")
+            result = scan_topic_batches(
+                config=config,
+                lark=lark,
+                limit=10,
+                chat_id=config.lark.chat_id,
+                processed_ledger=ledger,
+            )
+
+        self.assertEqual(lark.forward_fetches, [])
+        self.assertEqual(result.topics, ())
+        self.assertIn("processed_ledger", [event.reason for event in result.skipped_events])
+
+    def test_scan_topic_batches_skips_merged_forward_with_no_content(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        envelope = merged_forward_message()
+        lark = FakeLarkMergedForward([envelope], [])
+
+        result = scan_topic_batches(config=config, lark=lark, limit=10, chat_id=config.lark.chat_id)
+
+        self.assertEqual(result.topics, ())
+        self.assertIn("merge_forward_unexpandable", [event.reason for event in result.skipped_events])
+
+    def test_run_lark_backfill_creates_issue_from_merged_forward(self) -> None:
+        backfill_module._chat_members_cache.clear()
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        chat_id = config.lark.chat_id
+        followup = message(
+            message_id="om_follow",
+            root_id="om_env",
+            chat_id=chat_id,
+            sender_open_id="ou_irisy",
+            msg_type="text",
+            text="@Lucy 这个我们补一个UI样式",
+        )
+        lark = FakeLarkMergedForward(
+            [followup, merged_forward_message(chat_id=chat_id)],
+            self._forward_items(),
+            member_names={"ou_azer": "Azer", "ou_irisy": "Irisy"},
+        )
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        result = run_lark_backfill(config=config, lark=lark, workflow=workflow, limit=10)
+
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(result.outcomes[0].action, "created")
+        self.assertEqual(len(github.created), 1)
+        body = github.created[0].issue.body
+        self.assertIn("Azer：post有标题只展示两行正文，这个算bug么", body)
+        self.assertIn("@Lucy 这个我们补一个UI样式", body)
+        self.assertEqual(
+            set(result.outcomes[0].triage_signal.material_message_ids),
+            {"om_env", "om_follow"},
+        )
 
 
 if __name__ == "__main__":

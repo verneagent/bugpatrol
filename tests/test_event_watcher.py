@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from bugpatrol import backfill as backfill_module
 from bugpatrol.config import load_project_config
 from bugpatrol.event_watcher import (
     ReconnectPolicy,
@@ -36,6 +37,21 @@ def event_payload(**overrides: object) -> dict[str, object]:
             "message": message,
         },
     }
+
+
+class FakeLarkForward(FakeLarkMessengerClient):
+    def __init__(self, forward_items: list[dict[str, object]], member_names: dict[str, str] | None = None) -> None:
+        super().__init__()
+        self._forward_items = list(forward_items)
+        self._member_names = dict(member_names or {})
+        self.forward_fetches: list[str] = []
+
+    def fetch_forwarded_messages(self, *, message_id: str) -> list[dict[str, object]]:
+        self.forward_fetches.append(message_id)
+        return list(self._forward_items)
+
+    def list_chat_members(self, *, chat_id: str) -> dict[str, str]:
+        return dict(self._member_names)
 
 
 class EventWatcherTest(unittest.TestCase):
@@ -164,6 +180,44 @@ class EventWatcherTest(unittest.TestCase):
         self.assertEqual(result.skipped, 1)
         self.assertEqual(result.events[0].reason, "orphan_reply")
         self.assertEqual(github.created, [])
+
+    def test_run_lark_event_watcher_expands_merged_forward(self) -> None:
+        backfill_module._chat_members_cache.clear()
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        inner = [
+            {
+                "message_id": "om_a",
+                "chat_id": "oc_source",
+                "msg_type": "text",
+                "create_time": "1788322389929",
+                "body": {
+                    "content": json.dumps({"text": "post有标题只展示两行正文，这个算bug么"}, ensure_ascii=False)
+                },
+                "sender": {"id": "ou_azer", "id_type": "open_id", "sender_type": "user"},
+            }
+        ]
+        lark = FakeLarkForward(inner, member_names={"ou_azer": "Azer"})
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        result = run_lark_event_watcher(
+            config=config,
+            event_payloads=[
+                event_payload(
+                    message_id="om_env",
+                    root_id="",
+                    msg_type="merge_forward",
+                    body={"content": "Merged and Forwarded Message"},
+                )
+            ],
+            lark=lark,  # type: ignore[arg-type]
+            workflow=workflow,
+        )
+
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(len(github.created), 1)
+        self.assertIn("Azer：post有标题只展示两行正文，这个算bug么", github.created[0].issue.body)
+        self.assertEqual(lark.forward_fetches, ["om_env"])
 
     def test_run_lark_event_watcher_logs_and_dispatches_triage(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
