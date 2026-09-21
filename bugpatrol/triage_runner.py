@@ -44,6 +44,7 @@ from bugpatrol.worktree import (
     SubprocessGitDriver,
     resolve_triage_branch,
 )
+from bugpatrol.media_localize import localize_media
 from bugpatrol.openspec import load_openspec_changes
 from bugpatrol.triage_context import (
     AssigneeIdentity,
@@ -146,6 +147,20 @@ def prepare_triage_run(
         ),
         reference_repos=tuple(resolved_refs),
         openspec_changes=openspec_changes,
+    )
+    # Pull the attachments down ourselves, with the runner's own credentials,
+    # and hand the agent file paths. The agent's unauthenticated fetch of a
+    # private assets repo returns a 404 HTML page that it reads as an image —
+    # the gateway then 400s and the entire run dies (issue #6124).
+    context = replace(
+        context,
+        media=localize_media(
+            context.media,
+            dest_dir=output_dir / "attachments",
+            assets_repo=config.assets.github_repo,
+            branch=config.assets.branch,
+            gh=config.github_cli,
+        ),
     )
     context_path = output_dir / "triage-context.md"
     schema_path = output_dir / "triage.schema.json"

@@ -4,7 +4,7 @@
 
 要求：
 
-1. 先读取 GitHub issue 的 Lark Intake 原文、issue comments，以及 `Media Evidence` 中的图片/视频 URL 和生成描述。
+1. 先读取 GitHub issue 的 Lark Intake 原文、issue comments，以及 `Media Evidence` 中每个图片/视频的生成描述和 `Local file` 本地路径。**要看图就用 Read 工具读那个本地文件，不要自己去 curl / fetch 附件 URL**：附件仓库是私有的，匿名拉取只会拿到 GitHub 的 404 HTML 页面，把它当图片交给模型会让整个 triage 直接 400 失败、前面的分析全部作废。某条只有 `Local copy: <失败原因>`（没有本地文件）时，就以生成描述为准，不要再去补拉 URL。
 2. 判断 GitHub native Issue Type：`Bug` / `Feature` / `Task`。
 3. 如果是 Bug，必须比对 PRD / mockup / openspec 后再给出 `Triage verdict`。**`triage_verdict` 只对 Bug 有意义**：`预期行为` 专指「上报的现象其实符合预期、不是 bug」，**只能用在 `issue_type=Bug` 上**。`issue_type` 是 `Task` / `Feature` 时，那是真实要做的工作，绝不要用 `预期行为`（也不要用它当「这不是 bug」的兜底）——据实归类、正常派 assignee 即可。判 `预期行为` **不会**自动关闭 issue：照常 assign 给对应 owner，由 owner 复核后自行关闭。
 4. 即使判定为 `PRD 错误`、`PRD 缺失`、`Case 错误`、`预期行为`，也 assign 给 dev owner，由 dev owner 线下 drive PM/QA。`assignee` 必须填 GitHub login（CODEOWNERS 中 `@` 后面的 handle，如 `AndyCokeZero`），绝不能填显示名或中文名（如 `Andy`）。

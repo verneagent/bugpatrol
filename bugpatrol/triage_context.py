@@ -26,6 +26,15 @@ class MediaEvidence:
     # `- watermark:` line. Holds the plaintext payload's compact JSON,
     # `未找到水印` / a decode failure note, or "" when never scanned.
     watermark: str = ""
+    # Absolute path to a copy bugpatrol already downloaded (`media_localize`),
+    # so the agent reads bytes off the runner's disk instead of fetching `url`.
+    # The assets repo is private: an unauthenticated fetch returns GitHub's 404
+    # HTML page, which the agent reads as an image and the model gateway then
+    # rejects with a bare 400 that aborts the whole triage run (issue #6124).
+    local_path: str = ""
+    # Why `local_path` is empty, when a download was attempted and failed.
+    # Always rendered, so a missing copy is visible rather than silent.
+    local_status: str = ""
 
 
 @dataclass(frozen=True)
@@ -190,8 +199,22 @@ def render_triage_context_markdown(context: TriageContext) -> str:
     )
     if not context.media:
         lines.append("- No image or video attachments found.")
+    else:
+        lines.extend(
+            [
+                "Attachments are downloaded for you before the run starts. Read the",
+                "`Local file` path; do **not** fetch the `url` — the assets repo is",
+                "private and an unauthenticated fetch returns GitHub's 404 HTML page,",
+                "not the media. When an item has no local file, use its description.",
+                "",
+            ]
+        )
     for item in context.media:
         lines.append(f"- {item.kind}: {item.url}")
+        if item.local_path:
+            lines.append(f"  - Local file: {item.local_path}")
+        if item.local_status:
+            lines.append(f"  - Local copy: {item.local_status}")
         if item.description:
             lines.append(f"  - Description: {item.description}")
         if item.watermark:
