@@ -24,30 +24,27 @@ class ReconcileTriageLoopE2ETest(unittest.TestCase):
         )
 
         # First replay picks up the managed issue that never got a triage result
-        # and "runs" triage (which writes the triage-meta comment).
-        def run_triage(issue_number: int) -> str:
-            github.add_issue_comment(
-                repo=config.github_repo,
-                issue_number=issue_number,
-                body=TRIAGE_META_COMMENT,
-            )
-            return "applied"
-
-        first = reconcile_triage(
-            config=config, github=github, execute=True, run_triage=run_triage
-        )
+        # and dispatches the triage workflow for it. Reconcile fire-and-forgets
+        # (a fresh App token per run) rather than running the agent in-process,
+        # so the dispatch — not a returned verdict — is what it reports.
+        first = reconcile_triage(config=config, github=github, execute=True)
+        self.assertEqual(github.dispatched, [(config.github_repo, issue.number)])
         self.assertIn(
-            (issue.number, "triaged", "applied"),
+            (issue.number, "dispatched", "triage_workflow"),
             [(e.issue_number, e.action, e.reason) for e in first.events],
+        )
+
+        # The dispatched workflow finishes and writes its triage result.
+        github.add_issue_comment(
+            repo=config.github_repo,
+            issue_number=issue.number,
+            body=TRIAGE_META_COMMENT,
         )
 
         # Second replay must skip it — the triage result now exists, so a repeated
         # reconcile after an outage does not re-triage.
-        ran_again: list[int] = []
-        second = reconcile_triage(
-            config=config, github=github, execute=True, run_triage=ran_again.append
-        )
-        self.assertEqual(ran_again, [])
+        second = reconcile_triage(config=config, github=github, execute=True)
+        self.assertEqual(len(github.dispatched), 1)
         self.assertEqual(second.candidates, ())
         self.assertIn(
             (issue.number, "skipped", "already_triaged"),
