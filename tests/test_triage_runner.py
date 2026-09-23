@@ -438,6 +438,128 @@ class TriageRunnerTest(unittest.TestCase):
             self.assertEqual((out / "agent-turns.jsonl").read_text(), '{"stream": "event"}\n')
             self.assertEqual((out / "agent-stderr.log").read_text(), "partial stderr\n")
 
+    def test_execute_triage_run_retries_a_transient_api_crash_before_final_attempt(self) -> None:
+        # Reproduces #6246: the gateway dropped the response mid-stream after
+        # 133 turns and 7 minutes, and the run was thrown away and marked
+        # Failed. A second attempt usually finishes, so it must not fail here.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        stdout = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": True,
+                "result": (
+                    "API Error: Connection closed mid-response. "
+                    "The response above may be incomplete."
+                ),
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=root / "output.json",
+                invocation=AgentInvocation(provider="deepseek", command=["claude"]),
+                context_comment_ids=("1",),
+            )
+
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["claude"], 1, stdout, "")
+                status = execute_triage_run(
+                    config=config,
+                    issue_number=6246,
+                    plan=plan,
+                    github=github,  # type: ignore[arg-type]
+                    issue_fields=issue_fields,  # type: ignore[arg-type]
+                    final_attempt=False,
+                )
+
+        self.assertEqual(status, "agent_crashed")
+        # Not wedged: no Failed status, no failure comment, no Lark ping.
+        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Running"})
+        self.assertNotIn("BugPatrol triage failed", "".join(github.comments))
+
+    def test_execute_triage_run_marks_failed_on_transient_crash_final_attempt(self) -> None:
+        # The retry is bounded: when every attempt drops, the operator still
+        # gets the Failed marker and the real error, not a silent pass.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        stdout = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": True,
+                "result": "API Error: Connection closed mid-response.",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=root / "output.json",
+                invocation=AgentInvocation(provider="deepseek", command=["claude"]),
+                context_comment_ids=("1",),
+            )
+
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["claude"], 1, stdout, "")
+                with self.assertRaisesRegex(RuntimeError, "exit 1"):
+                    execute_triage_run(
+                        config=config,
+                        issue_number=6246,
+                        plan=plan,
+                        github=github,  # type: ignore[arg-type]
+                        issue_fields=issue_fields,  # type: ignore[arg-type]
+                        final_attempt=True,
+                    )
+
+        comment = github.comments[-1]
+        self.assertIn("BugPatrol triage failed", comment)
+        self.assertIn("Connection closed mid-response", comment)
+
+    def test_execute_triage_run_fails_immediately_on_a_balance_error(self) -> None:
+        # The #4145 lesson, kept: an exhausted account is identical on every
+        # attempt, so retrying it only triples the cost of a human's problem.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        stdout = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": True,
+                "result": "API Error: 402 Insufficient Balance",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=root / "output.json",
+                invocation=AgentInvocation(provider="deepseek", command=["claude"]),
+                context_comment_ids=("1",),
+            )
+
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["claude"], 1, stdout, "")
+                with self.assertRaisesRegex(RuntimeError, "exit 1"):
+                    execute_triage_run(
+                        config=config,
+                        issue_number=4145,
+                        plan=plan,
+                        github=github,  # type: ignore[arg-type]
+                        issue_fields=issue_fields,  # type: ignore[arg-type]
+                        final_attempt=False,
+                    )
+
+        self.assertIn("Insufficient Balance", github.comments[-1])
+
     def test_execute_triage_run_rejects_unmanaged_issue_before_writes(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGithub(issue_body="legacy issue")

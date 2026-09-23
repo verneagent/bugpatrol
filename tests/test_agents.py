@@ -10,6 +10,7 @@ from bugpatrol.agents import (
     DEEPSEEK_DEFAULT_MODEL,
     build_triage_agent_invocation,
     detect_sandbox_denial,
+    is_transient_agent_failure,
     load_agent_json,
     parse_claude_token_usage,
 )
@@ -285,6 +286,61 @@ class DetectSandboxDenialTest(unittest.TestCase):
 
     def test_returns_none_for_empty(self) -> None:
         self.assertIsNone(detect_sandbox_denial(""))
+
+
+def _result_event(message: str) -> str:
+    return json.dumps(
+        {"type": "result", "subtype": "success", "is_error": True, "result": message}
+    )
+
+
+class IsTransientAgentFailureTest(unittest.TestCase):
+    """#6246: a dropped stream killed a 7-minute run that a retry would finish."""
+
+    def test_flags_a_stream_cut_mid_response(self) -> None:
+        stdout = _result_event(
+            "API Error: Connection closed mid-response. The response above may be incomplete."
+        )
+        self.assertTrue(is_transient_agent_failure(stdout))
+
+    def test_flags_provider_5xx_and_socket_failures(self) -> None:
+        for message in (
+            "API Error: 503 Service is too busy. We advise users to temporarily switch to another model.",
+            "API Error: 502 Bad Gateway",
+            "API Error: terminated",
+            "API Error: The operation timed out.",
+            "API Error: socket hang up",
+        ):
+            with self.subTest(message=message):
+                self.assertTrue(is_transient_agent_failure(_result_event(message)))
+
+    def test_keeps_credential_and_balance_errors_fatal(self) -> None:
+        # Retrying these just triples the cost of a failure a human must fix:
+        # the account state is identical on every attempt.
+        for message in (
+            "Failed to authenticate. API Error: 401 Insufficient balance. Manage your billing here: https://opencode.ai",
+            'API Error: 402 {"error":{"message":"Insufficient Balance","type":"unknown_error"}}',
+            'API Error: 400 {"model":"deepseek-v4-flash"}',
+            "Failed to authenticate. API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\"}}",
+        ):
+            with self.subTest(message=message):
+                self.assertFalse(is_transient_agent_failure(_result_event(message)))
+
+    def test_ignores_transient_looking_text_outside_the_error_event(self) -> None:
+        # An issue body quoting the string must not turn a real failure into a
+        # retry loop: only the agent's own fatal error event is classified.
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "assistant", "message": {"content": "the log said Connection closed mid-response"}}),
+                _result_event("API Error: 402 Insufficient Balance"),
+            ]
+        )
+        self.assertFalse(is_transient_agent_failure(stdout))
+
+    def test_is_false_without_any_error_event(self) -> None:
+        self.assertFalse(is_transient_agent_failure(""))
+        self.assertFalse(is_transient_agent_failure(None))
+        self.assertFalse(is_transient_agent_failure(json.dumps({"type": "result", "is_error": False})))
 
 
 if __name__ == "__main__":

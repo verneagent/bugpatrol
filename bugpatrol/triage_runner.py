@@ -19,6 +19,7 @@ from bugpatrol.agents import (
     agent_error_from_stdout,
     build_triage_agent_invocation,
     detect_sandbox_denial,
+    is_transient_agent_failure,
     load_agent_json,
     parse_claude_token_usage,
 )
@@ -398,6 +399,17 @@ def execute_triage_run(
         model=plan.invocation.model,
     )
     if completed.returncode != 0:
+        # The agent died mid-turn. Most non-zero exits like this are the LLM
+        # endpoint dropping an in-flight response (#6246: `Connection closed
+        # mid-response` after 133 turns and 7 minutes on minici32g, the same
+        # issue having just died the same way on carbonci). Retrying here costs
+        # one more agent run; failing throws that work away, marks the issue
+        # Failed, pings the reporter, and leans on the watcher to start over
+        # from scratch on another runner anyway. Credential/account errors and
+        # a gateway-refused model reproduce on every attempt, so those keep
+        # failing on the spot.
+        if not final_attempt and is_transient_agent_failure(completed.stdout):
+            return "agent_crashed"
         mark_triage_failed(
             config=config,
             issue_number=issue_number,

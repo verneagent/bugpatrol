@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
@@ -14,6 +15,25 @@ from bugpatrol.config import ProjectConfig
 # endpoint). Host root WITHOUT /v1: the claude CLI appends /v1/messages itself.
 DEEPSEEK_ANTHROPIC_BASE_URL = "https://opencode.ai/zen/go"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
+
+# Fatal agent errors a fresh attempt usually clears: an in-flight response
+# dropped mid-stream, a provider 5xx, a reset socket. These are stochastic —
+# observed fleet-wide (`Connection closed mid-response` on minici32g/16g/
+# carbonci, `503 Service is too busy`, `The operation timed out`) at roughly
+# 1% of runs, and never on the same run twice.
+_TRANSIENT_AGENT_FAILURE_MARKERS = (
+    "Connection closed mid-response",
+    "API Error: terminated",
+    "The operation timed out",
+    "overloaded_error",
+    "socket hang up",
+    "ECONNRESET",
+    "ETIMEDOUT",
+    "fetch failed",
+)
+# `API Error: 503 Service is too busy...`; the code is the whole signal, and
+# spelling the messages out here would miss the next 5xx shape.
+_TRANSIENT_AGENT_FAILURE_RE = re.compile(r"API Error: 5\d\d")
 
 
 @dataclass(frozen=True)
@@ -219,6 +239,26 @@ def agent_error_from_stdout(stdout: str | None) -> str:
             if isinstance(result, str) and result.strip():
                 return result.strip()
     return ""
+
+
+def is_transient_agent_failure(stdout: str | None) -> bool:
+    """True when the agent died of an API failure a fresh attempt would clear.
+
+    Only the agent's own fatal error message is classified — never the
+    transcript around it — so an issue body that happens to quote one of these
+    strings cannot turn a real failure into a retry loop.
+
+    Deliberately an allowlist. Credential and account errors (401 auth, 402
+    "Insufficient Balance", a model the gateway refuses with a bare 400) are
+    identical on every attempt: retrying them triples the cost of a failure
+    that a human has to fix anyway, so anything unrecognized stays fatal.
+    """
+    error = agent_error_from_stdout(stdout)
+    if not error:
+        return False
+    if any(marker in error for marker in _TRANSIENT_AGENT_FAILURE_MARKERS):
+        return True
+    return _TRANSIENT_AGENT_FAILURE_RE.search(error) is not None
 
 
 def build_triage_agent_invocation(

@@ -1094,6 +1094,15 @@ def main(argv: list[str] | None = None) -> int:
                         file=sys.stderr,
                     )
                     continue
+                if status == "agent_crashed":
+                    # A transient API failure dropped the agent mid-turn (see
+                    # is_transient_agent_failure). Re-run rather than posting a
+                    # Failed marker for a run a second attempt usually finishes.
+                    print(
+                        f"triage agent died on a transient API error (attempt {attempt}); retrying",
+                        file=sys.stderr,
+                    )
+                    continue
                 if status != "stale_context":
                     return plan
                 print(
