@@ -429,7 +429,9 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
         run.assert_called_once()
 
     def test_raises_after_exhausting_transient_retries(self) -> None:
-        client = GitHubCliIssuesClient(transient_retries=3, sleep=lambda _s: None)
+        # env={} pins the unproxied case: with no proxy in the environment there
+        # is no second transport to try, so exactly `transient_retries` calls.
+        client = GitHubCliIssuesClient(transient_retries=3, sleep=lambda _s: None, env={})
         gateway = 'non-200 OK status code: 503 Service Unavailable'
 
         with patch("subprocess.run") as run:
@@ -437,6 +439,36 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
             with self.assertRaisesRegex(GitHubCliError, "503"):
                 client.add_assignee(repo="o/r", issue_number=1, assignee="a")
         self.assertEqual(run.call_count, 3)
+
+    def test_retries_without_the_proxy_after_the_proxy_path_fails(self) -> None:
+        # The relay's shape (2026-09-22): the proxy that every `gh` call rides
+        # EOFed for 15 hours while the direct path answered at the same instants,
+        # so retrying the proxied transport alone just re-confirmed the outage.
+        proxied = {"PATH": "/usr/bin", "https_proxy": "http://127.0.0.1:18443"}
+        eof = 'Post "https://api.github.com/graphql": EOF'
+        client = GitHubCliIssuesClient(transient_retries=2, sleep=lambda _s: None, env=proxied)
+
+        with patch("subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh"], 1, "", eof),
+                subprocess.CompletedProcess(["gh"], 1, "", eof),
+                subprocess.CompletedProcess(["gh"], 0, "[]", ""),
+            ]
+            self.assertEqual(client.list_issues(repo="o/r"), ())
+
+        self.assertEqual(run.call_count, 3)
+        self.assertNotIn("https_proxy", run.call_args_list[2].kwargs["env"])
+
+    def test_names_both_transports_when_neither_works(self) -> None:
+        proxied = {"PATH": "/usr/bin", "https_proxy": "http://127.0.0.1:18443"}
+        eof = 'Post "https://api.github.com/graphql": EOF'
+        client = GitHubCliIssuesClient(transient_retries=1, sleep=lambda _s: None, env=proxied)
+
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 1, "", eof)
+            with self.assertRaisesRegex(GitHubCliError, "proxy stripped also failed"):
+                client.list_issues(repo="o/r")
+        self.assertEqual(run.call_count, 2)
 
     def test_retries_transient_network_errors_then_succeeds(self) -> None:
         # Transport-layer blips (the TLS handshake timeout that failed a #4121

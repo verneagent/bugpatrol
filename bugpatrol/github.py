@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
-import subprocess
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -19,7 +19,7 @@ from bugpatrol.clients import (
     ReviewComment,
     ReviewThread,
 )
-from bugpatrol.gh_transient import is_transient_gh_error as _is_transient_gh_error
+from bugpatrol.gh_transient import run_gh_with_transient_retries
 from bugpatrol.github_fields import GITHUB_API_VERSION, GitHubIssueFieldsClient
 
 if TYPE_CHECKING:
@@ -47,6 +47,7 @@ class GitHubCliIssuesClient:
         transient_retries: int = 3,
         retry_backoff_seconds: float = 2.0,
         sleep: Callable[[float], None] = time.sleep,
+        env: Mapping[str, str] = os.environ,
     ) -> None:
         self._gh = gh
         self._search_limit = search_limit
@@ -55,6 +56,10 @@ class GitHubCliIssuesClient:
         self._transient_retries = transient_retries
         self._retry_backoff_seconds = retry_backoff_seconds
         self._sleep = sleep
+        # Seam for the proxy→direct fallback: the environment the retry driver
+        # reads to decide whether a no-proxy transport exists. Tests pin it; the
+        # process environment is correct everywhere else.
+        self._env = env
 
     def find_issue_by_intake_root(self, *, repo: str, chat_id: str, root_id: str) -> GitHubIssue | None:
         result = self._run(
@@ -935,24 +940,22 @@ class GitHubCliIssuesClient:
         )
 
     def _run(self, args: Sequence[str], *, stdin: str | None = None) -> CommandResult:
-        for attempt in range(1, self._transient_retries + 1):
-            completed = subprocess.run(
-                [self._gh, *args],
-                input=stdin,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            if completed.returncode == 0:
-                return CommandResult(stdout=completed.stdout, stderr=completed.stderr)
+        outcome = run_gh_with_transient_retries(
+            [self._gh, *args],
+            stdin=stdin,
+            retries=self._transient_retries,
+            backoff_seconds=self._retry_backoff_seconds,
+            sleep=self._sleep,
+            env=self._env,
+        )
+        completed = outcome.completed
+        if completed.returncode != 0:
             stderr = completed.stderr.strip()
-            if attempt < self._transient_retries and _is_transient_gh_error(stderr):
-                self._sleep(self._retry_backoff_seconds * attempt)
-                continue
             raise GitHubCliError(
-                f"gh {' '.join(args)} failed with exit {completed.returncode}: {stderr}"
+                f"gh {' '.join(args)} failed with exit {completed.returncode}: "
+                f"{stderr}{outcome.transport_note}"
             )
-        raise AssertionError("unreachable")  # loop always returns or raises
+        return CommandResult(stdout=completed.stdout, stderr=completed.stderr)
 
 
 def _truncate_log_tail(text: str, *, max_lines: int = 200, max_chars: int = 8000) -> str:

@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import json
-import subprocess
+import os
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import FieldSpec
-from bugpatrol.gh_transient import is_transient_gh_error
+from bugpatrol.gh_transient import run_gh_with_transient_retries
 
 GITHUB_API_VERSION = "2026-03-10"
 
@@ -36,11 +36,14 @@ class GitHubIssueFieldsClient:
         transient_retries: int = 3,
         retry_backoff_seconds: float = 2.0,
         sleep: Callable[[float], None] = time.sleep,
+        env: Mapping[str, str] = os.environ,
     ) -> None:
         self._gh = gh
         self._transient_retries = transient_retries
         self._retry_backoff_seconds = retry_backoff_seconds
         self._sleep = sleep
+        # Seam for the proxy→direct fallback; see GitHubCliIssuesClient.
+        self._env = env
 
     def list_org_fields(self, *, org: str) -> dict[str, IssueField]:
         data = json.loads(
@@ -127,32 +130,31 @@ class GitHubIssueFieldsClient:
     def _run_api(self, args: Sequence[str], *, stdin: str | None = None) -> str:
         # Bounded retry on transient gateway/transport blips (e.g. a
         # `net/http: TLS handshake timeout` mid-poll) so a single flaky call
-        # doesn't crash the whole watcher. GET reads are idempotent; the one
-        # mutation (add_issue_field_values POST) is a set-to-value upsert, so
-        # re-applying the same values is a no-op — safe to retry.
-        for attempt in range(1, self._transient_retries + 1):
-            completed = subprocess.run(
-                [self._gh, "api", *args],
-                input=stdin,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            if completed.returncode == 0:
-                return completed.stdout
+        # doesn't crash the whole watcher, plus a no-proxy pass when the ambient
+        # environment is proxied. GET reads are idempotent; the one mutation
+        # (add_issue_field_values POST) is a set-to-value upsert, so re-applying
+        # the same values is a no-op — safe to retry.
+        outcome = run_gh_with_transient_retries(
+            [self._gh, "api", *args],
+            stdin=stdin,
+            retries=self._transient_retries,
+            backoff_seconds=self._retry_backoff_seconds,
+            sleep=self._sleep,
+            env=self._env,
+        )
+        completed = outcome.completed
+        if completed.returncode != 0:
             stderr = completed.stderr.strip()
             if "Not Found" in stderr and "/issue-fields" in " ".join(args):
                 raise GitHubIssueFieldsError(
                     "GitHub Issue Fields are only available for organization-owned repositories "
                     "with Issue Fields enabled."
                 )
-            if attempt < self._transient_retries and is_transient_gh_error(stderr):
-                self._sleep(self._retry_backoff_seconds * attempt)
-                continue
             raise GitHubIssueFieldsError(
-                f"gh api {' '.join(args)} failed with exit {completed.returncode}: {stderr}"
+                f"gh api {' '.join(args)} failed with exit {completed.returncode}: "
+                f"{stderr}{outcome.transport_note}"
             )
-        raise AssertionError("unreachable")  # loop always returns or raises
+        return completed.stdout
 
 
 def build_issue_field_values_payload(

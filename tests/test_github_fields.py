@@ -188,7 +188,9 @@ class GitHubIssueFieldsRetryTest(unittest.TestCase):
         run.assert_called_once()
 
     def test_raises_after_exhausting_transient_retries(self) -> None:
-        client = GitHubIssueFieldsClient(transient_retries=3, sleep=lambda _s: None)
+        # env={} pins the unproxied case; a proxied environment adds a second
+        # transport (see tests/test_gh_transient.py).
+        client = GitHubIssueFieldsClient(transient_retries=3, sleep=lambda _s: None, env={})
         tls = "net/http: TLS handshake timeout"
 
         with patch("subprocess.run") as run:
