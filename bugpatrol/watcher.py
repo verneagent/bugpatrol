@@ -46,12 +46,15 @@ MAX_CONSECUTIVE_SCAN_FAILURES = 10
 # that silently retried forever, dropping issues) before we ping Lark once. A
 # failed topic is never ledgered, so it re-processes every poll; without this an
 # outage is invisible until someone notices missing issues. No-Silent-Failures:
-# admit the repeated failure instead of retrying quietly.
+# admit the repeated failure instead of retrying quietly. The streak is counted
+# per topic and cleared only when that topic succeeds, so a 15-hour outage is
+# one ping, not one per burst.
 TOPIC_FAILURE_ALERT_THRESHOLD = 3
 
-# Failing topics in one poll before the alert is also broadcast to the group
-# chat: a single stuck topic belongs in that topic, but a fleet-wide outage
-# would otherwise only be visible to whoever happens to open each topic.
+# Topics crossing the threshold in one poll before the alert is also broadcast
+# to the group chat: a single stuck topic belongs in that topic, but a
+# fleet-wide outage would otherwise only be visible to whoever happens to open
+# each topic.
 TOPIC_OUTAGE_CHAT_SUMMARY_TOPICS = 3
 
 # Backoff before retrying a failed reconcile dispatch. GitHub cron for
@@ -256,8 +259,15 @@ def run_polling_watcher(
     try:
         with ThreadPoolExecutor(max_workers=parallel_topics) as executor:
             consecutive_scan_failures = 0
-            consecutive_topic_failures = 0
-            topic_outage_alerted = False
+            # Outage bookkeeping is per topic, not per poll: a poll that fails
+            # one topic and succeeds another must not reset the failing topic's
+            # streak (and re-arm its alert) just because some other topic was
+            # healthy. Otherwise a topic stuck for hours — e.g. the relay's
+            # proxy EOFing every `gh` call — re-pings its reporter every time a
+            # clean topic passes in between, which is exactly the repeated-alert
+            # spam this state exists to prevent.
+            topic_failures: dict[str, int] = {}
+            topic_outage_alerted: set[str] = set()
             logged_skips: set[tuple[str, str]] = set()
             while True:
                 iterations += 1
@@ -332,26 +342,35 @@ def run_polling_watcher(
                             ledger.mark_processed(message_id)
                     iteration_events.extend(result.events)
                     iteration_outcomes.extend(result.outcomes)
-                errored_results = [result for result in results if result.error]
-                if results:
-                    if errored_results:
-                        consecutive_topic_failures += 1
-                        if (
-                            consecutive_topic_failures >= topic_failure_alert_threshold
-                            and not topic_outage_alerted
-                            and not dry_run
-                        ):
-                            _alert_topic_outage(
-                                lark=lark,
-                                config=config,
-                                errored_results=errored_results,
-                                consecutive_iterations=consecutive_topic_failures,
-                                logger=logger,
-                            )
-                            topic_outage_alerted = True
-                    else:
-                        consecutive_topic_failures = 0
-                        topic_outage_alerted = False
+                for result in results:
+                    if result.error:
+                        topic_failures[result.root_key] = topic_failures.get(result.root_key, 0) + 1
+                        continue
+                    # A topic that finally went through ends its streak and
+                    # re-arms the alert, so a genuinely new outage still pings.
+                    topic_failures.pop(result.root_key, None)
+                    topic_outage_alerted.discard(result.root_key)
+                # Only the topics that just crossed the threshold are alerted:
+                # a topic already alerted for this streak stays silent until it
+                # recovers, which is what "ping Lark once" actually means.
+                newly_failing = [
+                    result
+                    for result in results
+                    if result.error
+                    and topic_failures.get(result.root_key, 0) >= topic_failure_alert_threshold
+                    and result.root_key not in topic_outage_alerted
+                ]
+                if newly_failing and not dry_run:
+                    _alert_topic_outage(
+                        lark=lark,
+                        config=config,
+                        errored_results=newly_failing,
+                        consecutive_iterations=max(
+                            topic_failures[result.root_key] for result in newly_failing
+                        ),
+                        logger=logger,
+                    )
+                    topic_outage_alerted.update(result.root_key for result in newly_failing)
                 iteration_skipped = sum(1 for event in iteration_events if event.action == "skipped")
                 scanned += scan.scanned
                 processed += len(iteration_outcomes)

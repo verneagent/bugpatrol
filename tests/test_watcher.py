@@ -352,6 +352,110 @@ class WatcherTest(unittest.TestCase):
         self.assertEqual(len(lark.chat_messages), 1)
         self.assertIn("om_1", lark.chat_messages[0].text)
 
+    def test_stuck_topic_alerts_once_while_healthy_topics_keep_passing(self) -> None:
+        # Production shape (relay, 2026-09-22): the proxy EOFed every `gh` call,
+        # so ONE topic failed on every poll for 15 hours while other topics in
+        # the same poll went through. A poll-level streak resets on those clean
+        # neighbours and re-arms the alert, which posted the identical warning
+        # into the reporter's topic 11 times. The streak must be per topic.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeHistoryLark()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        stuck = TopicResult(
+            root_key="om_stuck",
+            outcomes=(),
+            events=(BackfillEvent(message_id="om_stuck", action="error", reason="EOF"),),
+            processed_message_ids=(),
+            error="GitHubCliError: gh issue list ... EOF",
+        )
+        healthy = TopicResult(
+            root_key="om_healthy",
+            outcomes=(),
+            events=(BackfillEvent(message_id="om_healthy", action="processed", reason=""),),
+            processed_message_ids=("om_healthy",),
+        )
+        # A poll that harvests ONLY clean topics resets the old poll-level
+        # streak, so every fresh burst of three failing polls re-armed and
+        # re-fired the alert (3 alerts below). The stuck topic never succeeds,
+        # so its own streak must survive those clean polls: one alert.
+        harvests = [
+            [stuck],
+            [stuck],
+            [stuck],
+            [healthy],
+            [stuck],
+            [stuck],
+            [stuck],
+            [healthy],
+            [stuck],
+            [stuck],
+            [stuck],
+            [healthy],
+        ]
+        with patch("bugpatrol.watcher._harvest_topic_results", side_effect=harvests):
+            run_polling_watcher(
+                config=config,
+                lark=lark,  # type: ignore[arg-type]
+                workflow=workflow,
+                max_iterations=len(harvests),
+                interval_seconds=0,
+                topic_failure_alert_threshold=3,
+            )
+
+        alerts = _outage_alert_replies(lark)
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0].message_id, "om_stuck")
+
+    def test_stuck_topic_realerts_after_it_recovers_and_breaks_again(self) -> None:
+        # The flip side: once the topic actually succeeds, the alert re-arms, so
+        # a genuinely new outage is not swallowed by the earlier one.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGitHubIssuesClient()
+        lark = FakeHistoryLark()
+        workflow = IntakeWorkflow(config=config, github=github, lark=lark)
+
+        stuck = TopicResult(
+            root_key="om_stuck",
+            outcomes=(),
+            events=(BackfillEvent(message_id="om_stuck", action="error", reason="EOF"),),
+            processed_message_ids=(),
+            error="GitHubCliError: gh issue list ... EOF",
+        )
+        recovered = TopicResult(
+            root_key="om_stuck",
+            outcomes=(),
+            events=(BackfillEvent(message_id="om_stuck", action="processed", reason=""),),
+            processed_message_ids=("om_stuck",),
+        )
+        healthy = TopicResult(
+            root_key="om_healthy",
+            outcomes=(),
+            events=(BackfillEvent(message_id="om_healthy", action="processed", reason=""),),
+            processed_message_ids=("om_healthy",),
+        )
+        harvests = [
+            [stuck, healthy],
+            [stuck, healthy],
+            [stuck, healthy],
+            [recovered, healthy],
+            [stuck, healthy],
+            [stuck, healthy],
+            [stuck, healthy],
+        ]
+        with patch("bugpatrol.watcher._harvest_topic_results", side_effect=harvests):
+            run_polling_watcher(
+                config=config,
+                lark=lark,  # type: ignore[arg-type]
+                workflow=workflow,
+                max_iterations=len(harvests),
+                interval_seconds=0,
+                topic_failure_alert_threshold=3,
+            )
+
+        self.assertEqual(len(_outage_alert_replies(lark)), 2)
+
     def test_run_polling_watcher_resets_topic_alert_after_recovery(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGitHubIssuesClient()
