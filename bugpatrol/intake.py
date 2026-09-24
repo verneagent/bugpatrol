@@ -13,7 +13,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 from bugpatrol.clients import GitHubIssue
-from bugpatrol.watermark.reporter import NO_WATERMARK_NOTE
 
 INTAKE_META_MARKER = "BUGPATROL_INTAKE_META"
 
@@ -23,12 +22,6 @@ class Attachment:
     kind: str
     url: str
     description: str = ""
-    # Watermark status for this attachment, rendered verbatim as the issue
-    # body's `- watermark:` line. The relay watcher stores the extracted
-    # plaintext payload as compact JSON (no encryption); `未找到水印` when
-    # media was scanned and carried none; "" when not attempted (not
-    # image/video media).
-    watermark: str = ""
 
 
 @dataclass(frozen=True)
@@ -60,7 +53,6 @@ def intake_record_from_dict(data: dict[str, Any]) -> IntakeRecord:
             kind=_required_str(_required_dict(item, "attachment"), "kind"),
             url=_required_str(_required_dict(item, "attachment"), "url"),
             description=str(_required_dict(item, "attachment").get("description") or ""),
-            watermark=str(_required_dict(item, "attachment").get("watermark") or ""),
         )
         for item in raw_attachments
     )
@@ -337,8 +329,6 @@ def render_attachments_markdown(attachments: tuple[Attachment, ...], *, copy: di
             lines.append(f"    ![{copy['image_alt']} {index}]({url})")
         if item.description:
             lines.append(f"  - {copy['generated_description']}: {item.description}")
-        if item.watermark:
-            lines.append(f"  - watermark: {item.watermark}")
     return "\n".join(lines)
 
 

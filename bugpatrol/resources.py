@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import subprocess
 import sys
@@ -597,13 +596,6 @@ def materialize_attachment(
         resource_key=ref.resource_key,
         resource_type=_download_resource_type(ref.kind),
     )
-    # Extract the invisible watermark carrier on the ORIGINAL downloaded bytes,
-    # before any redaction/transform re-encodes the image (which would strip the
-    # carrier). This runs with NO private key: only the encrypted envelope
-    # candidates are stored (via Attachment.watermark) for the triage runner to
-    # decrypt later. The vision describer runs after and sees the re-encoded
-    # image, so extraction must happen here, first.
-    watermark = _decode_watermark(ref=ref, resource=resource)
     if redactor is not None:
         resource = redactor.redact(ref=ref, resource=resource)
     if transformer is not None:
@@ -622,7 +614,6 @@ def materialize_attachment(
         kind=attachment.kind,
         url=str(path),
         description=description,
-        watermark=watermark,
     )
 
 
@@ -670,78 +661,6 @@ def _extension_for_content_type(content_type: str) -> str:
 def _is_image_resource(*, ref: LarkResourceRef, resource: DownloadedLarkResource) -> bool:
     content_type = resource.content_type.split(";", 1)[0].strip().lower()
     return ref.kind == "image" or content_type.startswith("image/")
-
-
-def _is_watermark_candidate(*, ref: LarkResourceRef, resource: DownloadedLarkResource) -> bool:
-    """Media that can carry a diagnostic watermark: image or video bytes.
-
-    Videos get scanned too (a recording can carry the same trailer carrier);
-    the carrier scan simply reports not-found when absent, so the issue can
-    state that no watermark was found rather than staying silent.
-    """
-    content_type = resource.content_type.split(";", 1)[0].strip().lower()
-    return ref.kind in ("image", "video") or content_type.startswith(("image/", "video/"))
-
-
-def _decode_watermark(
-    *,
-    ref: LarkResourceRef,
-    resource: DownloadedLarkResource,
-) -> str:
-    """Return the watermark issue-line value for a media attachment.
-
-    The payload is PLAINTEXT (no encryption, no private key): the watcher
-    extracts the RS-verified payload JSON directly from the raw bytes and
-    stores it compacted.
-
-    Three states, rendered verbatim into the issue body:
-
-    - compact payload JSON            -> carrier found (plaintext)
-    - ``未找到水印``                   -> scanned, no carrier present
-    - ``""``                          -> not attempted (not media)
-
-    A corrupt carrier surfaces as ``水印解码失败 (<code>)``. Runs on the raw
-    downloaded bytes, before any re-encode (resize/JPEG convert would strip the
-    carrier). A watermark outcome never blocks intake.
-    """
-    if not _is_watermark_candidate(ref=ref, resource=resource):
-        return ""
-    from bugpatrol.watermark.extractor import (
-        WatermarkInvalidEnvelope,
-        extract_plaintext_payload,
-    )
-    from bugpatrol.watermark.reporter import (
-        NO_WATERMARK_NOTE,
-        payload_to_compact_json,
-        watermark_failure_note,
-    )
-    from bugpatrol.watermark.types import ERROR_BAD_ENVELOPE
-
-    try:
-        payload_bytes = extract_plaintext_payload(resource.content)
-    except WatermarkInvalidEnvelope as exc:
-        # A carrier was present but unreadable; surface it AND log, but never
-        # block intake.
-        print(
-            f"resource watermark extract failed "
-            f"({ref.message_id}/{ref.resource_key}): {exc}",
-            file=sys.stderr,
-        )
-        return watermark_failure_note(ERROR_BAD_ENVELOPE)
-    if payload_bytes is None:
-        return NO_WATERMARK_NOTE
-    try:
-        payload = json.loads(payload_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        print(
-            f"resource watermark payload unreadable "
-            f"({ref.message_id}/{ref.resource_key}): {exc}",
-            file=sys.stderr,
-        )
-        return watermark_failure_note(ERROR_BAD_ENVELOPE)
-    if not isinstance(payload, dict):
-        return watermark_failure_note(ERROR_BAD_ENVELOPE)
-    return payload_to_compact_json(payload)
 
 
 def _is_video_resource(*, ref: LarkResourceRef, resource: DownloadedLarkResource) -> bool:
