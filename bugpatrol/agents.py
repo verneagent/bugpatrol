@@ -14,7 +14,7 @@ from bugpatrol.config import ProjectConfig
 # DeepSeek via the OpenCode Go subscription gateway (Anthropic-compatible
 # endpoint). Host root WITHOUT /v1: the claude CLI appends /v1/messages itself.
 DEEPSEEK_ANTHROPIC_BASE_URL = "https://opencode.ai/zen/go"
-DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-v4.1-flash"
 
 # Fatal agent errors a fresh attempt usually clears: an in-flight response
 # dropped mid-stream, a provider 5xx, a reset socket. These are stochastic —
