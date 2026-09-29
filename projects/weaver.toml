@@ -26,8 +26,10 @@ naohn42 = "ou_64b0e007a0c85d79a0f1ba1c9b5c74a6"
 Sobit-Riki = "ou_afdd297fa43ac3e34c2389661f39b713"
 TristinMax = "ou_620062e9f017860d0e9676a5268c578b"
 SoxiaLiSA = "ou_a1c691f849e65bf147d32c912bc96345"
-# TODO 待补 GitHub 账号（群里这些人还没对上）：
-#   Lucy / Nova / Tao / Mila / Karry / Patrick / Irisy / Sam / Ian / Aventurine / Curry / Katrina
+# 其余群成员（Lucy / Nova / Tao / Mila / Karry / Patrick / Irisy / Sam / Ian /
+# Aventurine / Curry / Katrina）是上报方 / QA，不写代码、没有 GitHub 账号，
+# 因此不在这里登记——他们只上报，不会成为 assignee，@ 不到也不影响。
+# 这个映射只放「可能被 assign 的开发」。
 
 [triage_agent]
 provider = "deepseek"
@@ -35,8 +37,14 @@ runner_labels = ["self-hosted", "bugpatrol-weaver-triage"]
 model = ""
 effort = ""
 
-# TODO 待补负责人路由。有它才能按 bug 落在哪个目录 @ 对的人；
-# 缺省时由分诊 agent 自行判断 owner。
+# TODO 待补负责人路由。有它才能按 bug 落在哪个目录 @ 对的人。
+# ⚠️ weaver 仓库**没有** CODEOWNERS（只有 vendor/ 下第三方的），
+# 所以不配 [owners] 时分诊 agent 无处可查、只能靠 git 历史猜。
+# 近一年各目录 top committer（参考，待人工确认）：
+#   console/  Andy 172 · wind2star 55 · Riki 47 · naohn 31
+#   service/  Tristin 806 · Andy 716 · wind2star 287
+#   api/      Andy 314 · wind2star 120 · Tristin 73
+#   app/      Andy 144       internal/  Andy 93 · Tristin 62
 # [owners]
 # default = ["<后端负责人>"]
 #
