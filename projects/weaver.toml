@@ -1,0 +1,103 @@
+# BugPatrol — TheCloverLab/weaver
+#
+# 阶段一：只做分诊。没有 [fix] 段 = 不自动修复、不提 PR。
+# 上报群：「FiveD weaver bug」oc_846c95a5799b96e96343a849daf3b618（话题模式）
+#
+# weaver 是 monorepo：Go 后端（service/ api/ app/）+ console/ 后台管理页。
+# issue 统一进 TheCloverLab/weaver，靠 [owners.paths] 按目录定责。
+
+github_repo = "TheCloverLab/weaver"
+github_cli = "~/clover/fived/scripts/gh-as-bot.sh"
+
+[lark]
+chat_id = "oc_846c95a5799b96e96343a849daf3b618"
+app_id = "cli_aac97d050d385ee9"
+app_secret_env = "BUGPATROL_LARK_APP_SECRET"
+bot_open_id = "ou_cef931fa2df05ca6f8ae80cb2f3e6094"
+platform = "lark"
+
+# GitHub 账号 -> Lark open_id。定责时按这个真 @ 到人。
+[lark.user_open_ids]
+garlanddiego = "ou_5935e6148d74f4d907c821d151e1bd09"
+wind2star = "ou_d9b2bf738170fabc6f01c03906918a25"
+jerry-emperor = "ou_27beb065e275d58b7bc3b72a4fba3823"
+AndyCokeZero = "ou_5db6d610a1f5fa40cebfc2c297bc81a4"
+naohn42 = "ou_64b0e007a0c85d79a0f1ba1c9b5c74a6"
+Sobit-Riki = "ou_afdd297fa43ac3e34c2389661f39b713"
+TristinMax = "ou_620062e9f017860d0e9676a5268c578b"
+SoxiaLiSA = "ou_a1c691f849e65bf147d32c912bc96345"
+# TODO 待补 GitHub 账号（群里这些人还没对上）：
+#   Lucy / Nova / Tao / Mila / Karry / Patrick / Irisy / Sam / Ian / Aventurine / Curry / Katrina
+
+[triage_agent]
+provider = "deepseek"
+runner_labels = ["self-hosted", "bugpatrol-weaver-triage"]
+model = ""
+effort = ""
+
+# TODO 待补负责人路由。有它才能按 bug 落在哪个目录 @ 对的人；
+# 缺省时由分诊 agent 自行判断 owner。
+# [owners]
+# default = ["<后端负责人>"]
+#
+# [owners.paths]
+# "console/**" = ["<前端负责人>"]
+# "service/**" = ["<后端负责人>"]
+# "api/**"    = ["<后端负责人>"]
+
+[prd]
+root_wiki_node = "LOCAL_PRD_DOCS"
+cache_path = ""
+
+[intake]
+language = "zh-CN"
+# 兜底：早于接入日的消息一律跳过（before_intake_since），不会变成 issue。
+since = "2026-09-29T00:00:00+08:00"
+skip_orphan_replies = true
+
+# 截图/视频落地到 GitHub，issue 里才能直接看到图。
+# 暂借用 fived-assets 的子目录；要独立成 TheCloverLab/weaver-assets 的话，
+# 需先把 sobit-bot App 装到新 repo 上。
+[assets]
+github_repo = "TheCloverLab/fived-assets"
+checkout_path = "~/clover/fived-assets"
+base_path = ".github/issue-assets/weaver"
+branch = "main"
+
+[media]
+description_command = [
+  "{python}",
+  "-m",
+  "bugpatrol.media_vision",
+  "{path}",
+  "客观描述这个媒体文件中实际可见的内容：所在界面、关键 UI 元素与文字、错误提示或异常状态；视频按时间顺序列出关键画面变化。若画面出现悬浮的调试信息浮层（dev overlay，如 FPS、网络、内存、设备信息等实时数据），这是开发/测试环境的正常组件，不是 bug，其数据可作分析参考，但不要把它当作异常状态。只陈述看到的事实，不要推测原因、不要做 bug 分析、不要给修复建议。150 字以内。",
+]
+description_timeout_seconds = 300
+resize_max_image_width = 1600
+resize_max_image_height = 1600
+resize_image_quality = 85
+convert_images_to_jpeg = true
+
+[reconcile]
+dispatch_command = [
+  "gh", "workflow", "run", "bugpatrol-reconcile.yml",
+  "--repo", "TheCloverLab/weaver", "--ref", "main", "-f", "target=both",
+]
+interval_seconds = 14400
+
+[issue_field_names]
+Priority = "Priority"
+"Triage status" = "Triage status"
+Source = "Source"
+"Intake version" = "Intake version"
+"Triage verdict" = "Triage verdict"
+Platform = "Platform"
+Reproducibility = "Reproducibility"
+"Other platforms" = "Other platforms"
+Capability = "Capability"
+Evidence = "Evidence"
+"PRD status" = "PRD status"
+"Triage confidence" = "Triage confidence"
+"Owner reason" = "Owner reason"
+Owner = "Owner"
+Branch = "Branch"
