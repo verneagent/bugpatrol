@@ -37,21 +37,21 @@ runner_labels = ["self-hosted", "bugpatrol-weaver-triage"]
 model = ""
 effort = ""
 
-# TODO 待补负责人路由。有它才能按 bug 落在哪个目录 @ 对的人。
-# ⚠️ weaver 仓库**没有** CODEOWNERS（只有 vendor/ 下第三方的），
-# 所以不配 [owners] 时分诊 agent 无处可查、只能靠 git 历史猜。
-# 近一年各目录 top committer（参考，待人工确认）：
+# 负责人路由。⚠️ weaver 仓库**没有** CODEOWNERS（只有 vendor/ 下第三方的），
+# 所以这里是唯一的权威来源——分诊 agent 靠它定 assignee，不再自己猜。
+# 定这套映射的依据是近一年各目录 top committer：
 #   console/  Andy 172 · wind2star 55 · Riki 47 · naohn 31
 #   service/  Tristin 806 · Andy 716 · wind2star 287
 #   api/      Andy 314 · wind2star 120 · Tristin 73
 #   app/      Andy 144       internal/  Andy 93 · Tristin 62
-# [owners]
-# default = ["<后端负责人>"]
-#
-# [owners.paths]
-# "console/**" = ["<前端负责人>"]
-# "service/**" = ["<后端负责人>"]
-# "api/**"    = ["<后端负责人>"]
+# 列表里第一个是主 owner（@ 的就是他）；其余目录回落 default。
+[owners]
+default = ["AndyCokeZero"]
+
+[owners.paths]
+"console/**" = ["AndyCokeZero", "wind2star"]
+"service/**" = ["TristinMax", "AndyCokeZero"]
+"api/**" = ["AndyCokeZero", "wind2star"]
 
 [prd]
 root_wiki_node = "LOCAL_PRD_DOCS"
