@@ -9,6 +9,7 @@ from bugpatrol.clients import GitHubIssue, GitHubIssueComment
 from bugpatrol.config import load_project_config
 from bugpatrol.intake import IntakeRecord, parse_intake_metadata, render_issue_body
 from bugpatrol.testing.fakes import FakeLarkMessengerClient
+from bugpatrol.triage_ownership import TriageWriteSnapshot, WriteHistory
 from bugpatrol.triage_result import (
     TriageResult,
     append_triage_metadata,
@@ -55,9 +56,13 @@ class FakeGithub:
 
     def set_issue_type(self, **kwargs: object) -> None:
         self.calls.append(("set_issue_type", kwargs))
+        number = int(kwargs["issue_number"])
+        self.issues[number] = replace(self.get_issue(**kwargs), issue_type=str(kwargs["issue_type"]))
 
     def update_issue_title(self, **kwargs: object) -> None:
         self.calls.append(("update_issue_title", kwargs))
+        number = int(kwargs["issue_number"])
+        self.issues[number] = replace(self.get_issue(**kwargs), title=str(kwargs["title"]))
 
     def add_issue_comment(self, **kwargs: object) -> None:
         self.calls.append(("add_issue_comment", kwargs))
@@ -65,6 +70,8 @@ class FakeGithub:
 
     def add_assignee(self, **kwargs: object) -> None:
         self.calls.append(("add_assignee", kwargs))
+        number = int(kwargs["issue_number"])
+        self.issues[number] = replace(self.get_issue(**kwargs), assignees=(str(kwargs["assignee"]),))
 
     def close_issue_as_duplicate(self, **kwargs: object) -> None:
         self.calls.append(("close_issue_as_duplicate", kwargs))
@@ -88,8 +95,11 @@ class FakeGithub:
             url=f"https://github.test/o/r/issues/{number}",
             title="issue",
             body=self.issue_body,
-            state="open",
+            state="open", created_by_type="Bot",
         )
+
+    def get_issue_write_history(self, **kwargs: object) -> WriteHistory:
+        return WriteHistory(complete=True)
 
     def reopen_issue(self, **kwargs: object) -> None:
         self.calls.append(("reopen_issue", kwargs))
@@ -102,6 +112,7 @@ class FakeIssueFields:
 
     def add_issue_field_values(self, **kwargs: object) -> None:
         self.calls.append(("add_issue_field_values", kwargs))
+        self.current_values.update(kwargs["values"])
 
     def get_issue_field_values(self, **kwargs: object) -> dict[str, str]:
         self.calls.append(("get_issue_field_values", kwargs))
@@ -157,6 +168,9 @@ class TriageResultTest(unittest.TestCase):
             issue_number=1,
             config=config,
             result=result,
+            write_snapshot=TriageWriteSnapshot(
+                github.get_issue(issue_number=1), dict(issue_fields.current_values), WriteHistory(complete=True),
+            ),
             github=github,  # type: ignore[arg-type]
             issue_fields=issue_fields,  # type: ignore[arg-type]
         )
@@ -174,7 +188,7 @@ class TriageResultTest(unittest.TestCase):
             number=1,
             url="https://github.test/o/r/issues/1",
             title="[Lark] 旧标题",
-            body=managed_issue_body(),
+            body=managed_issue_body(), created_by_type="Bot",
         )
         issue_fields = FakeIssueFields()
         result = TriageResult(
@@ -190,6 +204,9 @@ class TriageResultTest(unittest.TestCase):
             issue_number=1,
             config=config,
             result=result,
+            write_snapshot=TriageWriteSnapshot(
+                github.get_issue(issue_number=1), dict(issue_fields.current_values), WriteHistory(complete=True),
+            ),
             github=github,  # type: ignore[arg-type]
             issue_fields=issue_fields,  # type: ignore[arg-type]
         )
@@ -328,18 +345,17 @@ class TriageResultTest(unittest.TestCase):
             issue_number=1,
             config=config,
             result=result,
+            write_snapshot=TriageWriteSnapshot(
+                github.get_issue(issue_number=1), dict(issue_fields.current_values), WriteHistory(complete=True),
+            ),
             github=github,  # type: ignore[arg-type]
             issue_fields=issue_fields,  # type: ignore[arg-type]
         )
 
-        self.assertEqual(
-            [name for name, _ in github.calls],
-            ["get_issue", "list_issue_comments", "set_issue_type", "add_issue_comment", "add_assignee"],
-        )
-        self.assertEqual(
-            [name for name, _ in issue_fields.calls],
-            ["get_issue_field_values", "add_issue_field_values"],
-        )
+        self.assertEqual(github.issues[1].issue_type, "Bug")
+        self.assertEqual(github.issues[1].assignees, ("garlanddiego",))
+        self.assertEqual(issue_fields.current_values["Source"], "Lark")
+        self.assertTrue(summary.assignee_written)
         self.assertTrue(summary.comment_added)
         self.assertFalse(summary.duplicate_comment_skipped)
         self.assertIn("BUGPATROL_TRIAGE_META", github.comments[0])
@@ -447,7 +463,7 @@ class TriageResultTest(unittest.TestCase):
 
         self.assertEqual(triage_result_fingerprint(first), triage_result_fingerprint(second))
 
-    def test_apply_triage_result_skips_legacy_metadata_when_core_fields_unchanged(self) -> None:
+    def test_apply_triage_result_adds_ownership_review_after_legacy_metadata_when_core_fields_unchanged(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGithub()
         github.comments.append(
@@ -472,11 +488,12 @@ class TriageResultTest(unittest.TestCase):
             issue_fields=issue_fields,  # type: ignore[arg-type]
         )
 
-        self.assertFalse(summary.comment_added)
-        self.assertTrue(summary.duplicate_comment_skipped)
-        self.assertEqual(len(github.comments), 1)
+        self.assertTrue(summary.comment_added)
+        self.assertFalse(summary.duplicate_comment_skipped)
+        self.assertEqual(len(github.comments), 2)
+        self.assertIn("Preserved human or unverified metadata", github.comments[-1])
 
-    def test_apply_triage_result_skips_legacy_comment_when_decision_line_matches(self) -> None:
+    def test_apply_triage_result_adds_ownership_review_after_legacy_comment_when_decision_line_matches(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGithub()
         github.comments.append(
@@ -497,9 +514,10 @@ class TriageResultTest(unittest.TestCase):
             issue_fields=issue_fields,  # type: ignore[arg-type]
         )
 
-        self.assertFalse(summary.comment_added)
-        self.assertTrue(summary.duplicate_comment_skipped)
-        self.assertEqual(len(github.comments), 1)
+        self.assertTrue(summary.comment_added)
+        self.assertFalse(summary.duplicate_comment_skipped)
+        self.assertEqual(len(github.comments), 2)
+        self.assertIn("Preserved human or unverified metadata", github.comments[-1])
 
     def test_intake_metadata_round_trips_for_lark_follow_up(self) -> None:
         body = render_issue_body(
@@ -653,11 +671,13 @@ class TriageResultTest(unittest.TestCase):
         data["duplicate_of"] = 5
         result = parse_triage_result(data)
 
+        snapshot = self._write_snapshot(github, issue_fields)
         summary = apply_triage_result(
             repo=config.github_repo,
             issue_number=1,
             config=config,
             result=result,
+            write_snapshot=snapshot,
             github=github,  # type: ignore[arg-type]
             issue_fields=issue_fields,  # type: ignore[arg-type]
         )
@@ -669,6 +689,13 @@ class TriageResultTest(unittest.TestCase):
         self.assertEqual(close_kwargs["duplicate_of"], 5)
         self.assertTrue(summary.closed_as_duplicate)
         self.assertFalse(summary.assignee_written)
+
+    def _write_snapshot(self, github: FakeGithub, fields: FakeIssueFields) -> TriageWriteSnapshot:
+        return TriageWriteSnapshot(
+            issue=github.get_issue(issue_number=1),
+            fields=dict(fields.get_issue_field_values(issue_number=1)),
+            history=github.get_issue_write_history(issue_number=1),
+        )
 
     def _duplicate_result(self, duplicate_of: int = 5) -> TriageResult:
         data = dict(VALID)
@@ -689,6 +716,36 @@ class TriageResultTest(unittest.TestCase):
             assignees=("garlanddiego",),
         )
 
+    def test_no_snapshot_cannot_mutate_original_or_close_report_for_regression(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.issues[5] = self._closed_original(state_reason="completed")
+        fields = FakeIssueFields()
+        summary = apply_triage_result(
+            repo=config.github_repo, issue_number=1, config=config, result=self._duplicate_result(),
+            github=github, issue_fields=fields,
+        )
+        self.assertFalse(summary.closed_as_duplicate)
+        self.assertEqual(summary.regression_reopened, 0)
+        self.assertFalse(any(name in ("reopen_issue", "close_issue_as_duplicate") for name, _ in github.calls))
+        self.assertFalse(any(dict(kwargs)["issue_number"] == 5 for name, kwargs in fields.calls if name == "add_issue_field_values"))
+        self.assertIn("lifecycle", parse_triage_metadata(github.comments[-1])["suggested_fields"])
+
+    def test_no_snapshot_cannot_restore_report_from_matching_bot_receipt(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.issues[5] = self._closed_original(state_reason="completed")
+        github.issues[1] = replace(github.get_issue(issue_number=1), state="closed", state_reason="duplicate",
+                                   closed_by="bugpatrol[bot]", closed_by_type="Bot", closed_at="2026-10-22T03:00:00Z")
+        receipt = {"issue": 1, "duplicate_of": 5, "classification": "old_build_duplicate",
+                   "result_fingerprint": "a" * 64, "closed_by": "bugpatrol[bot]", "closed_at": "2026-10-22T03:00:00Z"}
+        github.comments.append(f"<!-- BUGPATROL_DUPLICATE_CLOSE_META\n{json.dumps(receipt)}\nBUGPATROL_DUPLICATE_CLOSE_META -->")
+        apply_triage_result(repo=config.github_repo, issue_number=1, config=config,
+                            result=replace(self._duplicate_result(), duplicate_evidence=None),
+                            github=github, issue_fields=FakeIssueFields())
+        self.assertNotIn("reopen_issue", [name for name, _ in github.calls])
+        self.assertIn("No plan snapshot", github.comments[-1])
+
     def test_duplicate_of_fixed_issue_reopens_original_as_regression(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGithub()
@@ -696,11 +753,13 @@ class TriageResultTest(unittest.TestCase):
         issue_fields = FakeIssueFields()
         lark = FakeLarkMessengerClient()
 
+        snapshot = self._write_snapshot(github, issue_fields)
         summary = apply_triage_result(
             repo=config.github_repo,
             issue_number=1,
             config=config,
             result=self._duplicate_result(),
+            write_snapshot=snapshot,
             github=github,  # type: ignore[arg-type]
             issue_fields=issue_fields,  # type: ignore[arg-type]
             lark=lark,
@@ -748,11 +807,13 @@ class TriageResultTest(unittest.TestCase):
         issue_fields = FakeIssueFields()
         lark = FakeLarkMessengerClient()
 
+        snapshot = self._write_snapshot(github, issue_fields)
         apply_triage_result(
             repo=config.github_repo,
             issue_number=1,
             config=config,
             result=self._duplicate_result(),
+            write_snapshot=snapshot,
             github=github,  # type: ignore[arg-type]
             issue_fields=issue_fields,  # type: ignore[arg-type]
             lark=lark,
@@ -780,8 +841,10 @@ class TriageResultTest(unittest.TestCase):
         fields.current_values = {
             config.issue_field_names.get(key, key): value for key, value in result.fields.items()
         }
+        snapshot = self._write_snapshot(github, fields)
         summary = apply_triage_result(
             repo=config.github_repo, issue_number=1, config=config, result=result,
+            write_snapshot=snapshot,
             github=github, issue_fields=fields,
         )
         self.assertTrue(summary.comment_added)
@@ -800,16 +863,18 @@ class TriageResultTest(unittest.TestCase):
         fields = FakeIssueFields()
         verified = self._duplicate_result()
         unknown = replace(verified, duplicate_evidence=None)
+        unknown_snapshot = self._write_snapshot(github, fields)
         first = apply_triage_result(
             repo=config.github_repo, issue_number=1, config=config, result=unknown,
-            github=github, issue_fields=fields,
+            github=github, issue_fields=fields, write_snapshot=unknown_snapshot,
         )
         fields.current_values = {
             config.issue_field_names.get(key, key): value for key, value in verified.fields.items()
         }
+        verified_snapshot = self._write_snapshot(github, fields)
         second = apply_triage_result(
             repo=config.github_repo, issue_number=1, config=config, result=verified,
-            github=github, issue_fields=fields,
+            github=github, issue_fields=fields, write_snapshot=verified_snapshot,
         )
         self.assertFalse(first.closed_as_duplicate)
         self.assertTrue(second.closed_as_duplicate)
@@ -820,9 +885,11 @@ class TriageResultTest(unittest.TestCase):
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         github = FakeGithub()
         github.issues[5] = replace(self._closed_original(state_reason="completed"), body="manual")
+        fields = FakeIssueFields()
+        snapshot = self._write_snapshot(github, fields)
         summary = apply_triage_result(
             repo=config.github_repo, issue_number=1, config=config, result=self._duplicate_result(),
-            github=github, issue_fields=FakeIssueFields(),
+            github=github, issue_fields=fields, write_snapshot=snapshot,
         )
         self.assertFalse(summary.closed_as_duplicate)
         self.assertEqual(summary.regression_reopened, 0)
@@ -833,9 +900,11 @@ class TriageResultTest(unittest.TestCase):
         github = FakeGithub()
         github.issues[5] = self._closed_original(state_reason="completed")
         fields = FakeIssueFields()
+        snapshot = self._write_snapshot(github, fields)
         apply_triage_result(
             repo=config.github_repo, issue_number=1, config=config,
             result=replace(self._duplicate_result(), duplicate_evidence=None),
+            write_snapshot=snapshot,
             github=github, issue_fields=fields,
         )
         written = [dict(kwargs)["values"] for name, kwargs in fields.calls if name == "add_issue_field_values"]
@@ -843,6 +912,36 @@ class TriageResultTest(unittest.TestCase):
         metadata = parse_triage_metadata(github.comments[0])
         self.assertEqual(metadata["triage_status"], "Needs info")
         self.assertIn("请核实", github.comments[0])
+        self.assertNotIn("add_assignee", [name for name, _ in github.calls])
+
+    def test_retriage_does_not_append_old_owner_after_manual_reassignment(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.issues[1] = GitHubIssue(
+            number=1, url="https://github.test/o/r/issues/1", title="issue",
+            body=managed_issue_body(), state="open", assignees=("NewOwner",),
+        )
+        result = parse_triage_result(dict(VALID))
+        apply_triage_result(
+            repo=config.github_repo, issue_number=1, config=config, result=result,
+            github=github, issue_fields=FakeIssueFields(),
+        )
+        self.assertNotIn("add_assignee", [name for name, _ in github.calls])
+
+    def test_manual_assignment_then_removal_cannot_be_treated_as_an_untouched_empty_owner(self) -> None:
+        class AssignmentHistory(FakeGithub):
+            def list_issue_timeline(self, **kwargs):
+                return (
+                    {"id": 1, "event": "assigned", "actor": {"login": "human", "type": "User"}},
+                    {"id": 2, "event": "unassigned", "actor": {"login": "human", "type": "User"}},
+                )
+
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = AssignmentHistory()
+        apply_triage_result(
+            repo=config.github_repo, issue_number=1, config=config,
+            result=parse_triage_result(dict(VALID)), github=github, issue_fields=FakeIssueFields(),
+        )
         self.assertNotIn("add_assignee", [name for name, _ in github.calls])
 
     def test_pending_failure_does_not_reopen_and_retry_completes(self) -> None:
@@ -860,9 +959,10 @@ class TriageResultTest(unittest.TestCase):
         github.issues[5] = self._closed_original(state_reason="completed")
         fields = FailPendingOnce()
         lark = FakeLarkMessengerClient()
+        snapshot = self._write_snapshot(github, fields)
         arguments = dict(
             repo=config.github_repo, issue_number=1, config=config, result=self._duplicate_result(),
-            github=github, issue_fields=fields, lark=lark,
+            github=github, issue_fields=fields, lark=lark, write_snapshot=snapshot,
         )
         with self.assertRaisesRegex(RuntimeError, "Pending write failed"):
             apply_triage_result(**arguments)
@@ -887,9 +987,10 @@ class TriageResultTest(unittest.TestCase):
         github.issues[5] = self._closed_original(state_reason="completed")
         fields = FakeIssueFields()
         lark = FakeLarkMessengerClient()
+        snapshot = self._write_snapshot(github, fields)
         arguments = dict(
             repo=config.github_repo, issue_number=1, config=config, result=self._duplicate_result(),
-            github=github, issue_fields=fields, lark=lark,
+            github=github, issue_fields=fields, lark=lark, write_snapshot=snapshot,
         )
         with self.assertRaisesRegex(RuntimeError, "reopen failed"):
             apply_triage_result(**arguments)
@@ -909,11 +1010,13 @@ class TriageResultTest(unittest.TestCase):
                 github.issues[5] = self._closed_original(state_reason=state_reason)
                 issue_fields = FakeIssueFields()
 
+                snapshot = self._write_snapshot(github, issue_fields)
                 summary = apply_triage_result(
                     repo=config.github_repo,
                     issue_number=1,
                     config=config,
                     result=self._duplicate_result(),
+                    write_snapshot=snapshot,
                     github=github,  # type: ignore[arg-type]
                     issue_fields=issue_fields,  # type: ignore[arg-type]
                 )
@@ -933,11 +1036,13 @@ class TriageResultTest(unittest.TestCase):
         )
         issue_fields = FakeIssueFields()
 
+        snapshot = self._write_snapshot(github, issue_fields)
         summary = apply_triage_result(
             repo=config.github_repo,
             issue_number=1,
             config=config,
             result=self._duplicate_result(),
+            write_snapshot=snapshot,
             github=github,  # type: ignore[arg-type]
             issue_fields=issue_fields,  # type: ignore[arg-type]
         )
@@ -954,12 +1059,14 @@ class TriageResultTest(unittest.TestCase):
         data["duplicate_of"] = 1
         result = parse_triage_result(data)
 
+        snapshot = self._write_snapshot(github, issue_fields)
         with self.assertRaisesRegex(ValueError, "different issue"):
             apply_triage_result(
                 repo=config.github_repo,
                 issue_number=1,
                 config=config,
                 result=result,
+                write_snapshot=snapshot,
                 github=github,  # type: ignore[arg-type]
                 issue_fields=issue_fields,  # type: ignore[arg-type]
             )
@@ -979,6 +1086,9 @@ class TriageResultTest(unittest.TestCase):
             issue_number=1,
             config=config,
             result=result,
+            write_snapshot=TriageWriteSnapshot(
+                github.get_issue(issue_number=1), dict(issue_fields.current_values), WriteHistory(complete=True),
+            ),
             github=github,  # type: ignore[arg-type]
             issue_fields=issue_fields,  # type: ignore[arg-type]
         )

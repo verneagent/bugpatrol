@@ -18,6 +18,8 @@ class GitHubIssue:
     closed_by: str = ""
     assignees: tuple[str, ...] = ()
     closed_by_type: str = ""
+    created_by_type: str = ""
+    issue_type: str = ""
 
 
 @dataclass(frozen=True)

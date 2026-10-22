@@ -373,7 +373,10 @@ def main(argv: list[str] | None = None) -> int:
     context.add_argument("--repo-path", type=Path, required=True)
     context.add_argument("--output", type=Path)
 
-    apply_result = sub.add_parser("apply-triage-result", help="validate and apply triage JSON")
+    apply_result = sub.add_parser(
+        "apply-triage-result",
+        help="publish triage suggestions and system status; prepared writes use run-triage",
+    )
     apply_result.add_argument("project_config", type=Path)
     apply_result.add_argument("--issue", type=int, required=True)
     apply_result.add_argument("--input", type=Path, required=True)
@@ -1045,6 +1048,7 @@ def main(argv: list[str] | None = None) -> int:
                     repo_path=repo_path,
                     output_dir=args.output_dir,
                     github=github,
+                    issue_fields=issue_fields,
                     branch_note=branch_note,
                     reference_repos=reference_repos,
                 )

@@ -10,6 +10,7 @@ from bugpatrol.config import load_project_config
 from bugpatrol.intake import IntakeRecord
 from bugpatrol.intake_workflow import IntakeWorkflow
 from bugpatrol.testing.fakes import FakeGitHubIssuesClient, FakeLarkMessengerClient
+from bugpatrol.triage_ownership import TriageWriteSnapshot
 from bugpatrol.triage_result import apply_triage_result, parse_triage_metadata, parse_triage_result
 
 
@@ -27,6 +28,13 @@ class FakeIssueFields:
 
 
 class DuplicateTriageLoopTest(unittest.TestCase):
+    def snapshot(self, github, fields, config):
+        return TriageWriteSnapshot(
+            github.get_issue(repo=config.github_repo, issue_number=2),
+            fields.get_issue_field_values(repo=config.github_repo, issue_number=2),
+            github.get_issue_write_history(repo=config.github_repo, issue_number=2),
+        )
+
     def result(self, evidence: dict | None):
         return parse_triage_result({
             "issue_type": "Bug", "priority": "High", "triage_status": "Done",
@@ -74,6 +82,7 @@ class DuplicateTriageLoopTest(unittest.TestCase):
                 github.created[0].issue = replace(github.created[0].issue, state="closed", state_reason="completed")
                 arguments = dict(repo=config.github_repo, issue_number=2, config=config,
                                  github=github, issue_fields=FakeIssueFields(), result=self.result(evidence))
+                arguments["write_snapshot"] = self.snapshot(github, arguments["issue_fields"], config)
                 if fail_readback:
                     with self.assertRaisesRegex(RuntimeError, "readback unavailable"):
                         apply_triage_result(**arguments)
@@ -126,7 +135,7 @@ class DuplicateTriageLoopTest(unittest.TestCase):
                 github.created[0].issue = replace(github.created[0].issue, state="closed", state_reason="completed")
                 fields = FakeIssueFields()
                 arguments = dict(repo=config.github_repo, issue_number=2, config=config,
-                                 github=github, issue_fields=fields)
+                                 github=github, issue_fields=fields, write_snapshot=self.snapshot(github, fields, config))
                 with self.assertRaises(RuntimeError):
                     apply_triage_result(**arguments, result=self.result(old_build))
                 self.assertEqual(github.reopen_failed, human_close != "during_receipt")
@@ -173,7 +182,7 @@ class DuplicateTriageLoopTest(unittest.TestCase):
                         )
                         fields = FakeIssueFields()
                         arguments = dict(repo=config.github_repo, issue_number=2, config=config,
-                                         github=github, issue_fields=fields)
+                                         github=github, issue_fields=fields, write_snapshot=self.snapshot(github, fields, config))
                         apply_triage_result(**arguments, result=self.result(prior))
                         self.assertEqual(github.created[1].issue.state, "closed")
                         if provenance == "human":
@@ -255,13 +264,14 @@ class DuplicateTriageLoopTest(unittest.TestCase):
                     "comment_markdown": "Same symptom as the original issue.",
                 })
                 fields = FakeIssueFields()
+                snapshot = self.snapshot(github, fields, config)
                 first = apply_triage_result(
                     repo=config.github_repo, issue_number=2, config=config, result=result,
-                    github=github, issue_fields=fields, lark=lark,
+                    github=github, issue_fields=fields, lark=lark, write_snapshot=snapshot,
                 )
                 second = apply_triage_result(
                     repo=config.github_repo, issue_number=2, config=config, result=result,
-                    github=github, issue_fields=fields, lark=lark,
+                    github=github, issue_fields=fields, lark=lark, write_snapshot=snapshot,
                 )
                 self.assertEqual(first.closed_as_duplicate, should_close)
                 self.assertEqual(github.created[1].closed_as_duplicate_of, 1 if should_close else 0)

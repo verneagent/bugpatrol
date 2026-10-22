@@ -22,6 +22,7 @@ from bugpatrol.clients import (
 )
 from bugpatrol.gh_transient import run_gh_with_transient_retries
 from bugpatrol.github_fields import GITHUB_API_VERSION, GitHubIssueFieldsClient
+from bugpatrol.triage_ownership import WriteEvent, WriteHistory
 
 if TYPE_CHECKING:
     from bugpatrol.config import ProjectConfig
@@ -276,6 +277,10 @@ class GitHubCliIssuesClient:
             closed_by_type=str((data.get("closed_by") or {}).get("type") or "")
             if isinstance(data.get("closed_by"), dict)
             else "",
+            created_by_type=str((data.get("user") or {}).get("type") or "")
+            if isinstance(data.get("user"), dict) else "",
+            issue_type=str((data.get("type") or {}).get("name") or "")
+            if isinstance(data.get("type"), dict) else "",
             assignees=tuple(
                 str(item["login"])
                 for item in data.get("assignees") or ()
@@ -299,6 +304,86 @@ class GitHubCliIssuesClient:
             if len(data) < 100:
                 return tuple(events)
             page += 1
+
+    def get_issue_write_history(self, *, repo: str, issue_number: int) -> WriteHistory:
+        """Read complete actor history for native metadata and issue fields."""
+        owner, name = repo.split("/", 1)
+        native = {
+            "AssignedEvent": "assignee", "UnassignedEvent": "assignee",
+            "RenamedTitleEvent": "title", "IssueTypeAddedEvent": "issue_type",
+            "IssueTypeChangedEvent": "issue_type", "IssueTypeRemovedEvent": "issue_type",
+        }
+        field_events = ("IssueFieldAddedEvent", "IssueFieldChangedEvent", "IssueFieldRemovedEvent")
+        item_types = (
+            "ASSIGNED_EVENT", "UNASSIGNED_EVENT", "RENAMED_TITLE_EVENT",
+            "ISSUE_TYPE_ADDED_EVENT", "ISSUE_TYPE_CHANGED_EVENT", "ISSUE_TYPE_REMOVED_EVENT",
+            "ISSUE_FIELD_ADDED_EVENT", "ISSUE_FIELD_CHANGED_EVENT", "ISSUE_FIELD_REMOVED_EVENT",
+        )
+        field_names = " ".join(
+            f"... on {kind} {{ name }}" for kind in (
+                "IssueFieldDate", "IssueFieldMultiSelect", "IssueFieldNumber",
+                "IssueFieldSingleSelect", "IssueFieldText",
+            )
+        )
+        common = "id actor { login __typename }"
+        fragments = " ".join(
+            f"... on {kind} {{ {common} }}" for kind in native
+        ) + " " + " ".join(
+            f"... on {kind} {{ {common} issueField {{ {field_names} }} }}" for kind in field_events
+        )
+        query = (
+            "query($owner: String!, $name: String!, $issue: Int!, $cursor: String) {"
+            " repository(owner: $owner, name: $name) { issue(number: $issue) {"
+            f" timelineItems(first: 100, after: $cursor, itemTypes: [{', '.join(item_types)}]) {{"
+            f" nodes {{ __typename {fragments} }} pageInfo {{ hasNextPage endCursor }}"
+            " } } } }"
+        )
+        events: list[WriteEvent] = []
+        cursor = ""
+        seen_cursors: set[str] = set()
+        while True:
+            arguments = ["api", "graphql", "-f", f"query={query}", "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"issue={issue_number}"]
+            if cursor:
+                arguments.extend(["-f", f"cursor={cursor}"])
+            try:
+                payload = json.loads(self._run(arguments).stdout)
+            except (GitHubCliError, json.JSONDecodeError):
+                return WriteHistory(tuple(events), complete=False)
+            if not isinstance(payload, dict) or payload.get("errors"):
+                return WriteHistory(tuple(events), complete=False)
+            connection = payload.get("data")
+            for key in ("repository", "issue", "timelineItems"):
+                connection = connection.get(key) if isinstance(connection, dict) else None
+            if not isinstance(connection, dict):
+                return WriteHistory(tuple(events), complete=False)
+            nodes = connection.get("nodes")
+            page = connection.get("pageInfo") or {}
+            if not isinstance(nodes, list) or not isinstance(page, dict) or not isinstance(page.get("hasNextPage"), bool):
+                return WriteHistory(tuple(events), complete=False)
+            for node in nodes:
+                if not isinstance(node, dict) or not isinstance(node.get("id"), str) or not node["id"]:
+                    return WriteHistory(tuple(events), complete=False)
+                kind = node.get("__typename")
+                field = native.get(kind, "") if isinstance(kind, str) else ""
+                if kind in field_events:
+                    item_field = node.get("issueField")
+                    field = str(item_field.get("name") or "") if isinstance(item_field, dict) else ""
+                if not field:
+                    return WriteHistory(tuple(events), complete=False)
+                actor = node.get("actor") or {}
+                if not isinstance(actor, dict):
+                    return WriteHistory(tuple(events), complete=False)
+                events.append(WriteEvent(
+                    id=node["id"], field=field, actor_type=str(actor.get("__typename") or ""),
+                    actor=str(actor.get("login") or ""),
+                ))
+            if not page["hasNextPage"]:
+                return WriteHistory(tuple(events), complete=True)
+            next_cursor = page.get("endCursor")
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
+                return WriteHistory(tuple(events), complete=False)
+            cursor = next_cursor
+            seen_cursors.add(cursor)
 
     def commit_exists(self, *, repo: str, sha: str) -> bool:
         """Whether `sha` resolves to a real commit in `repo`.

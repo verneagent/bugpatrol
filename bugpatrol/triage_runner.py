@@ -47,6 +47,13 @@ from bugpatrol.triage_context import (
     build_triage_context,
     render_triage_context_markdown,
 )
+from bugpatrol.triage_ownership import (
+    TriageWriteSnapshot,
+    TriageWriteSuperseded,
+    append_triage_run_metadata,
+    latest_triage_run_id,
+    parse_triage_run_metadata,
+)
 from bugpatrol.triage_result import (
     TriageResult,
     TriageRunStats,
@@ -64,8 +71,6 @@ from bugpatrol.worktree import (
     resolve_triage_branch,
 )
 
-TRIAGE_RUN_META_START = "<!-- BUGPATROL_TRIAGE_RUN_META"
-TRIAGE_RUN_META_END = "BUGPATROL_TRIAGE_RUN_META -->"
 TRIAGE_SKIPPED_HEADER = "## BugPatrol triage skipped"
 TRIAGE_FAILED_HEADER = "## BugPatrol triage failed"
 # A run marker older than the triage workflow's own timeout can only belong to a
@@ -96,6 +101,7 @@ class TriageRunPlan:
     # Human-facing note about which branch was analyzed (empty for main), shown
     # in the triage comment header and the Lark notify.
     branch_note: str = ""
+    write_snapshot: TriageWriteSnapshot | None = None
 
 
 def prepare_triage_run(
@@ -105,12 +111,20 @@ def prepare_triage_run(
     repo_path: Path,
     output_dir: Path,
     github: GitHubCliIssuesClient,
+    issue_fields: GitHubIssueFieldsClient | None = None,
     prompt_path: Path = Path("prompts/triage.zh.md"),
     branch_note: str = "",
     reference_repos: Sequence[ReferenceRepoContext] = (),
 ) -> TriageRunPlan:
     issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
     require_bugpatrol_managed_issue(issue)
+    write_snapshot = None
+    if issue_fields is not None:
+        write_snapshot = TriageWriteSnapshot(
+            issue=issue,
+            fields=issue_fields.get_issue_field_values(repo=config.github_repo, issue_number=issue_number),
+            history=github.get_issue_write_history(repo=config.github_repo, issue_number=issue_number),
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     # The agent runs with cwd=repo_path, so every path handed to it must be
     # absolute (a relative "prompts/triage.zh.md" would resolve against the
@@ -199,6 +213,7 @@ def prepare_triage_run(
         invocation=invocation,
         known_assignees=known_assignees,
         branch_note=branch_note,
+        write_snapshot=write_snapshot,
     )
 
 
@@ -302,11 +317,20 @@ def execute_triage_run(
         # burn a full agent run (and intake reset the field to Pending, so the
         # watcher would keep re-dispatching). Skip the agent and restore the
         # prior terminal status the intake reset overwrote.
+        run_id = str(uuid4())
+        record_triage_run_start(config=config, issue_number=issue_number, plan=plan, run_id=run_id, github=github)
+        if latest_triage_run_id(github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)) != run_id:
+            mark_triage_superseded(config=config, issue_number=issue_number, run_id=run_id, github=github)
+            return "superseded"
         issue_fields.add_issue_field_values(
             repo=config.github_repo,
             issue_number=issue_number,
             values={"Triage status": followup_review.prior_status or "Done"},
             config=config,
+        )
+        github.add_issue_comment(
+            repo=config.github_repo, issue_number=issue_number,
+            body=f"{TRIAGE_SKIPPED_HEADER}\n\nRun `{run_id}` restored the prior status; the follow-up did not change the conclusion.",
         )
         return "no_change_followup"
     # Fail fast if the canonical field specs declare an option the live org
@@ -322,11 +346,13 @@ def execute_triage_run(
             "field(s) before triaging:\n- " + "\n- ".join(drift)
         )
     run_id = str(uuid4())
-    mark_triage_running(
-        config=config,
-        issue_number=issue_number,
-        issue_fields=issue_fields,
+    record_triage_run_start(
+        config=config, issue_number=issue_number, plan=plan, run_id=run_id, github=github,
     )
+    if latest_triage_run_id(github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)) != run_id:
+        mark_triage_superseded(config=config, issue_number=issue_number, run_id=run_id, github=github)
+        return "superseded"
+    mark_triage_running(config=config, issue_number=issue_number, issue_fields=issue_fields)
     if lark is not None:
         send_intake_topic_message(
             repo=config.github_repo,
@@ -339,13 +365,6 @@ def execute_triage_run(
                 branch_note=plan.branch_note,
             ),
         )
-    record_triage_run_start(
-        config=config,
-        issue_number=issue_number,
-        plan=plan,
-        run_id=run_id,
-        github=github,
-    )
     agent_env = {**os.environ, **plan.invocation.env} if plan.invocation.env else None
     # stdin must be closed: in CI runners stdin is a pipe that never reaches
     # EOF, and `claude -p` blocks reading it forever after finishing its work.
@@ -361,12 +380,20 @@ def execute_triage_run(
             text=True,
             timeout=AGENT_TIMEOUT_SECONDS,
         )
+    except OSError:
+        mark_triage_failed(
+            config=config, issue_number=issue_number, exit_code=1, github=github,
+            issue_fields=issue_fields, lark=lark, run_id=run_id,
+            reason="The triage agent could not be started. Check the runner logs and executable.",
+        )
+        raise
     except subprocess.TimeoutExpired as error:
         duration_seconds = time.monotonic() - started
         stdout = _coerce_text(error.stdout)
         stderr = _coerce_text(error.stderr)
         _write_turn_log(plan.output_path.parent, stdout, stderr)
         mark_triage_failed(
+            run_id=run_id,
             config=config,
             issue_number=issue_number,
             exit_code=124,
@@ -415,6 +442,7 @@ def execute_triage_run(
         ):
             return "agent_crashed"
         mark_triage_failed(
+            run_id=run_id,
             config=config,
             issue_number=issue_number,
             exit_code=completed.returncode,
@@ -434,6 +462,7 @@ def execute_triage_run(
         # CODEOWNERS/repo/git/dup-search; retrying won't help (the invocation
         # is misconfigured), so fail loudly rather than posting a hollow triage.
         mark_triage_failed(
+            run_id=run_id,
             config=config,
             issue_number=issue_number,
             exit_code=0,
@@ -449,6 +478,7 @@ def execute_triage_run(
         if not final_attempt:
             return "no_output"
         mark_triage_failed(
+            run_id=run_id,
             config=config,
             issue_number=issue_number,
             exit_code=0,
@@ -474,6 +504,7 @@ def execute_triage_run(
         if not final_attempt:
             return "invalid_output"
         mark_triage_failed(
+            run_id=run_id,
             config=config,
             issue_number=issue_number,
             exit_code=0,
@@ -485,6 +516,7 @@ def execute_triage_run(
         raise RuntimeError(f"triage agent output failed validation: {error}") from error
     if plan.known_assignees and result.assignee not in plan.known_assignees:
         mark_triage_failed(
+            run_id=run_id,
             config=config,
             issue_number=issue_number,
             exit_code=0,
@@ -510,17 +542,30 @@ def execute_triage_run(
         if not accept_stale_context:
             return "stale_context"
         result = annotate_result_stale_context(result)
-    apply_triage_result(
-        repo=config.github_repo,
-        issue_number=issue_number,
-        config=config,
-        result=result,
-        github=github,
-        issue_fields=issue_fields,
-        lark=lark,
-        run_stats=run_stats,
-        branch_note=plan.branch_note,
-    )
+    try:
+        apply_triage_result(
+            repo=config.github_repo,
+            issue_number=issue_number,
+            config=config,
+            result=result,
+            github=github,
+            issue_fields=issue_fields,
+            lark=lark,
+            run_stats=run_stats,
+            branch_note=plan.branch_note,
+            write_snapshot=plan.write_snapshot,
+            run_id=run_id,
+        )
+    except TriageWriteSuperseded:
+        mark_triage_superseded(config=config, issue_number=issue_number, run_id=run_id, github=github)
+        return "superseded"
+    except Exception:
+        mark_triage_failed(
+            config=config, issue_number=issue_number, exit_code=1, github=github,
+            issue_fields=issue_fields, lark=lark, run_id=run_id,
+            reason="Triage writeback failed. Check the runner logs before retrying.",
+        )
+        raise
     return "applied"
 
 
@@ -586,14 +631,14 @@ def triage_already_applied_without_new_material(comments: tuple[GitHubIssueComme
     """True when the newest applied triage result has no later material comments."""
     latest_triage_index: int | None = None
     for index, comment in enumerate(comments):
-        if parse_triage_metadata(comment.body) is not None:
+        if comment.author_type == "Bot" and parse_triage_metadata(comment.body) is not None:
             latest_triage_index = index
     if latest_triage_index is None:
         return False
     for comment in comments[latest_triage_index + 1 :]:
         if is_triage_bookkeeping_comment(comment.body, author_type=comment.author_type):
             continue
-        if parse_triage_metadata(comment.body) is not None:
+        if comment.author_type == "Bot" and parse_triage_metadata(comment.body) is not None:
             continue
         return False
     return True
@@ -656,7 +701,7 @@ def evaluate_followup_re_triage(
     """
     latest_triage_index: int | None = None
     for index, comment in enumerate(comments):
-        if parse_triage_metadata(comment.body) is not None:
+        if comment.author_type == "Bot" and parse_triage_metadata(comment.body) is not None:
             latest_triage_index = index
     if latest_triage_index is None:
         return None
@@ -666,7 +711,7 @@ def evaluate_followup_re_triage(
         comment
         for comment in comments[latest_triage_index + 1 :]
         if not is_triage_bookkeeping_comment(comment.body, author_type=comment.author_type)
-        and parse_triage_metadata(comment.body) is None
+        and not (comment.author_type == "Bot" and parse_triage_metadata(comment.body) is not None)
     )
     if not followups:
         # No material followup after the last triage; the already-triaged guard
@@ -801,7 +846,12 @@ def mark_triage_failed(
     issue_fields: GitHubIssueFieldsClient,
     lark: LarkMessengerClient | None = None,
     reason: str = "",
+    run_id: str = "",
 ) -> None:
+    comments = github.list_issue_comments(repo=config.github_repo, issue_number=issue_number)
+    if latest_triage_run_id(comments) != run_id:
+        mark_triage_superseded(config=config, issue_number=issue_number, run_id=run_id or "unclaimed", github=github)
+        return
     issue_fields.add_issue_field_values(
         repo=config.github_repo,
         issue_number=issue_number,
@@ -811,7 +861,7 @@ def mark_triage_failed(
     github.add_issue_comment(
         repo=config.github_repo,
         issue_number=issue_number,
-        body=render_triage_failed_comment(exit_code=exit_code, reason=reason),
+        body=render_triage_failed_comment(exit_code=exit_code, reason=reason) + (f"\n\nRun `{run_id}`." if run_id else ""),
     )
     if lark is not None:
         lines = [f"分诊失败，GitHub issue #{issue_number} 已标记 Failed，待重试或人工处理。"]
@@ -912,12 +962,12 @@ def is_triage_bookkeeping_comment(body: str, *, author_type: str = "") -> bool:
     one posts a skip note, and counting that note as new context made the newer
     run abort as stale — two runs, zero results.
     """
-    if parse_triage_run_metadata(body) is not None:
+    if author_type == "Bot" and parse_triage_run_metadata(body) is not None:
         return True
     if author_type == "Bot" and is_duplicate_close_bookkeeping(body):
         return True
     stripped = body.lstrip()
-    return stripped.startswith(TRIAGE_SKIPPED_HEADER) or stripped.startswith(TRIAGE_FAILED_HEADER)
+    return author_type == "Bot" and (stripped.startswith(TRIAGE_SKIPPED_HEADER) or stripped.startswith(TRIAGE_FAILED_HEADER))
 
 
 def comment_ids(comments: tuple[GitHubIssueComment, ...]) -> tuple[str, ...]:
@@ -940,16 +990,22 @@ def triage_run_in_flight(
     newer one could still be dropped on stale context.
     """
     latest_started_at: datetime | None = None
+    latest_run_id = ""
     for comment in comments:
+        if comment.author_type != "Bot":
+            continue
         metadata = parse_triage_run_metadata(comment.body)
         if metadata is not None:
+            latest_run_id = str(metadata.get("run_id") or "")
             started_at = metadata.get("started_at")
             latest_started_at = _parse_timestamp(started_at) if isinstance(started_at, str) else None
             continue
         stripped = comment.body.lstrip()
         if stripped.startswith(TRIAGE_SKIPPED_HEADER) or stripped.startswith(TRIAGE_FAILED_HEADER):
             # The run that owned the newest marker already reported its outcome.
-            latest_started_at = None
+            terminal_run = re.search(r"Run `([^`]+)`", comment.body)
+            if terminal_run is None or terminal_run.group(1) == latest_run_id:
+                latest_started_at = None
     if latest_started_at is None:
         return False
     return (now or datetime.now(timezone.utc)) - latest_started_at < stale_after
@@ -961,35 +1017,6 @@ def _parse_timestamp(value: str) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
-
-
-def append_triage_run_metadata(metadata: dict[str, object]) -> str:
-    return (
-        f"{TRIAGE_RUN_META_START}\n"
-        f"{json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2)}\n"
-        f"{TRIAGE_RUN_META_END}"
-    )
-
-
-def parse_triage_run_metadata(comment_body: str) -> dict[str, object] | None:
-    start = comment_body.find(TRIAGE_RUN_META_START)
-    if start == -1:
-        return None
-    json_start = start + len(TRIAGE_RUN_META_START)
-    end = comment_body.find(TRIAGE_RUN_META_END, json_start)
-    if end == -1:
-        return None
-    data = json.loads(comment_body[json_start:end].strip())
-    return data if isinstance(data, dict) else None
-
-
-def latest_triage_run_id(comments: tuple[GitHubIssueComment, ...]) -> str:
-    latest = ""
-    for comment in comments:
-        metadata = parse_triage_run_metadata(comment.body)
-        if metadata is not None and isinstance(metadata.get("run_id"), str):
-            latest = str(metadata["run_id"])
-    return latest
 
 
 def annotate_result_stale_context(result: TriageResult) -> TriageResult:

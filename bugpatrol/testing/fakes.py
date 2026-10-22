@@ -6,7 +6,10 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment, GitHubPullRequest
+from bugpatrol.fields import default_field_specs
+from bugpatrol.github_fields import IssueField
 from bugpatrol.lark import SentLarkMessage
+from bugpatrol.triage_ownership import WriteEvent, WriteHistory
 
 
 @dataclass
@@ -20,6 +23,11 @@ class CreatedIssue:
     closed_as_duplicate_of: int = 0
     reopened: bool = False
     timeline: list[dict[str, Any]] = field(default_factory=list)
+    write_events: list[WriteEvent] = field(default_factory=list)
+    history_complete: bool = True
+
+    def record_write(self, name: str, actor_type: str = "Bot") -> None:
+        self.write_events.append(WriteEvent(str(len(self.write_events) + 1), name, actor_type))
 
 
 class FakeGitHubIssuesClient:
@@ -67,11 +75,14 @@ class FakeGitHubIssuesClient:
             url=f"https://github.test/{repo}/issues/{self._next_number}",
             title=title,
             body=body,
+            state="open", created_by_type="Bot", issue_type=issue_type,
         )
         self._next_number += 1
         self.created.append(
             CreatedIssue(issue=issue, repo=repo, issue_type=issue_type, fields=dict(fields))
         )
+        for name in fields:
+            self.created[-1].record_write(name)
         return issue
 
     def list_issues(self, *, repo: str, state: str = "open") -> tuple[GitHubIssue, ...]:
@@ -100,6 +111,7 @@ class FakeGitHubIssuesClient:
         for item in self.created:
             if item.repo == repo and item.issue.number == issue_number:
                 item.issue = replace(item.issue, title=title)
+                item.record_write("title")
                 return
         raise ValueError(f"issue not found: {repo}#{issue_number}")
 
@@ -134,6 +146,8 @@ class FakeGitHubIssuesClient:
         for item in self.created:
             if item.repo == repo and item.issue.number == issue_number:
                 item.issue_type = issue_type
+                item.issue = replace(item.issue, issue_type=issue_type)
+                item.record_write("issue_type")
                 return
         raise ValueError(f"issue not found: {repo}#{issue_number}")
 
@@ -167,10 +181,44 @@ class FakeGitHubIssuesClient:
     def add_assignee(self, *, repo: str, issue_number: int, assignee: str) -> None:
         for item in self.created:
             if item.repo == repo and item.issue.number == issue_number:
+                item.assignees = list(item.issue.assignees)
                 if assignee not in item.assignees:
                     item.assignees.append(assignee)
+                item.issue = replace(item.issue, assignees=tuple(item.assignees))
+                item.record_write("assignee")
                 return
         raise ValueError(f"issue not found: {repo}#{issue_number}")
+
+    def get_issue_write_history(self, *, repo: str, issue_number: int) -> WriteHistory:
+        for item in self.created:
+            if item.repo == repo and item.issue.number == issue_number:
+                return WriteHistory(tuple(item.write_events), complete=item.history_complete)
+        raise ValueError(f"issue not found: {repo}#{issue_number}")
+
+
+class FakeGitHubIssueFieldsClient:
+    def __init__(self, github: FakeGitHubIssuesClient) -> None:
+        self.github = github
+
+    def get_issue_field_values(self, *, repo: str, issue_number: int) -> dict[str, str]:
+        return dict(self._item(repo, issue_number).fields)
+
+    def add_issue_field_values(self, *, repo: str, issue_number: int, values: dict[str, str], **kwargs: Any) -> None:
+        item = self._item(repo, issue_number)
+        config = kwargs.get("config")
+        for name, value in values.items():
+            actual_name = config.issue_field_names.get(name, name) if config else name
+            item.fields[actual_name] = value
+            item.record_write(actual_name)
+
+    def list_org_fields(self, **kwargs: Any) -> dict[str, IssueField]:
+        return {
+            name: IssueField(id=index, name=name, data_type="single_select", options=spec.values)
+            for index, (name, spec) in enumerate(default_field_specs().items())
+        }
+
+    def _item(self, repo: str, number: int) -> CreatedIssue:
+        return next(item for item in self.github.created if item.repo == repo and item.issue.number == number)
 
 
 @dataclass(frozen=True)

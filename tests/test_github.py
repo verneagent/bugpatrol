@@ -9,6 +9,58 @@ from bugpatrol.github import GitHubCliError, GitHubCliIssuesClient
 
 
 class GitHubCliIssuesClientTest(unittest.TestCase):
+    @staticmethod
+    def history_page(nodes, *, more=False, cursor=None):
+        return {"data": {"repository": {"issue": {"timelineItems": {
+            "nodes": nodes, "pageInfo": {"hasNextPage": more, "endCursor": cursor},
+        }}}}}
+
+    def test_write_history_paginates_all_native_and_custom_field_events(self) -> None:
+        first = self.history_page([
+            {"id": "1", "__typename": "AssignedEvent", "actor": {"login": "human", "__typename": "User"}},
+            {"id": "2", "__typename": "UnassignedEvent", "actor": {"__typename": "Bot"}},
+            {"id": "3", "__typename": "RenamedTitleEvent", "actor": {"__typename": "Bot"}},
+        ], more=True, cursor="page-2")
+        second = self.history_page([
+            {"id": "4", "__typename": "IssueTypeChangedEvent", "actor": {"__typename": "Bot"}},
+            {"id": "5", "__typename": "IssueFieldChangedEvent", "issueField": {"name": "Priority"}, "actor": {"__typename": "User"}},
+            {"id": "6", "__typename": "IssueFieldRemovedEvent", "issueField": {"name": "Owner"}, "actor": None},
+        ])
+        with patch("subprocess.run") as run:
+            run.side_effect = [subprocess.CompletedProcess([], 0, json.dumps(page), "") for page in (first, second)]
+            history = GitHubCliIssuesClient().get_issue_write_history(repo="o/r", issue_number=1)
+        self.assertTrue(history.complete)
+        self.assertEqual([event.field for event in history.events], ["assignee", "assignee", "title", "issue_type", "Priority", "Owner"])
+        self.assertEqual(history.events[0].actor_type, "User")
+        self.assertEqual(history.events[-1].actor_type, "")
+        self.assertIn("cursor=page-2", run.call_args_list[1].args[0])
+        self.assertIn("ISSUE_FIELD_CHANGED_EVENT", " ".join(run.call_args_list[0].args[0]))
+
+    def test_write_history_partial_graphql_or_bad_payload_cannot_authorize_writes(self) -> None:
+        responses = (
+            {"errors": [{"message": "partial response"}], **self.history_page([])},
+            [], None, {"data": {"repository": None}},
+            self.history_page([None]), self.history_page([{"id": "", "__typename": "AssignedEvent"}]),
+            self.history_page([{"id": "1", "__typename": "UnknownEvent"}]),
+            self.history_page([{"id": "1", "__typename": "IssueFieldChangedEvent", "issueField": None}]),
+            self.history_page([{"id": "1", "__typename": "AssignedEvent", "actor": "unknown"}]),
+            self.history_page([], more=True),
+        )
+        for response in responses:
+            with self.subTest(response=response), patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess([], 0, json.dumps(response), "")
+                self.assertFalse(GitHubCliIssuesClient().get_issue_write_history(repo="o/r", issue_number=1).complete)
+
+    def test_write_history_repeated_cursor_or_transport_failure_is_incomplete(self) -> None:
+        for responses in (
+            [subprocess.CompletedProcess([], 0, json.dumps(self.history_page([], more=True, cursor="same")), "")] * 2,
+            [subprocess.CompletedProcess([], 1, "", "permission denied")],
+            [subprocess.CompletedProcess([], 0, "{truncated", "")],
+        ):
+            with self.subTest(responses=responses), patch("subprocess.run") as run:
+                run.side_effect = responses
+                self.assertFalse(GitHubCliIssuesClient(transient_retries=1).get_issue_write_history(repo="o/r", issue_number=1).complete)
+
     def test_find_issue_by_intake_root_reads_issue_bodies(self) -> None:
         client = GitHubCliIssuesClient()
         stdout = json.dumps(

@@ -32,6 +32,15 @@ from bugpatrol.intake import (
     resolve_reply_target,
 )
 from bugpatrol.lark import is_message_unreachable_error
+from bugpatrol.triage_ownership import (
+    TriageWriteSnapshot,
+    TriageWriteSuperseded,
+    WriteHistory,
+    assignment_block_reason,
+    assignment_changed_by_human,
+    field_block_reason,
+    latest_triage_run_id,
+)
 
 
 @dataclass(frozen=True)
@@ -243,6 +252,8 @@ def apply_triage_result(
     lark: LarkMessengerClient | None = None,
     run_stats: TriageRunStats | None = None,
     branch_note: str = "",
+    write_snapshot: TriageWriteSnapshot | None = None,
+    run_id: str = "",
 ) -> TriageApplySummary:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
     require_bugpatrol_managed_issue(issue)
@@ -258,6 +269,23 @@ def apply_triage_result(
     duplicate_classification = assessment.classification if assessment is not None else ""
     regression_note = render_regression_note(regression)
     duplicate_note = render_duplicate_note(duplicate_classification)
+    lifecycle_suggestion = ""
+    lifecycle_note = ""
+    if write_snapshot is None and assessment is not None:
+        if regression is not None:
+            lifecycle_suggestion = f"Review reopening #{regression.issue_number} and closing this report as a duplicate."
+        elif assessment.may_close:
+            lifecycle_suggestion = f"Review closing this report as a duplicate of #{result.duplicate_of}."
+        elif issue.state == "closed":
+            lifecycle_suggestion = "Review whether to reopen this report for manual verification."
+        else:
+            lifecycle_suggestion = "Keep this report available for manual verification."
+        lifecycle_note = (
+            "No plan snapshot. Lifecycle suggestion only: " + lifecycle_suggestion
+            + " No issue open/closed state was changed. Use run-triage with a prepared plan before applying lifecycle changes."
+        )
+        regression_note = ""
+        duplicate_note = lifecycle_note
     if assessment is not None and not assessment.may_close:
         questions = result.follow_up_questions or (
             "请核实报告环境、原始发生时间、实际 build 与有效修复，并补充可复核的证据引用。",
@@ -269,8 +297,15 @@ def apply_triage_result(
     fingerprint = triage_result_fingerprint(result)
     decision_key = triage_decision_key(result)
     existing_comments = github.list_issue_comments(repo=repo, issue_number=issue_number)
+
+    def check_run() -> None:
+        comments = github.list_issue_comments(repo=repo, issue_number=issue_number)
+        if latest_triage_run_id(comments) != run_id:
+            raise TriageWriteSuperseded("The triage run no longer owns issue writeback.")
+
+    check_run()
     restore_report = (
-        assessment is not None and not assessment.may_close and issue.state == "closed"
+        write_snapshot is not None and assessment is not None and not assessment.may_close and issue.state == "closed"
         and (
             _matching_duplicate_close_receipt(issue, existing_comments, result.duplicate_of)
             or _matching_duplicate_close_intent(
@@ -278,43 +313,114 @@ def apply_triage_result(
             )
         )
     )
-    if assessment is not None and not assessment.may_close and issue.state == "closed" and not restore_report:
+    if write_snapshot is not None and assessment is not None and not assessment.may_close and issue.state == "closed" and not restore_report:
         duplicate_note += " 当前关闭操作缺少匹配的 bot receipt，保留其关闭状态，请人工核实是否需要重新打开。"
     existing_field_values = issue_fields.get_issue_field_values(
         repo=repo,
         issue_number=issue_number,
     )
-    duplicate = _has_applied_triage_decision(
-        comments=existing_comments,
-        fingerprint=fingerprint,
-        decision_key=decision_key,
-        result=result,
-        config=config,
-        existing_field_values=existing_field_values,
-    )
-    github.set_issue_type(repo=repo, issue_number=issue_number, issue_type=result.issue_type)
-    # Title correction is an issue-level mutation, applied unconditionally (not
-    # gated on the comment-dedup): a re-triage that reaches the same conclusion
-    # must still be able to fix the title, and once written the corrected title
-    # converges (agent proposes the same core → no write).
-    corrected_title = corrected_issue_title(issue.title, result.corrected_title)
-    if corrected_title != issue.title:
-        github.update_issue_title(
-            repo=repo,
-            issue_number=issue_number,
-            title=corrected_title,
+    applied: dict[str, str] = {}
+    suggestions: dict[str, str] = {}
+    if lifecycle_suggestion:
+        suggestions["lifecycle"] = lifecycle_suggestion
+    warnings: list[str] = []
+    assignee_written = False
+    owner_fields_allowed = False
+    assignment_history = WriteHistory()
+
+    def fresh_state() -> tuple[GitHubIssue, dict[str, str], WriteHistory]:
+        if write_snapshot is None:
+            return issue, existing_field_values, WriteHistory()
+        return (
+            github.get_issue(repo=repo, issue_number=issue_number),
+            issue_fields.get_issue_field_values(repo=repo, issue_number=issue_number),
+            github.get_issue_write_history(repo=repo, issue_number=issue_number),
         )
-    issue_fields.add_issue_field_values(
-        repo=repo,
-        issue_number=issue_number,
-        values=triage_field_values_for_write(result, config=config),
-        config=config,
+
+    current, current_fields, history = fresh_state()
+    reason = assignment_block_reason(write_snapshot, current, history)
+    if not result.duplicate_of and reason is None:
+        check_run()
+        assignment_history = history
+        github.add_assignee(repo=repo, issue_number=issue_number, assignee=result.assignee)
+        assignee_written = True
+        current, current_fields, history = fresh_state()
+        owner_fields_allowed = (
+            set(current.assignees) == {result.assignee}
+            and not assignment_changed_by_human(assignment_history, history)
+        )
+        if not owner_fields_allowed:
+            warnings.append("Assignment changed during writeback; review the current assignees. No assignee was removed.")
+    elif not result.duplicate_of:
+        if set(current.assignees) != {result.assignee}:
+            suggestions["assignee"] = result.assignee
+            warnings.append(reason or "Assignment was preserved.")
+
+    issue_type_written = False
+    for name, proposed in (("issue_type", result.issue_type), ("title", corrected_issue_title(issue.title, result.corrected_title))):
+        current, current_fields, history = fresh_state()
+        actual = current.issue_type if name == "issue_type" else current.title
+        if actual == proposed:
+            continue
+        blocked = field_block_reason(write_snapshot, current, current_fields, history, name)
+        if blocked is not None:
+            suggestions[name] = proposed
+            continue
+        check_run()
+        if name == "issue_type":
+            github.set_issue_type(repo=repo, issue_number=issue_number, issue_type=proposed)
+            issue_type_written = True
+        else:
+            github.update_issue_title(repo=repo, issue_number=issue_number, title=proposed)
+        applied[name] = proposed
+
+    current, current_fields, history = fresh_state()
+    owner_fields_allowed = (
+        owner_fields_allowed and set(current.assignees) == {result.assignee}
+        and not assignment_changed_by_human(assignment_history, history)
     )
+    values: dict[str, str] = {}
+    for field, proposed in triage_field_values_for_write(result, config=config).items():
+        if field == "Triage status":
+            values[field] = proposed
+            continue
+        actual_name = config.issue_field_names.get(field, field)
+        if current_fields.get(actual_name, "") == proposed:
+            continue
+        if field in ("Owner", "Owner reason") and not owner_fields_allowed:
+            suggestions[field] = proposed
+            continue
+        if field_block_reason(write_snapshot, current, current_fields, history, actual_name) is not None:
+            suggestions[field] = proposed
+        else:
+            values[field] = proposed
+    if values:
+        check_run()
+        issue_fields.add_issue_field_values(
+            repo=repo, issue_number=issue_number, values={**values}, config=config,
+        )
+        applied.update(values)
+    ownership_key = _sha256_json({
+        "run_id": run_id, "proposal": fingerprint, "suggestions": suggestions,
+        "assignees": current.assignees,
+    })
+    duplicate = _has_applied_triage_decision(
+        comments=existing_comments, fingerprint=fingerprint, decision_key=decision_key,
+        result=result, config=config, existing_field_values=existing_field_values,
+        ownership_key=ownership_key,
+    )
+    write_note = ""
+    if suggestions:
+        write_note = "Preserved human or unverified metadata. Suggestions: " + json.dumps(suggestions, ensure_ascii=False, sort_keys=True)
+    if warnings:
+        write_note += " " + " ".join(warnings)
     if restore_report:
         current = github.get_issue(repo=repo, issue_number=issue_number)
         if _same_duplicate_closure(issue, current):
+            check_run()
             github.reopen_issue(repo=repo, issue_number=issue_number)
     if not duplicate:
+        check_run()
         if lark is not None and result.fields["Triage status"] == "Needs info":
             _send_lark_follow_up(
                 repo=repo,
@@ -323,6 +429,7 @@ def apply_triage_result(
                 github=github,
                 lark=lark,
                 branch_note=branch_note,
+                lifecycle_note=lifecycle_note,
             )
         elif lark is not None:
             _send_lark_triage_summary(
@@ -336,7 +443,10 @@ def apply_triage_result(
                 branch_note=branch_note,
                 regression_note=regression_note,
                 duplicate_classification=duplicate_classification,
+                assignee_applied=assignee_written,
+                lifecycle_note=lifecycle_note,
             )
+        check_run()
         github.add_issue_comment(
             repo=repo,
             issue_number=issue_number,
@@ -345,6 +455,7 @@ def apply_triage_result(
                     render_triage_comment(
                         result, branch_note=branch_note, regression_note=regression_note,
                         duplicate_note=duplicate_note,
+                        write_note=write_note,
                     ),
                     run_stats=run_stats,
                 ),
@@ -353,13 +464,18 @@ def apply_triage_result(
                     "issue": issue_number,
                     "result_fingerprint": fingerprint,
                     "decision_key": decision_key,
-                    "duplicate_of": result.duplicate_of if assessment is not None and assessment.may_close else 0,
+                    "duplicate_of": result.duplicate_of if write_snapshot is not None and assessment is not None and assessment.may_close else 0,
                     "related_issue": result.duplicate_of,
                     "duplicate_classification": duplicate_classification,
                     "duplicate_evidence": duplicate_evidence_payload(result.duplicate_evidence),
-                    "regression_of": regression.issue_number if regression is not None else 0,
+                    "regression_of": regression.issue_number if write_snapshot is not None and regression is not None else 0,
                     "verdict": result.fields.get("Triage verdict", ""),
                     "triage_status": result.fields.get("Triage status", ""),
+                    "run_id": run_id,
+                    "ownership_key": ownership_key,
+                    "applied_fields": applied,
+                    "suggested_fields": suggestions,
+                    "assignee_written": assignee_written,
                     "blame_suggestion": result.blame_suggestion,
                     "suspected_owner": result.suspected_owner,
                 },
@@ -377,7 +493,8 @@ def apply_triage_result(
         )
     closed_as_duplicate = False
     regression_reopened = 0
-    if result.duplicate_of:
+    if result.duplicate_of and write_snapshot is not None:
+        check_run()
         if regression is not None:
             _flag_duplicate_regression(
                 repo=repo,
@@ -422,12 +539,10 @@ def apply_triage_result(
                         classification=assessment.classification, fingerprint=fingerprint, github=github,
                     )
                 closed_as_duplicate = current.state_reason == "duplicate"
-    else:
-        github.add_assignee(repo=repo, issue_number=issue_number, assignee=result.assignee)
     return TriageApplySummary(
-        issue_type_written=True,
-        fields_written=True,
-        assignee_written=not result.duplicate_of,
+        issue_type_written=issue_type_written,
+        fields_written=bool(values),
+        assignee_written=assignee_written,
         comment_added=not duplicate,
         duplicate_comment_skipped=duplicate,
         result_fingerprint=fingerprint,
@@ -836,6 +951,7 @@ def render_triage_comment(
     branch_note: str = "",
     regression_note: str = "",
     duplicate_note: str = "",
+    write_note: str = "",
 ) -> str:
     body = result.comment_markdown.rstrip()
     if duplicate_note and result.follow_up_questions:
@@ -849,6 +965,8 @@ def render_triage_comment(
                 parts.append(f"归因线索：{result.blame_suggestion}")
             body = f"{body}\n\n" + "\n".join(parts)
     prefix_lines = []
+    if write_note:
+        prefix_lines.append(f"> {write_note}")
     if regression_note:
         prefix_lines.append(f"> {regression_note}")
     if duplicate_note:
@@ -878,10 +996,11 @@ def parse_triage_metadata(comment_body: str) -> dict[str, Any] | None:
     match = TRIAGE_META_RE.search(comment_body)
     if not match:
         return None
-    data = json.loads(match.group(1))
-    if not isinstance(data, dict):
-        raise ValueError("triage metadata must be a JSON object")
-    return data
+    try:
+        data = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _has_applied_triage_decision(
@@ -892,10 +1011,15 @@ def _has_applied_triage_decision(
     result: TriageResult,
     config: ProjectConfig,
     existing_field_values: dict[str, str],
+    ownership_key: str = "",
 ) -> bool:
     has_prior_triage = False
     for comment in comments:
+        if comment.author_type != "Bot":
+            continue
         metadata = parse_triage_metadata(comment.body)
+        if ownership_key and (metadata is None or metadata.get("ownership_key") != ownership_key):
+            continue
         if result.duplicate_of and (
             metadata is None or not metadata.get("duplicate_classification")
             or metadata.get("duplicate_evidence") != duplicate_evidence_payload(result.duplicate_evidence)
@@ -909,7 +1033,7 @@ def _has_applied_triage_decision(
             return True
         if metadata is not None:
             has_prior_triage = True
-    if result.duplicate_of:
+    if result.duplicate_of or ownership_key:
         return False
     if not has_prior_triage:
         return False
@@ -941,6 +1065,7 @@ def _send_lark_follow_up(
     github: GitHubCliIssuesClient,
     lark: LarkMessengerClient,
     branch_note: str = "",
+    lifecycle_note: str = "",
 ) -> None:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
     metadata = parse_intake_metadata(issue.body or "") or {}
@@ -953,6 +1078,7 @@ def _send_lark_follow_up(
             questions=result.follow_up_questions,
             reporter_open_id=_metadata_str(metadata, "reporter_open_id"),
             branch_note=branch_note,
+            lifecycle_note=lifecycle_note,
         ),
     )
 
@@ -969,6 +1095,8 @@ def _send_lark_triage_summary(
     branch_note: str = "",
     regression_note: str = "",
     duplicate_classification: str = "",
+    assignee_applied: bool | None = None,
+    lifecycle_note: str = "",
 ) -> None:
     issue = github.get_issue(repo=repo, issue_number=issue_number)
     _reply_to_intake_topic(
@@ -984,6 +1112,8 @@ def _send_lark_triage_summary(
             branch_note=branch_note,
             regression_note=regression_note,
             duplicate_classification=duplicate_classification,
+            assignee_applied=assignee_applied,
+            lifecycle_note=lifecycle_note,
         ),
     )
 
@@ -1070,6 +1200,8 @@ def render_triage_summary_lark_message(
     branch_note: str = "",
     regression_note: str = "",
     duplicate_classification: str = "",
+    assignee_applied: bool | None = None,
+    lifecycle_note: str = "",
 ) -> str:
     lines = [f"分诊完成，GitHub issue [#{issue_number}]({issue_url})"]
     if branch_note:
@@ -1079,12 +1211,15 @@ def render_triage_summary_lark_message(
     if result.duplicate_of:
         duplicate_url = f"{issue_url.rsplit('/', 1)[0]}/{result.duplicate_of}"
         classification = duplicate_classification or classify_duplicate_evidence(result.duplicate_evidence)
-        if classification in ("open_duplicate", "pre_fix_duplicate", "confirmed_regression", "old_build_duplicate"):
+        if lifecycle_note:
+            lines.append(f"Related issue: [#{result.duplicate_of}]({duplicate_url})")
+            lines.append(lifecycle_note)
+        elif classification in ("open_duplicate", "pre_fix_duplicate", "confirmed_regression", "old_build_duplicate"):
             lines.append(f"结论：重复。重复于 [#{result.duplicate_of}]({duplicate_url})")
         else:
             lines.append(f"结论：关联 [#{result.duplicate_of}]({duplicate_url})，保留当前报告。")
         note = render_duplicate_note(classification)
-        if note:
+        if note and not lifecycle_note:
             lines.append(note)
     else:
         assignee = result.assignee
@@ -1094,7 +1229,7 @@ def render_triage_summary_lark_message(
             ("结论", result.fields.get("Triage verdict", "")),
             ("状态", result.fields.get("Triage status", "")),
             ("优先级", result.fields.get("Priority", "")),
-            ("负责人", assignee),
+            ("建议负责人" if assignee_applied is False else "负责人", assignee),
         ):
             if value:
                 lines.append(f"{label}：{value}")
@@ -1116,11 +1251,14 @@ def render_needs_info_lark_message(
     questions: tuple[str, ...],
     reporter_open_id: str = "",
     branch_note: str = "",
+    lifecycle_note: str = "",
 ) -> str:
     prefix = f'<at user_id="{reporter_open_id}"></at> ' if reporter_open_id else ""
     lines = [f"{prefix}需要补充信息，GitHub issue [#{issue_number}]({issue_url})"]
     if branch_note:
         lines.append(branch_note)
+    if lifecycle_note:
+        lines.append(lifecycle_note)
     lines.append("")
     lines.extend(f"{index}. {question}" for index, question in enumerate(questions, start=1))
     return "\n".join(lines)
