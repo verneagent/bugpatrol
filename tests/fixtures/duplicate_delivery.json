@@ -1,0 +1,37 @@
+{
+  "environment": "production",
+  "environment_evidence": "https://evidence.test/events/report/environment",
+  "occurred_at": "2026-10-22T02:00:00Z",
+  "occurrence_evidence": "https://evidence.test/events/report/occurrence",
+  "required_repositories": [
+    "example/app",
+    "example/api"
+  ],
+  "components": [
+    {
+      "repository": "example/app",
+      "reported_build": "app-build-2",
+      "build_evidence": "https://evidence.test/events/report/app-build",
+      "reported_fix": "effective",
+      "content_check": "content",
+      "content_evidence": "https://evidence.test/builds/app-build-2/fix-content",
+      "current_delivery": "effective",
+      "delivered_at": "2026-10-22T00:00:00Z",
+      "delivery_evidence": "https://evidence.test/deployments/production/app-build-2",
+      "build_predates_fix": false
+    },
+    {
+      "repository": "example/api",
+      "reported_build": "api-build-2",
+      "build_evidence": "https://evidence.test/events/report/api-build",
+      "reported_fix": "effective",
+      "content_check": "behavior",
+      "content_evidence": "https://evidence.test/builds/api-build-2/fix-behavior",
+      "current_delivery": "effective",
+      "delivered_at": "2026-10-22T00:30:00Z",
+      "delivery_evidence": "https://evidence.test/deployments/production/api-build-2",
+      "build_predates_fix": false
+    }
+  ],
+  "conflicts": []
+}

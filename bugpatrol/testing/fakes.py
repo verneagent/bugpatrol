@@ -132,6 +132,7 @@ class FakeGitHubIssuesClient:
         for item in self.created:
             if item.repo == repo and item.issue.number == issue_number:
                 item.reopened = True
+                item.issue = replace(item.issue, state="open", state_reason="", closed_at="")
                 return
         raise ValueError(f"issue not found: {repo}#{issue_number}")
 

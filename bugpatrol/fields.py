@@ -6,6 +6,8 @@ import copy
 from dataclasses import dataclass
 from typing import Any
 
+from bugpatrol.duplicate_evidence import duplicate_evidence_schema
+
 
 @dataclass(frozen=True)
 class FieldSpec:
@@ -91,6 +93,7 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
         "assignee",
         "owner_reason",
         "duplicate_of",
+        "duplicate_evidence",
         "prd_refs",
         "likely_locations",
         "summary_cn",
@@ -119,6 +122,7 @@ TRIAGE_OUTPUT_SCHEMA: dict[str, Any] = {
             "minimum": 0,
             "description": "Existing GitHub issue number this issue duplicates. Use 0 unless triage_verdict is 重复.",
         },
+        "duplicate_evidence": duplicate_evidence_schema(),
         "prd_refs": {
             "type": "array",
             "items": {
