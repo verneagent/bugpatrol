@@ -8,7 +8,7 @@ import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from bugpatrol.clients import (
     FailedRun,
@@ -283,21 +283,22 @@ class GitHubCliIssuesClient:
             ),
         )
 
-    def list_issue_timeline(self, *, repo: str, issue_number: int) -> tuple[dict, ...]:
-        result = self._run(
-            [
-                "api",
-                "-H",
-                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
-                "-H",
-                "Accept: application/vnd.github+json",
-                f"/repos/{repo}/issues/{issue_number}/timeline?per_page=100",
-            ]
-        )
-        data = json.loads(result.stdout)
-        if not isinstance(data, list):
-            raise GitHubCliError(f"unexpected timeline response for {repo}#{issue_number}")
-        return tuple(item for item in data if isinstance(item, dict))
+    def list_issue_timeline(self, *, repo: str, issue_number: int) -> tuple[dict[str, Any], ...]:
+        events: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            result = self._run([
+                "api", "-H", f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                "-H", "Accept: application/vnd.github+json",
+                f"/repos/{repo}/issues/{issue_number}/timeline?per_page=100&page={page}",
+            ])
+            data = json.loads(result.stdout)
+            if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
+                raise GitHubCliError(f"unexpected timeline response for {repo}#{issue_number}")
+            events.extend(data)
+            if len(data) < 100:
+                return tuple(events)
+            page += 1
 
     def commit_exists(self, *, repo: str, sha: str) -> bool:
         """Whether `sha` resolves to a real commit in `repo`.

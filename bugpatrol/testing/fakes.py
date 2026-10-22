@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment, GitHubPullRequest
 from bugpatrol.lark import SentLarkMessage
@@ -18,6 +19,7 @@ class CreatedIssue:
     assignees: list[str] = field(default_factory=list)
     closed_as_duplicate_of: int = 0
     reopened: bool = False
+    timeline: list[dict[str, Any]] = field(default_factory=list)
 
 
 class FakeGitHubIssuesClient:
@@ -79,6 +81,10 @@ class FakeGitHubIssuesClient:
         for item in self.created:
             if item.repo == repo and item.issue.number == issue_number:
                 item.comments.append(body)
+                item.timeline.append({
+                    "event": "commented", "id": len(item.comments), "body": body,
+                    "actor": {"login": "bugpatrol[bot]", "type": "Bot"},
+                })
                 return
         raise ValueError(f"issue not found: {repo}#{issue_number}")
 
@@ -118,6 +124,12 @@ class FakeGitHubIssuesClient:
     def dispatch_triage_run(self, *, repo: str, issue_number: int) -> None:
         self.dispatched.append((repo, issue_number))
 
+    def list_issue_timeline(self, *, repo: str, issue_number: int) -> tuple[dict[str, Any], ...]:
+        for item in self.created:
+            if item.repo == repo and item.issue.number == issue_number:
+                return tuple(item.timeline)
+        raise ValueError(f"issue not found: {repo}#{issue_number}")
+
     def set_issue_type(self, *, repo: str, issue_number: int, issue_type: str) -> None:
         for item in self.created:
             if item.repo == repo and item.issue.number == issue_number:
@@ -136,6 +148,10 @@ class FakeGitHubIssuesClient:
                     closed_by="bugpatrol[bot]",
                     closed_by_type="Bot",
                 )
+                item.timeline.append({
+                    "event": "closed", "created_at": item.issue.closed_at,
+                    "actor": {"login": "bugpatrol[bot]", "type": "Bot"},
+                })
                 return
         raise ValueError(f"issue not found: {repo}#{issue_number}")
 
@@ -144,6 +160,7 @@ class FakeGitHubIssuesClient:
             if item.repo == repo and item.issue.number == issue_number:
                 item.reopened = True
                 item.issue = replace(item.issue, state="open", state_reason="", closed_at="")
+                item.timeline.append({"event": "reopened", "actor": {"login": "bugpatrol[bot]", "type": "Bot"}})
                 return
         raise ValueError(f"issue not found: {repo}#{issue_number}")
 

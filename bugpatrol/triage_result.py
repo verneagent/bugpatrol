@@ -7,7 +7,8 @@ import json
 import os
 import re
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, TypeGuard
+from uuid import uuid4
 
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment, LarkMessengerClient
 from bugpatrol.config import ProjectConfig
@@ -135,6 +136,7 @@ TRIAGE_META_RE = re.compile(
     re.DOTALL,
 )
 DUPLICATE_CLOSE_META = "BUGPATROL_DUPLICATE_CLOSE_META"
+DUPLICATE_CLOSE_INTENT_META = "BUGPATROL_DUPLICATE_CLOSE_INTENT_META"
 REGRESSION_FLAG_META = "BUGPATROL_REGRESSION_FLAG_META"
 CORE_DUPLICATE_FIELDS = (
     "Priority",
@@ -269,7 +271,12 @@ def apply_triage_result(
     existing_comments = github.list_issue_comments(repo=repo, issue_number=issue_number)
     restore_report = (
         assessment is not None and not assessment.may_close and issue.state == "closed"
-        and _matching_duplicate_close_receipt(issue, existing_comments, result.duplicate_of)
+        and (
+            _matching_duplicate_close_receipt(issue, existing_comments, result.duplicate_of)
+            or _matching_duplicate_close_intent(
+                issue, existing_comments, result.duplicate_of, repo=repo, github=github,
+            )
+        )
     )
     if assessment is not None and not assessment.may_close and issue.state == "closed" and not restore_report:
         duplicate_note += " 当前关闭操作缺少匹配的 bot receipt，保留其关闭状态，请人工核实是否需要重新打开。"
@@ -386,6 +393,15 @@ def apply_triage_result(
         if assessment is not None and assessment.may_close:
             current = github.get_issue(repo=repo, issue_number=issue_number)
             if current.state != "closed":
+                github.add_issue_comment(
+                    repo=repo, issue_number=issue_number,
+                    body=_append_operation_metadata(
+                        "BugPatrol duplicate close intent.", DUPLICATE_CLOSE_INTENT_META,
+                        {"issue": issue_number, "duplicate_of": result.duplicate_of,
+                         "operation": uuid4().hex, "classification": assessment.classification,
+                         "result_fingerprint": fingerprint},
+                    ),
+                )
                 github.close_issue_as_duplicate(
                     repo=repo, issue_number=issue_number, duplicate_of=result.duplicate_of,
                 )
@@ -395,6 +411,16 @@ def apply_triage_result(
                 )
                 closed_as_duplicate = True
             else:
+                if (
+                    not _matching_duplicate_close_receipt(current, existing_comments, result.duplicate_of)
+                    and _matching_duplicate_close_intent(
+                        current, existing_comments, result.duplicate_of, repo=repo, github=github,
+                    )
+                ):
+                    _record_duplicate_close(
+                        repo=repo, issue_number=issue_number, duplicate_of=result.duplicate_of,
+                        classification=assessment.classification, fingerprint=fingerprint, github=github,
+                    )
                 closed_as_duplicate = current.state_reason == "duplicate"
     else:
         github.add_assignee(repo=repo, issue_number=issue_number, assignee=result.assignee)
@@ -471,16 +497,48 @@ def _matching_duplicate_close_receipt(
     if issue.state_reason != "duplicate" or issue.closed_by_type != "Bot" or not issue.closed_at:
         return False
     for comment in comments:
+        if comment.author_type != "Bot" or comment.author != issue.closed_by:
+            continue
         metadata = _operation_metadata(comment.body, DUPLICATE_CLOSE_META)
         if (
-            metadata is not None and comment.author_type == "Bot"
-            and comment.author == issue.closed_by
+            _valid_close_metadata(metadata)
             and metadata.get("issue") == issue.number
             and metadata.get("duplicate_of") == duplicate_of
             and metadata.get("closed_at") == issue.closed_at
             and metadata.get("closed_by") == issue.closed_by
         ):
             return True
+    return False
+
+
+def _matching_duplicate_close_intent(
+    issue: GitHubIssue, comments: tuple[GitHubIssueComment, ...], duplicate_of: int,
+    *, repo: str, github: GitHubCliIssuesClient,
+) -> bool:
+    if not _same_duplicate_closure(issue, issue):
+        return False
+    for comment in reversed(comments):
+        if comment.author_type != "Bot" or comment.author != issue.closed_by:
+            continue
+        intent = _operation_metadata(comment.body, DUPLICATE_CLOSE_INTENT_META)
+        if not _valid_close_intent(intent) or intent["issue"] != issue.number or intent["duplicate_of"] != duplicate_of:
+            continue
+        timeline = github.list_issue_timeline(repo=repo, issue_number=issue.number)
+        boundary = next((
+            index for index, event in enumerate(timeline)
+            if event.get("event") == "commented" and str(event.get("id")) == comment.id
+        ), None)
+        if boundary is None:
+            return False
+        lifecycle = [event for event in timeline[boundary + 1:] if event.get("event") in ("closed", "reopened")]
+        if len(lifecycle) != 1 or lifecycle[0].get("event") != "closed":
+            return False
+        event = lifecycle[0]
+        actor = event.get("actor")
+        return (
+            isinstance(actor, dict) and actor.get("type") == "Bot"
+            and actor.get("login") == issue.closed_by and event.get("created_at") == issue.closed_at
+        )
     return False
 
 
@@ -494,15 +552,25 @@ def _record_duplicate_close(
         or closed.closed_by_type != "Bot" or not closed.closed_at
     ):
         return
-    github.add_issue_comment(
-        repo=repo, issue_number=issue_number,
-        body=_append_operation_metadata(
-            "BugPatrol duplicate close receipt.", DUPLICATE_CLOSE_META,
-            {"issue": issue_number, "duplicate_of": duplicate_of,
-             "closed_at": closed.closed_at, "closed_by": closed.closed_by,
-             "classification": classification, "result_fingerprint": fingerprint},
-        ),
-    )
+    try:
+        github.add_issue_comment(
+            repo=repo, issue_number=issue_number,
+            body=_append_operation_metadata(
+                "BugPatrol duplicate close receipt.", DUPLICATE_CLOSE_META,
+                {"issue": issue_number, "duplicate_of": duplicate_of,
+                 "closed_at": closed.closed_at, "closed_by": closed.closed_by,
+                 "classification": classification, "result_fingerprint": fingerprint},
+            ),
+        )
+    except Exception:
+        comments = github.list_issue_comments(repo=repo, issue_number=issue_number)
+        if _matching_duplicate_close_receipt(closed, comments, duplicate_of):
+            return
+        if _matching_duplicate_close_intent(closed, comments, duplicate_of, repo=repo, github=github):
+            current = github.get_issue(repo=repo, issue_number=issue_number)
+            if _same_duplicate_closure(closed, current):
+                github.reopen_issue(repo=repo, issue_number=issue_number)
+        raise
 
 
 def _append_operation_metadata(body: str, marker: str, metadata: dict[str, Any]) -> str:
@@ -513,12 +581,39 @@ def _operation_metadata(body: str, marker: str) -> dict[str, Any] | None:
     match = re.search(rf"<!-- {marker}\s*(.*?)\s*{marker} -->", body, re.DOTALL)
     if match is None:
         return None
-    data = json.loads(match.group(1))
+    try:
+        data = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
     return data if isinstance(data, dict) else None
 
 
-def is_duplicate_close_receipt(body: str) -> bool:
-    return _operation_metadata(body, DUPLICATE_CLOSE_META) is not None
+def _valid_close_metadata(metadata: dict[str, Any] | None) -> TypeGuard[dict[str, Any]]:
+    return (
+        metadata is not None
+        and type(metadata.get("issue")) is int and metadata["issue"] > 0
+        and type(metadata.get("duplicate_of")) is int and metadata["duplicate_of"] > 0
+        and metadata.get("classification") in ("open_duplicate", "pre_fix_duplicate", "old_build_duplicate", "confirmed_regression")
+        and isinstance(metadata.get("result_fingerprint"), str)
+        and re.fullmatch(r"[a-f0-9]{64}", metadata["result_fingerprint"]) is not None
+    )
+
+
+def _valid_close_intent(metadata: dict[str, Any] | None) -> TypeGuard[dict[str, Any]]:
+    return (
+        _valid_close_metadata(metadata) and metadata is not None
+        and isinstance(metadata.get("operation"), str)
+        and re.fullmatch(r"[a-f0-9]{32}", metadata["operation"]) is not None
+    )
+
+
+def is_duplicate_close_bookkeeping(body: str) -> bool:
+    receipt = _operation_metadata(body, DUPLICATE_CLOSE_META)
+    return (
+        _valid_close_metadata(receipt) and receipt is not None
+        and isinstance(receipt.get("closed_by"), str) and bool(receipt["closed_by"])
+        and isinstance(receipt.get("closed_at"), str) and bool(receipt["closed_at"])
+    ) or _valid_close_intent(_operation_metadata(body, DUPLICATE_CLOSE_INTENT_META))
 
 
 def build_triage_dry_run_report(

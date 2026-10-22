@@ -39,6 +39,112 @@ class DuplicateTriageLoopTest(unittest.TestCase):
             "comment_markdown": "Same symptom as the original issue.",
         })
 
+    def test_receipt_committed_before_timeout_is_read_back_without_reopening(self) -> None:
+        class PersistReceiptThenTimeout(FakeGitHubIssuesClient):
+            receipt_timed_out = False
+            readback_failed = False
+            fail_readback = False
+
+            def add_issue_comment(self, **kwargs):
+                super().add_issue_comment(**kwargs)
+                if "BUGPATROL_DUPLICATE_CLOSE_META" in kwargs["body"] and not self.receipt_timed_out:
+                    self.receipt_timed_out = True
+                    raise RuntimeError("receipt response timed out")
+
+            def list_issue_comments(self, **kwargs):
+                if self.fail_readback and self.receipt_timed_out and not self.readback_failed:
+                    self.readback_failed = True
+                    raise RuntimeError("receipt readback unavailable")
+                return super().list_issue_comments(**kwargs)
+
+        evidence = json.loads(Path("tests/fixtures/duplicate_delivery.json").read_text())
+        evidence["components"][0]["reported_fix"] = "missing"
+        evidence["components"][0]["build_predates_fix"] = True
+        for fail_readback in (False, True):
+            with self.subTest(fail_readback=fail_readback):
+                config = load_project_config(Path("projects/todo-sandbox.toml"))
+                github = PersistReceiptThenTimeout()
+                github.fail_readback = fail_readback
+                for title in ("original", "new"):
+                    github.create_issue(
+                        repo=config.github_repo, title=title,
+                        body='<!-- BUGPATROL_INTAKE_META:{"source":"lark","chat_id":"oc_x","root_id":"om_x"} -->',
+                        issue_type="Bug", fields={},
+                    )
+                github.created[0].issue = replace(github.created[0].issue, state="closed", state_reason="completed")
+                arguments = dict(repo=config.github_repo, issue_number=2, config=config,
+                                 github=github, issue_fields=FakeIssueFields(), result=self.result(evidence))
+                if fail_readback:
+                    with self.assertRaisesRegex(RuntimeError, "readback unavailable"):
+                        apply_triage_result(**arguments)
+                else:
+                    self.assertTrue(apply_triage_result(**arguments).closed_as_duplicate)
+                self.assertEqual(github.created[1].issue.state, "closed")
+                self.assertFalse(github.created[1].reopened)
+                self.assertTrue(apply_triage_result(**arguments).closed_as_duplicate)
+                self.assertEqual(sum("BUGPATROL_DUPLICATE_CLOSE_META" in body for body in github.created[1].comments), 1)
+
+    def test_receipt_write_failure_and_failed_compensation_recover_without_overwriting_human_close(self) -> None:
+        class FailReceiptAndReopenOnce(FakeGitHubIssuesClient):
+            receipt_failed = False
+            reopen_failed = False
+            human_during_receipt = False
+
+            def add_issue_comment(self, **kwargs):
+                if "BUGPATROL_DUPLICATE_CLOSE_META" in kwargs["body"] and not self.receipt_failed:
+                    self.receipt_failed = True
+                    if self.human_during_receipt:
+                        self.created[1].issue = replace(
+                            self.created[1].issue, closed_by="human", closed_by_type="User",
+                            closed_at="2026-10-22T04:00:00Z",
+                        )
+                    raise RuntimeError("receipt write failed")
+                super().add_issue_comment(**kwargs)
+
+            def reopen_issue(self, **kwargs):
+                if not self.reopen_failed:
+                    self.reopen_failed = True
+                    raise RuntimeError("compensation failed")
+                super().reopen_issue(**kwargs)
+
+        complete = json.loads(Path("tests/fixtures/duplicate_delivery.json").read_text())
+        old_build = copy.deepcopy(complete)
+        old_build["components"][0]["reported_fix"] = "missing"
+        old_build["components"][0]["build_predates_fix"] = True
+        scenarios = [(human, same) for human in ("none", "before_retry", "during_receipt") for same in (False, True)]
+        for human_close, same_evidence_retry in scenarios:
+            with self.subTest(human_close=human_close, same_evidence_retry=same_evidence_retry):
+                config = load_project_config(Path("projects/todo-sandbox.toml"))
+                github = FailReceiptAndReopenOnce()
+                github.human_during_receipt = human_close == "during_receipt"
+                for title in ("original", "new"):
+                    github.create_issue(
+                        repo=config.github_repo, title=title,
+                        body='<!-- BUGPATROL_INTAKE_META:{"source":"lark","chat_id":"oc_x","root_id":"om_x"} -->',
+                        issue_type="Bug", fields={},
+                    )
+                github.created[0].issue = replace(github.created[0].issue, state="closed", state_reason="completed")
+                fields = FakeIssueFields()
+                arguments = dict(repo=config.github_repo, issue_number=2, config=config,
+                                 github=github, issue_fields=fields)
+                with self.assertRaises(RuntimeError):
+                    apply_triage_result(**arguments, result=self.result(old_build))
+                self.assertEqual(github.reopen_failed, human_close != "during_receipt")
+                self.assertEqual(github.created[1].issue.state, "closed")
+                if human_close == "before_retry":
+                    github.created[1].issue = replace(
+                        github.created[1].issue, closed_by="human", closed_by_type="User",
+                        closed_at="2026-10-22T04:00:00Z",
+                    )
+                if same_evidence_retry:
+                    apply_triage_result(**arguments, result=self.result(old_build))
+                    self.assertEqual(github.created[1].issue.state, "closed")
+                    if human_close == "none":
+                        self.assertTrue(any("BUGPATROL_DUPLICATE_CLOSE_META" in body for body in github.created[1].comments))
+                apply_triage_result(**arguments, result=self.result(None))
+                self.assertEqual(github.created[1].issue.state, "open" if human_close == "none" else "closed")
+                self.assertEqual(fields.values[2]["Triage status"], "Needs info")
+
     def test_bot_duplicate_close_is_reopened_when_later_evidence_requires_tracking(self) -> None:
         complete = json.loads(Path("tests/fixtures/duplicate_delivery.json").read_text())
         incomplete = copy.deepcopy(complete)
@@ -91,13 +197,13 @@ class DuplicateTriageLoopTest(unittest.TestCase):
                             def untrusted_comments(_read_comments=read_comments, **kwargs):
                                 return tuple(
                                     replace(comment, author="reporter", author_type="User")
-                                    if "BUGPATROL_DUPLICATE_CLOSE_META" in comment.body else comment
+                                    if "BUGPATROL_DUPLICATE_CLOSE" in comment.body else comment
                                     for comment in _read_comments(**kwargs)
                                 )
 
                             github.list_issue_comments = untrusted_comments
                         apply_triage_result(**arguments, result=self.result(later))
-                        self.assertEqual(github.created[1].issue.state, "open" if provenance == "bot" else "closed")
+                        self.assertEqual(github.created[1].issue.state, "open" if provenance in ("bot", "no_receipt") else "closed")
                         self.assertEqual(fields.values[2]["Triage status"], "Needs info")
 
     def test_intake_triage_respects_delivery_evidence_and_keeps_unknown_reports_open(self) -> None:
@@ -163,7 +269,7 @@ class DuplicateTriageLoopTest(unittest.TestCase):
                 self.assertEqual(len(github.created[0].comments), 1 if should_reopen else 0)
                 self.assertTrue(first.comment_added)
                 self.assertFalse(second.comment_added)
-                self.assertEqual(len(github.created[1].comments), 2 if should_close else 1)
+                self.assertEqual(len(github.created[1].comments), 3 if should_close else 1)
                 metadata = parse_triage_metadata(github.created[1].comments[0])
                 self.assertEqual(metadata["duplicate_classification"], classification)
                 self.assertEqual(metadata["duplicate_of"], 1 if should_close else 0)

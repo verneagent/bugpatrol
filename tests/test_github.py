@@ -187,6 +187,25 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
             issue = client.get_issue(repo="o/r", issue_number=42)
         self.assertEqual((issue.closed_by, issue.closed_by_type), ("app[bot]", "Bot"))
 
+    def test_list_issue_timeline_reads_all_pages_for_close_recovery(self) -> None:
+        client = GitHubCliIssuesClient()
+        with patch("subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh"], 0, json.dumps([{"id": n, "event": "commented"} for n in range(100)]), ""),
+                subprocess.CompletedProcess(["gh"], 0, json.dumps([{"event": "closed", "id": 101}]), ""),
+            ]
+            events = client.list_issue_timeline(repo="o/r", issue_number=42)
+        self.assertEqual(len(events), 101)
+        self.assertEqual(events[-1]["event"], "closed")
+        self.assertIn("/repos/o/r/issues/42/timeline?per_page=100&page=2", run.call_args.args[0])
+
+    def test_list_issue_timeline_rejects_malformed_history(self) -> None:
+        client = GitHubCliIssuesClient()
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 0, '[null]', "")
+            with self.assertRaises(GitHubCliError):
+                client.list_issue_timeline(repo="o/r", issue_number=42)
+
     def test_get_issue_type_reads_rest_issue_type(self) -> None:
         client = GitHubCliIssuesClient()
 

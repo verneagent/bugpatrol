@@ -30,6 +30,7 @@ from bugpatrol.triage_runner import (
     prepare_triage_run,
     render_triage_failed_comment,
     report_workflow_failure,
+    triage_already_applied_without_new_material,
     triage_run_in_flight,
 )
 
@@ -249,18 +250,36 @@ class TriageRunnerTest(unittest.TestCase):
         self.assertEqual(comment_ids(comments), ("1",))
 
     def test_comment_ids_ignore_duplicate_close_receipts(self) -> None:
+        receipt = json.dumps({
+            "issue": 1, "duplicate_of": 2, "classification": "old_build_duplicate",
+            "result_fingerprint": "a" * 64, "closed_by": "app[bot]",
+            "closed_at": "2026-10-22T03:00:00Z",
+        })
         comments = (
             GitHubIssueComment(id="1", body="Reporter follow-up"),
             GitHubIssueComment(
-                id="2", body='BugPatrol duplicate close receipt.\n\n<!-- BUGPATROL_DUPLICATE_CLOSE_META\n{"issue": 1}\nBUGPATROL_DUPLICATE_CLOSE_META -->',
+                id="2", body=f'<!-- BUGPATROL_DUPLICATE_CLOSE_META\n{receipt}\nBUGPATROL_DUPLICATE_CLOSE_META -->',
                 author_type="Bot",
             ),
             GitHubIssueComment(
-                id="3", body='<!-- BUGPATROL_DUPLICATE_CLOSE_META\n{"issue": 1}\nBUGPATROL_DUPLICATE_CLOSE_META -->',
+                id="3", body=f'<!-- BUGPATROL_DUPLICATE_CLOSE_META\n{receipt}\nBUGPATROL_DUPLICATE_CLOSE_META -->',
                 author_type="User",
             ),
         )
         self.assertEqual(comment_ids(comments), ("1", "3"))
+
+    def test_damaged_duplicate_markers_remain_material_for_bot_and_human_authors(self) -> None:
+        for author_type in ("Bot", "User"):
+            for marker in ("BUGPATROL_DUPLICATE_CLOSE_META", "BUGPATROL_DUPLICATE_CLOSE_INTENT_META"):
+                for payload in ('{"issue":', '[]', '1', '"receipt"', 'null', '{}'):
+                    with self.subTest(author=author_type, marker=marker, payload=payload):
+                        body = f'<!-- {marker}\n{payload}\n{marker} -->'
+                        comments = (GitHubIssueComment(id="bad", body=body, author_type=author_type),)
+                        self.assertEqual(comment_ids(comments), ("bad",))
+                        previous = GitHubIssueComment(
+                            id="prior", body='<!-- BUGPATROL_TRIAGE_META\n{"triage_status": "Done"}\nBUGPATROL_TRIAGE_META -->',
+                        )
+                        self.assertFalse(triage_already_applied_without_new_material((previous, *comments)))
 
     def test_triage_run_in_flight_only_while_a_recent_run_has_not_reported(self) -> None:
         now = datetime(2026, 8, 3, 4, 0, tzinfo=timezone.utc)

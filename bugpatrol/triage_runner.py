@@ -51,7 +51,7 @@ from bugpatrol.triage_result import (
     TriageResult,
     TriageRunStats,
     apply_triage_result,
-    is_duplicate_close_receipt,
+    is_duplicate_close_bookkeeping,
     parse_triage_metadata,
     parse_triage_result,
     send_intake_topic_message,
@@ -914,8 +914,8 @@ def is_triage_bookkeeping_comment(body: str, *, author_type: str = "") -> bool:
     """
     if parse_triage_run_metadata(body) is not None:
         return True
-    if is_duplicate_close_receipt(body):
-        return author_type == "Bot"
+    if author_type == "Bot" and is_duplicate_close_bookkeeping(body):
+        return True
     stripped = body.lstrip()
     return stripped.startswith(TRIAGE_SKIPPED_HEADER) or stripped.startswith(TRIAGE_FAILED_HEADER)
 
