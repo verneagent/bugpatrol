@@ -152,7 +152,7 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
             run.return_value = subprocess.CompletedProcess(
                 ["gh"],
                 0,
-                json.dumps([{"id": 123, "body": "hello"}]),
+                json.dumps([{"id": 123, "body": "hello", "user": {"login": "app[bot]", "type": "Bot"}}]),
                 "",
             )
             comments = client.list_issue_comments(repo="o/r", issue_number=42)
@@ -160,7 +160,32 @@ class GitHubCliIssuesClientTest(unittest.TestCase):
         self.assertEqual(len(comments), 1)
         self.assertEqual(comments[0].id, "123")
         self.assertEqual(comments[0].body, "hello")
-        self.assertIn("/repos/o/r/issues/42/comments", run.call_args.args[0])
+        self.assertEqual((comments[0].author, comments[0].author_type), ("app[bot]", "Bot"))
+        self.assertIn("/repos/o/r/issues/42/comments?per_page=100&page=1", run.call_args.args[0])
+
+    def test_list_issue_comments_reads_all_pages(self) -> None:
+        client = GitHubCliIssuesClient()
+        first = [{"id": number, "body": "old"} for number in range(100)]
+        with patch("subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh"], 0, json.dumps(first), ""),
+                subprocess.CompletedProcess(["gh"], 0, json.dumps([{"id": 101, "body": "receipt"}]), ""),
+            ]
+            comments = client.list_issue_comments(repo="o/r", issue_number=42)
+        self.assertEqual(len(comments), 101)
+        self.assertEqual(comments[-1].body, "receipt")
+        self.assertIn("/repos/o/r/issues/42/comments?per_page=100&page=2", run.call_args.args[0])
+
+    def test_get_issue_keeps_bot_close_actor_type(self) -> None:
+        client = GitHubCliIssuesClient()
+        with patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh"], 0, json.dumps({
+                "number": 42, "html_url": "https://github.test/o/r/issues/42", "title": "bug",
+                "state": "closed", "state_reason": "duplicate", "closed_at": "2026-10-22T03:00:01Z",
+                "closed_by": {"login": "app[bot]", "type": "Bot"},
+            }), "")
+            issue = client.get_issue(repo="o/r", issue_number=42)
+        self.assertEqual((issue.closed_by, issue.closed_by_type), ("app[bot]", "Bot"))
 
     def test_get_issue_type_reads_rest_issue_type(self) -> None:
         client = GitHubCliIssuesClient()

@@ -27,6 +27,79 @@ class FakeIssueFields:
 
 
 class DuplicateTriageLoopTest(unittest.TestCase):
+    def result(self, evidence: dict | None):
+        return parse_triage_result({
+            "issue_type": "Bug", "priority": "High", "triage_status": "Done",
+            "triage_verdict": "重复", "platform": "Web", "reproducibility": "必现",
+            "other_platforms": "未验证", "capability": "Quest", "evidence": "日志",
+            "prd_status": "已对齐", "triage_confidence": "高",
+            "assignee": "garlanddiego", "owner_reason": "CODEOWNERS",
+            "duplicate_of": 1, "duplicate_evidence": evidence,
+            "corrected_title": "Todo deletion fails",
+            "comment_markdown": "Same symptom as the original issue.",
+        })
+
+    def test_bot_duplicate_close_is_reopened_when_later_evidence_requires_tracking(self) -> None:
+        complete = json.loads(Path("tests/fixtures/duplicate_delivery.json").read_text())
+        incomplete = copy.deepcopy(complete)
+        incomplete["components"][1]["current_delivery"] = "missing"
+        pre_fix = copy.deepcopy(complete)
+        pre_fix["occurred_at"] = "2026-10-21T23:00:00Z"
+        for component in pre_fix["components"]:
+            component["reported_fix"] = "missing"
+        old_build = copy.deepcopy(complete)
+        old_build["components"][0]["reported_fix"] = "missing"
+        old_build["components"][0]["build_predates_fix"] = True
+        for prior in (pre_fix, old_build):
+            for later in (None, incomplete):
+                for provenance in ("bot", "human", "no_receipt", "later_bot_close", "untrusted_receipt"):
+                    with self.subTest(prior=prior["occurred_at"], later=later is None, provenance=provenance):
+                        config = load_project_config(Path("projects/todo-sandbox.toml"))
+                        github = FakeGitHubIssuesClient()
+                        for title in ("original", "new"):
+                            github.create_issue(
+                                repo=config.github_repo, title=title,
+                                body='<!-- BUGPATROL_INTAKE_META:{"source":"lark","chat_id":"oc_x","root_id":"om_x"} -->',
+                                issue_type="Bug", fields={},
+                            )
+                        github.created[0].issue = replace(
+                            github.created[0].issue, state="closed", state_reason="completed",
+                        )
+                        fields = FakeIssueFields()
+                        arguments = dict(repo=config.github_repo, issue_number=2, config=config,
+                                         github=github, issue_fields=fields)
+                        apply_triage_result(**arguments, result=self.result(prior))
+                        self.assertEqual(github.created[1].issue.state, "closed")
+                        if provenance == "human":
+                            github.created[1].issue = replace(
+                                github.created[1].issue, closed_by="human",
+                                closed_by_type="User",
+                                closed_at="2026-10-22T04:00:00Z",
+                            )
+                        elif provenance == "no_receipt":
+                            github.created[1].comments = [
+                                body for body in github.created[1].comments
+                                if "BUGPATROL_DUPLICATE_CLOSE_META" not in body
+                            ]
+                        elif provenance == "later_bot_close":
+                            github.created[1].issue = replace(
+                                github.created[1].issue, closed_at="2026-10-22T04:00:00Z",
+                            )
+                        elif provenance == "untrusted_receipt":
+                            read_comments = github.list_issue_comments
+
+                            def untrusted_comments(_read_comments=read_comments, **kwargs):
+                                return tuple(
+                                    replace(comment, author="reporter", author_type="User")
+                                    if "BUGPATROL_DUPLICATE_CLOSE_META" in comment.body else comment
+                                    for comment in _read_comments(**kwargs)
+                                )
+
+                            github.list_issue_comments = untrusted_comments
+                        apply_triage_result(**arguments, result=self.result(later))
+                        self.assertEqual(github.created[1].issue.state, "open" if provenance == "bot" else "closed")
+                        self.assertEqual(fields.values[2]["Triage status"], "Needs info")
+
     def test_intake_triage_respects_delivery_evidence_and_keeps_unknown_reports_open(self) -> None:
         complete = json.loads(Path("tests/fixtures/duplicate_delivery.json").read_text())
         incomplete = copy.deepcopy(complete)
@@ -90,11 +163,11 @@ class DuplicateTriageLoopTest(unittest.TestCase):
                 self.assertEqual(len(github.created[0].comments), 1 if should_reopen else 0)
                 self.assertTrue(first.comment_added)
                 self.assertFalse(second.comment_added)
-                self.assertEqual(len(github.created[1].comments), 1)
+                self.assertEqual(len(github.created[1].comments), 2 if should_close else 1)
                 metadata = parse_triage_metadata(github.created[1].comments[0])
                 self.assertEqual(metadata["duplicate_classification"], classification)
                 self.assertEqual(metadata["duplicate_of"], 1 if should_close else 0)
-                self.assertEqual(fields.values[2]["Triage status"], "Done")
+                self.assertEqual(fields.values[2]["Triage status"], "Done" if should_close else "Needs info")
                 if not should_close:
                     self.assertFalse(any("已关闭" in reply.text for reply in lark.replies))
                     self.assertIn("保留", github.created[1].comments[0])

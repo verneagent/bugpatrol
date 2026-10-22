@@ -25,6 +25,7 @@ class FakeGitHubIssuesClient:
         self.created: list[CreatedIssue] = []
         self._next_number = 1
         self.dispatched: list[tuple[str, int]] = []
+        self._close_sequence = 0
         # Optional fix-author lookups: tests seed these to exercise the
         # 修复人 attribution; defaults yield no author (empty login).
         self.pull_requests: dict[str, GitHubPullRequest] = {}
@@ -106,7 +107,10 @@ class FakeGitHubIssuesClient:
         for item in self.created:
             if item.repo == repo and item.issue.number == issue_number:
                 return tuple(
-                    GitHubIssueComment(id=str(index + 1), body=body)
+                    GitHubIssueComment(
+                        id=str(index + 1), body=body,
+                        author="bugpatrol[bot]", author_type="Bot",
+                    )
                     for index, body in enumerate(item.comments)
                 )
         raise ValueError(f"issue not found: {repo}#{issue_number}")
@@ -125,6 +129,13 @@ class FakeGitHubIssuesClient:
         for item in self.created:
             if item.repo == repo and item.issue.number == issue_number:
                 item.closed_as_duplicate_of = duplicate_of
+                self._close_sequence += 1
+                item.issue = replace(
+                    item.issue, state="closed", state_reason="duplicate",
+                    closed_at=f"2026-10-22T03:00:{self._close_sequence:02d}Z",
+                    closed_by="bugpatrol[bot]",
+                    closed_by_type="Bot",
+                )
                 return
         raise ValueError(f"issue not found: {repo}#{issue_number}")
 

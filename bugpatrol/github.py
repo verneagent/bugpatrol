@@ -194,19 +194,27 @@ class GitHubCliIssuesClient:
         )
 
     def list_issue_comments(self, *, repo: str, issue_number: int) -> tuple[GitHubIssueComment, ...]:
-        result = self._run(
-            [
-                "api",
-                "-H",
-                f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
-                f"/repos/{repo}/issues/{issue_number}/comments",
-            ]
-        )
-        data = json.loads(result.stdout)
-        return tuple(
-            GitHubIssueComment(id=str(item["id"]), body=str(item.get("body") or ""))
-            for item in data
-        )
+        comments: list[GitHubIssueComment] = []
+        page = 1
+        while True:
+            result = self._run([
+                "api", "-H", f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+                f"/repos/{repo}/issues/{issue_number}/comments?per_page=100&page={page}",
+            ])
+            data = json.loads(result.stdout)
+            if not isinstance(data, list):
+                raise GitHubCliError(f"unexpected comments response for {repo}#{issue_number}")
+            comments.extend(
+                GitHubIssueComment(
+                    id=str(item["id"]), body=str(item.get("body") or ""),
+                    author=str((item.get("user") or {}).get("login") or ""),
+                    author_type=str((item.get("user") or {}).get("type") or ""),
+                )
+                for item in data
+            )
+            if len(data) < 100:
+                return tuple(comments)
+            page += 1
 
     def set_issue_type(self, *, repo: str, issue_number: int, issue_type: str) -> None:
         self._run(
@@ -263,6 +271,9 @@ class GitHubCliIssuesClient:
             state_reason=str(data.get("state_reason") or ""),
             closed_at=str(data.get("closed_at") or ""),
             closed_by=str((data.get("closed_by") or {}).get("login") or "")
+            if isinstance(data.get("closed_by"), dict)
+            else "",
+            closed_by_type=str((data.get("closed_by") or {}).get("type") or "")
             if isinstance(data.get("closed_by"), dict)
             else "",
             assignees=tuple(

@@ -6,10 +6,10 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
-from bugpatrol.clients import GitHubIssueComment, LarkMessengerClient
+from bugpatrol.clients import GitHubIssue, GitHubIssueComment, LarkMessengerClient
 from bugpatrol.config import ProjectConfig
 from bugpatrol.duplicate_evidence import (
     DuplicateEvidence,
@@ -134,6 +134,8 @@ TRIAGE_META_RE = re.compile(
     rf"{re.escape(TRIAGE_META_START)}\s*(.*?)\s*{re.escape(TRIAGE_META_END)}",
     re.DOTALL,
 )
+DUPLICATE_CLOSE_META = "BUGPATROL_DUPLICATE_CLOSE_META"
+REGRESSION_FLAG_META = "BUGPATROL_REGRESSION_FLAG_META"
 CORE_DUPLICATE_FIELDS = (
     "Priority",
     "Triage status",
@@ -254,9 +256,23 @@ def apply_triage_result(
     duplicate_classification = assessment.classification if assessment is not None else ""
     regression_note = render_regression_note(regression)
     duplicate_note = render_duplicate_note(duplicate_classification)
+    if assessment is not None and not assessment.may_close:
+        questions = result.follow_up_questions or (
+            "请核实报告环境、原始发生时间、实际 build 与有效修复，并补充可复核的证据引用。",
+        )
+        result = replace(
+            result, fields={**result.fields, "Triage status": "Needs info"},
+            follow_up_questions=questions,
+        )
     fingerprint = triage_result_fingerprint(result)
     decision_key = triage_decision_key(result)
     existing_comments = github.list_issue_comments(repo=repo, issue_number=issue_number)
+    restore_report = (
+        assessment is not None and not assessment.may_close and issue.state == "closed"
+        and _matching_duplicate_close_receipt(issue, existing_comments, result.duplicate_of)
+    )
+    if assessment is not None and not assessment.may_close and issue.state == "closed" and not restore_report:
+        duplicate_note += " 当前关闭操作缺少匹配的 bot receipt，保留其关闭状态，请人工核实是否需要重新打开。"
     existing_field_values = issue_fields.get_issue_field_values(
         repo=repo,
         issue_number=issue_number,
@@ -287,6 +303,10 @@ def apply_triage_result(
         values=triage_field_values_for_write(result, config=config),
         config=config,
     )
+    if restore_report:
+        current = github.get_issue(repo=repo, issue_number=issue_number)
+        if _same_duplicate_closure(issue, current):
+            github.reopen_issue(repo=repo, issue_number=issue_number)
     if not duplicate:
         if lark is not None and result.fields["Triage status"] == "Needs info":
             _send_lark_follow_up(
@@ -364,12 +384,18 @@ def apply_triage_result(
             )
             regression_reopened = regression.issue_number
         if assessment is not None and assessment.may_close:
-            github.close_issue_as_duplicate(
-                repo=repo,
-                issue_number=issue_number,
-                duplicate_of=result.duplicate_of,
-            )
-            closed_as_duplicate = True
+            current = github.get_issue(repo=repo, issue_number=issue_number)
+            if current.state != "closed":
+                github.close_issue_as_duplicate(
+                    repo=repo, issue_number=issue_number, duplicate_of=result.duplicate_of,
+                )
+                _record_duplicate_close(
+                    repo=repo, issue_number=issue_number, duplicate_of=result.duplicate_of,
+                    classification=assessment.classification, fingerprint=fingerprint, github=github,
+                )
+                closed_as_duplicate = True
+            else:
+                closed_as_duplicate = current.state_reason == "duplicate"
     else:
         github.add_assignee(repo=repo, issue_number=issue_number, assignee=result.assignee)
     return TriageApplySummary(
@@ -395,44 +421,104 @@ def _flag_duplicate_regression(
     lark: LarkMessengerClient | None,
     config: ProjectConfig,
 ) -> None:
-    """Flag the original issue as a regression, then reopen it.
-
-    Reopening is last so a failed write leaves the original closed and eligible
-    for a retry with the same delivery evidence.
-    """
-
-    github.add_issue_comment(
-        repo=repo,
-        issue_number=regression.issue_number,
-        body=render_regression_flag_comment(
-            regression=regression,
-            duplicate_issue_number=duplicate_issue_number,
-            duplicate_issue_url=duplicate_issue_url,
-        ),
-    )
-    if lark is not None:
-        send_intake_topic_message(
-            repo=repo,
-            issue_number=regression.issue_number,
-            github=github,
-            lark=lark,
-            text=render_regression_lark_message(
-                regression=regression,
-                duplicate_issue_number=duplicate_issue_number,
-                duplicate_issue_url=duplicate_issue_url,
-                assignee_open_ids=config.lark.user_open_ids or {},
-            ),
-        )
-    github.reopen_issue(repo=repo, issue_number=regression.issue_number)
-    # A reopened issue must re-enter the triage pipeline: leave its field on the
-    # stale "Running" from the old run and dispatch_due_triage defers it forever
-    # (fived #4324). Reset to Pending so the watcher re-dispatches.
+    """Prepare retriable state before opening the original to the watcher."""
     issue_fields.add_issue_field_values(
         repo=repo,
         issue_number=regression.issue_number,
         values={"Triage status": "Pending"},
         config=config,
     )
+    operation = f"{duplicate_issue_number}:{regression.closed_at}"
+    comments = github.list_issue_comments(repo=repo, issue_number=regression.issue_number)
+    already_flagged = any(
+        comment.author_type == "Bot"
+        and (_operation_metadata(comment.body, REGRESSION_FLAG_META) or {}).get("operation") == operation
+        for comment in comments
+    )
+    if not already_flagged:
+        if lark is not None:
+            send_intake_topic_message(
+                repo=repo, issue_number=regression.issue_number, github=github, lark=lark,
+                text=render_regression_lark_message(
+                    regression=regression, duplicate_issue_number=duplicate_issue_number,
+                    duplicate_issue_url=duplicate_issue_url,
+                    assignee_open_ids=config.lark.user_open_ids or {},
+                ),
+            )
+        github.add_issue_comment(
+            repo=repo, issue_number=regression.issue_number,
+            body=_append_operation_metadata(
+                render_regression_flag_comment(
+                    regression=regression, duplicate_issue_number=duplicate_issue_number,
+                    duplicate_issue_url=duplicate_issue_url,
+                ), REGRESSION_FLAG_META, {"operation": operation},
+            ),
+        )
+    github.reopen_issue(repo=repo, issue_number=regression.issue_number)
+
+
+def _same_duplicate_closure(previous: GitHubIssue, current: GitHubIssue) -> bool:
+    return (
+        current.state == "closed" and current.state_reason == "duplicate"
+        and current.closed_by_type == "Bot" and bool(current.closed_at)
+        and (current.closed_at, current.closed_by) == (previous.closed_at, previous.closed_by)
+    )
+
+
+def _matching_duplicate_close_receipt(
+    issue: GitHubIssue, comments: tuple[GitHubIssueComment, ...], duplicate_of: int,
+) -> bool:
+    if issue.state_reason != "duplicate" or issue.closed_by_type != "Bot" or not issue.closed_at:
+        return False
+    for comment in comments:
+        metadata = _operation_metadata(comment.body, DUPLICATE_CLOSE_META)
+        if (
+            metadata is not None and comment.author_type == "Bot"
+            and comment.author == issue.closed_by
+            and metadata.get("issue") == issue.number
+            and metadata.get("duplicate_of") == duplicate_of
+            and metadata.get("closed_at") == issue.closed_at
+            and metadata.get("closed_by") == issue.closed_by
+        ):
+            return True
+    return False
+
+
+def _record_duplicate_close(
+    *, repo: str, issue_number: int, duplicate_of: int,
+    classification: str, fingerprint: str, github: GitHubCliIssuesClient,
+) -> None:
+    closed = github.get_issue(repo=repo, issue_number=issue_number)
+    if (
+        closed.state != "closed" or closed.state_reason != "duplicate"
+        or closed.closed_by_type != "Bot" or not closed.closed_at
+    ):
+        return
+    github.add_issue_comment(
+        repo=repo, issue_number=issue_number,
+        body=_append_operation_metadata(
+            "BugPatrol duplicate close receipt.", DUPLICATE_CLOSE_META,
+            {"issue": issue_number, "duplicate_of": duplicate_of,
+             "closed_at": closed.closed_at, "closed_by": closed.closed_by,
+             "classification": classification, "result_fingerprint": fingerprint},
+        ),
+    )
+
+
+def _append_operation_metadata(body: str, marker: str, metadata: dict[str, Any]) -> str:
+    return f"{body}\n\n<!-- {marker}\n{json.dumps(metadata, sort_keys=True)}\n{marker} -->"
+
+
+def _operation_metadata(body: str, marker: str) -> dict[str, Any] | None:
+    match = re.search(rf"<!-- {marker}\s*(.*?)\s*{marker} -->", body, re.DOTALL)
+    if match is None:
+        return None
+    data = json.loads(match.group(1))
+    return data if isinstance(data, dict) else None
+
+
+def is_duplicate_close_receipt(body: str) -> bool:
+    return _operation_metadata(body, DUPLICATE_CLOSE_META) is not None
 
 
 def build_triage_dry_run_report(
@@ -600,7 +686,7 @@ def render_regression_note(regression: DuplicateRegression | None) -> str:
         return ""
     return (
         f"⚠️ 已确认回归（regression）：已核对实际 build 含有仍有效的修复，"
-        f"且问题发生在有效交付后，重新打开原 issue #{regression.issue_number} 跟踪。"
+        f"且问题发生在有效交付后，将重新打开原 issue #{regression.issue_number} 跟踪。"
     )
 
 
@@ -618,7 +704,7 @@ def render_regression_flag_comment(
             f"本 issue 此前已作为「已修复」关闭{closed_note}，"
             f"但新上报的 [#{duplicate_issue_number}]({duplicate_issue_url}) 被分诊判定为同一问题。",
             "已核对报告环境、原始发生时间和实际 build，确认实际 build 包含仍有效的修复，"
-            "且同一问题发生于有效交付之后，因此重新打开本 issue。",
+            "且同一问题发生于有效交付之后，将重新打开本 issue。",
             "",
             "请确认：修复是否仍在代码里、是否需要补回归测试、还是这是一条新的触发路径。",
         ]
@@ -644,7 +730,7 @@ def render_regression_lark_message(
             f"{head}⚠️ 已确认回归（regression）：本 issue "
             f"[#{regression.issue_number}]({regression.issue_url}) 曾以「已修复」关闭，"
             f"但新上报的 [#{duplicate_issue_number}]({duplicate_issue_url}) 是同一问题。",
-            "已核对实际 build 的有效修复与原始发生时间，重新打开本 issue 跟踪未覆盖的触发路径。",
+            "已核对实际 build 的有效修复与原始发生时间，将重新打开本 issue 跟踪未覆盖的触发路径。",
         ]
     )
 
@@ -657,6 +743,8 @@ def render_triage_comment(
     duplicate_note: str = "",
 ) -> str:
     body = result.comment_markdown.rstrip()
+    if duplicate_note and result.follow_up_questions:
+        body += "\n\n" + "\n".join(result.follow_up_questions)
     if result.blame_suggestion or result.suspected_owner:
         if "Blame" not in body and "归因" not in body:
             parts = []
@@ -897,7 +985,7 @@ def render_triage_summary_lark_message(
         duplicate_url = f"{issue_url.rsplit('/', 1)[0]}/{result.duplicate_of}"
         classification = duplicate_classification or classify_duplicate_evidence(result.duplicate_evidence)
         if classification in ("open_duplicate", "pre_fix_duplicate", "confirmed_regression", "old_build_duplicate"):
-            lines.append(f"结论：重复，已关闭。重复于 [#{result.duplicate_of}]({duplicate_url})")
+            lines.append(f"结论：重复。重复于 [#{result.duplicate_of}]({duplicate_url})")
         else:
             lines.append(f"结论：关联 [#{result.duplicate_of}]({duplicate_url})，保留当前报告。")
         note = render_duplicate_note(classification)

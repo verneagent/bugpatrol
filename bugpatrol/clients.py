@@ -17,12 +17,15 @@ class GitHubIssue:
     closed_at: str = ""
     closed_by: str = ""
     assignees: tuple[str, ...] = ()
+    closed_by_type: str = ""
 
 
 @dataclass(frozen=True)
 class GitHubIssueComment:
     id: str
     body: str
+    author: str = ""
+    author_type: str = ""
 
 
 @dataclass(frozen=True)

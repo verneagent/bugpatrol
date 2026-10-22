@@ -8,10 +8,10 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Sequence
 from uuid import uuid4
 
 from bugpatrol.agents import (
@@ -26,6 +26,7 @@ from bugpatrol.agents import (
 from bugpatrol.clients import GitHubIssue, GitHubIssueComment, LarkMessengerClient
 from bugpatrol.config import ProjectConfig
 from bugpatrol.fields import default_field_specs, triage_output_schema
+from bugpatrol.fix_gate import strip_ansi
 from bugpatrol.github import GitHubCliIssuesClient
 from bugpatrol.github_fields import (
     GitHubIssueFieldsClient,
@@ -37,16 +38,9 @@ from bugpatrol.intake import (
     require_bugpatrol_managed_issue,
     target_branch_from_metadata,
 )
-from bugpatrol.fix_gate import strip_ansi
-from bugpatrol.ownership import load_codeowners, load_codeowners_identities
-from bugpatrol.worktree import (
-    BranchResolution,
-    GitDriver,
-    SubprocessGitDriver,
-    resolve_triage_branch,
-)
 from bugpatrol.media_localize import localize_media
 from bugpatrol.openspec import load_openspec_changes
+from bugpatrol.ownership import load_codeowners, load_codeowners_identities
 from bugpatrol.triage_context import (
     AssigneeIdentity,
     ReferenceRepoContext,
@@ -57,12 +51,18 @@ from bugpatrol.triage_result import (
     TriageResult,
     TriageRunStats,
     apply_triage_result,
+    is_duplicate_close_receipt,
     parse_triage_metadata,
     parse_triage_result,
     send_intake_topic_message,
     triage_runner_name,
 )
-
+from bugpatrol.worktree import (
+    BranchResolution,
+    GitDriver,
+    SubprocessGitDriver,
+    resolve_triage_branch,
+)
 
 TRIAGE_RUN_META_START = "<!-- BUGPATROL_TRIAGE_RUN_META"
 TRIAGE_RUN_META_END = "BUGPATROL_TRIAGE_RUN_META -->"
@@ -591,7 +591,7 @@ def triage_already_applied_without_new_material(comments: tuple[GitHubIssueComme
     if latest_triage_index is None:
         return False
     for comment in comments[latest_triage_index + 1 :]:
-        if is_triage_bookkeeping_comment(comment.body):
+        if is_triage_bookkeeping_comment(comment.body, author_type=comment.author_type):
             continue
         if parse_triage_metadata(comment.body) is not None:
             continue
@@ -665,7 +665,7 @@ def evaluate_followup_re_triage(
     followups = tuple(
         comment
         for comment in comments[latest_triage_index + 1 :]
-        if not is_triage_bookkeeping_comment(comment.body)
+        if not is_triage_bookkeeping_comment(comment.body, author_type=comment.author_type)
         and parse_triage_metadata(comment.body) is None
     )
     if not followups:
@@ -904,7 +904,7 @@ def report_workflow_failure(
     return "reported"
 
 
-def is_triage_bookkeeping_comment(body: str) -> bool:
+def is_triage_bookkeeping_comment(body: str, *, author_type: str = "") -> bool:
     """True for comments bugpatrol writes about a triage run rather than about the bug.
 
     Run markers plus the "skipped"/"failed" audit notes carry no triage-relevant
@@ -914,12 +914,17 @@ def is_triage_bookkeeping_comment(body: str) -> bool:
     """
     if parse_triage_run_metadata(body) is not None:
         return True
+    if is_duplicate_close_receipt(body):
+        return author_type == "Bot"
     stripped = body.lstrip()
     return stripped.startswith(TRIAGE_SKIPPED_HEADER) or stripped.startswith(TRIAGE_FAILED_HEADER)
 
 
 def comment_ids(comments: tuple[GitHubIssueComment, ...]) -> tuple[str, ...]:
-    return tuple(comment.id for comment in comments if not is_triage_bookkeeping_comment(comment.body))
+    return tuple(
+        comment.id for comment in comments
+        if not is_triage_bookkeeping_comment(comment.body, author_type=comment.author_type)
+    )
 
 
 def triage_run_in_flight(

@@ -72,7 +72,9 @@ class FakeGithub:
     def list_issue_comments(self, **kwargs: object) -> tuple[GitHubIssueComment, ...]:
         self.calls.append(("list_issue_comments", kwargs))
         return tuple(
-            GitHubIssueComment(id=str(index + 1), body=body)
+            GitHubIssueComment(
+                id=str(index + 1), body=body, author="bugpatrol[bot]", author_type="Bot",
+            )
             for index, body in enumerate(self.comments)
         )
 
@@ -825,6 +827,79 @@ class TriageResultTest(unittest.TestCase):
         self.assertFalse(summary.closed_as_duplicate)
         self.assertEqual(summary.regression_reopened, 0)
         self.assertNotIn("reopen_issue", [name for name, _ in github.calls])
+
+    def test_unverified_duplicate_enters_needs_info_without_assigning_stale_owner(self) -> None:
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.issues[5] = self._closed_original(state_reason="completed")
+        fields = FakeIssueFields()
+        apply_triage_result(
+            repo=config.github_repo, issue_number=1, config=config,
+            result=replace(self._duplicate_result(), duplicate_evidence=None),
+            github=github, issue_fields=fields,
+        )
+        written = [dict(kwargs)["values"] for name, kwargs in fields.calls if name == "add_issue_field_values"]
+        self.assertEqual(written[0]["Triage status"], "Needs info")
+        metadata = parse_triage_metadata(github.comments[0])
+        self.assertEqual(metadata["triage_status"], "Needs info")
+        self.assertIn("请核实", github.comments[0])
+        self.assertNotIn("add_assignee", [name for name, _ in github.calls])
+
+    def test_pending_failure_does_not_reopen_and_retry_completes(self) -> None:
+        class FailPendingOnce(FakeIssueFields):
+            failed = False
+
+            def add_issue_field_values(self, **kwargs: object) -> None:
+                if kwargs["issue_number"] == 5 and not self.failed:
+                    self.failed = True
+                    raise RuntimeError("Pending write failed")
+                super().add_issue_field_values(**kwargs)
+
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        github.issues[5] = self._closed_original(state_reason="completed")
+        fields = FailPendingOnce()
+        lark = FakeLarkMessengerClient()
+        arguments = dict(
+            repo=config.github_repo, issue_number=1, config=config, result=self._duplicate_result(),
+            github=github, issue_fields=fields, lark=lark,
+        )
+        with self.assertRaisesRegex(RuntimeError, "Pending write failed"):
+            apply_triage_result(**arguments)
+        self.assertNotIn("reopen_issue", [name for name, _ in github.calls])
+        self.assertFalse(any(dict(kwargs).get("issue_number") == 5 for name, kwargs in github.calls if name == "add_issue_comment"))
+        self.assertEqual(apply_triage_result(**arguments).regression_reopened, 5)
+        flags = [kwargs for name, kwargs in github.calls if name == "add_issue_comment" and dict(kwargs)["issue_number"] == 5]
+        self.assertEqual(len(flags), 1)
+
+    def test_reopen_failure_retries_without_duplicate_regression_flag_or_ping(self) -> None:
+        class FailReopenOnce(FakeGithub):
+            failed = False
+
+            def reopen_issue(self, **kwargs: object) -> None:
+                if not self.failed:
+                    self.failed = True
+                    raise RuntimeError("reopen failed")
+                super().reopen_issue(**kwargs)
+
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FailReopenOnce()
+        github.issues[5] = self._closed_original(state_reason="completed")
+        fields = FakeIssueFields()
+        lark = FakeLarkMessengerClient()
+        arguments = dict(
+            repo=config.github_repo, issue_number=1, config=config, result=self._duplicate_result(),
+            github=github, issue_fields=fields, lark=lark,
+        )
+        with self.assertRaisesRegex(RuntimeError, "reopen failed"):
+            apply_triage_result(**arguments)
+        self.assertEqual(github.issues[5].state, "closed")
+        self.assertEqual(apply_triage_result(**arguments).regression_reopened, 5)
+        flags = [kwargs for name, kwargs in github.calls if name == "add_issue_comment" and dict(kwargs)["issue_number"] == 5]
+        self.assertEqual(len(flags), 1)
+        self.assertEqual(sum("已确认回归" in reply.text and "本 issue" in reply.text for reply in lark.replies), 1)
+        pending = [kwargs for name, kwargs in fields.calls if name == "add_issue_field_values" and dict(kwargs)["issue_number"] == 5]
+        self.assertEqual(len(pending), 2)
 
     def test_duplicate_of_unfixed_close_is_not_a_regression(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))

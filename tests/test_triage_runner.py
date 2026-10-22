@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,6 +20,7 @@ from bugpatrol.triage_runner import (
     TRIAGE_FAILED_HEADER,
     TRIAGE_SKIPPED_HEADER,
     TriageRunPlan,
+    _write_turn_log,
     append_triage_run_metadata,
     build_assignee_roster,
     comment_ids,
@@ -30,7 +31,6 @@ from bugpatrol.triage_runner import (
     render_triage_failed_comment,
     report_workflow_failure,
     triage_run_in_flight,
-    _write_turn_log,
 )
 
 
@@ -247,6 +247,20 @@ class TriageRunnerTest(unittest.TestCase):
         )
 
         self.assertEqual(comment_ids(comments), ("1",))
+
+    def test_comment_ids_ignore_duplicate_close_receipts(self) -> None:
+        comments = (
+            GitHubIssueComment(id="1", body="Reporter follow-up"),
+            GitHubIssueComment(
+                id="2", body='BugPatrol duplicate close receipt.\n\n<!-- BUGPATROL_DUPLICATE_CLOSE_META\n{"issue": 1}\nBUGPATROL_DUPLICATE_CLOSE_META -->',
+                author_type="Bot",
+            ),
+            GitHubIssueComment(
+                id="3", body='<!-- BUGPATROL_DUPLICATE_CLOSE_META\n{"issue": 1}\nBUGPATROL_DUPLICATE_CLOSE_META -->',
+                author_type="User",
+            ),
+        )
+        self.assertEqual(comment_ids(comments), ("1", "3"))
 
     def test_triage_run_in_flight_only_while_a_recent_run_has_not_reported(self) -> None:
         now = datetime(2026, 8, 3, 4, 0, tzinfo=timezone.utc)
