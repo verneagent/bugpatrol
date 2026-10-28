@@ -1038,6 +1038,11 @@ def main(argv: list[str] | None = None) -> int:
 
         def _run_triage_attempts(*, repo_path, branch_note: str, reference_repos):
             max_attempts = 3
+            # Flips on when the gateway rejects the transcript for a dropped
+            # thinking block (see is_thinking_replay_rejection). Re-running the
+            # same context reproduces that 400, so the retry has to change the
+            # request: thinking off retires the whole error class.
+            disable_thinking = False
             for attempt in range(1, max_attempts + 1):
                 plan = prepare_triage_run(
                     config=config,
@@ -1047,6 +1052,7 @@ def main(argv: list[str] | None = None) -> int:
                     github=github,
                     branch_note=branch_note,
                     reference_repos=reference_repos,
+                    disable_thinking=disable_thinking,
                 )
                 if not args.execute:
                     return plan
@@ -1080,6 +1086,13 @@ def main(argv: list[str] | None = None) -> int:
                         f"triage agent died on a transient API error (attempt {attempt}); retrying",
                         file=sys.stderr,
                     )
+                    continue
+                if status == "agent_thinking_replay":
+                    print(
+                        f"triage agent hit the thinking-replay rejection (attempt {attempt}); retrying with thinking disabled",
+                        file=sys.stderr,
+                    )
+                    disable_thinking = True
                     continue
                 if status != "stale_context":
                     return plan

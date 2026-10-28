@@ -9,7 +9,7 @@ import sys
 import urllib.error
 import urllib.request
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Sequence
 
@@ -39,6 +39,21 @@ _TRANSIENT_AGENT_FAILURE_MARKERS = (
 # spelling the messages out here would miss the next 5xx shape.
 _TRANSIENT_AGENT_FAILURE_RE = re.compile(r"API Error: 5\d\d")
 
+# A 400 that is not about this run's request at all: DeepSeek's thinking mode
+# requires every historical assistant turn's thinking to be echoed back
+# verbatim, and the OpenCode Go gateway drops one now and then on the way to
+# its upstream. The same transcript then answers 200 on a direct replay
+# (verified on #7119: 8/8 replays and a full CLI re-run), yet triage died four
+# times in a row on it — so a blind retry does not help, and a probe would say
+# "model is fine" while the run keeps failing. What does help is dropping
+# thinking mode: `CLAUDE_CODE_DISABLE_THINKING=1` strips the `thinking` field
+# from the request body (verified on CLI 2.1.104, 2.1.181 and 2.1.224), which
+# retires the whole error class. See `AgentInvocation.without_thinking`.
+_THINKING_REPLAY_REJECTION_RE = re.compile(
+    r"API Error: 400\b.*?content\[\]\.thinking.*?must be passed back",
+    re.DOTALL,
+)
+
 # A gateway rejection whose body carries no diagnostic at all — just the echoed
 # model name, e.g. `API Error: 400 {"model":"deepseek-v4.1-flash"}`. Real
 # rejections (a retired model, a disabled model, a bad credential, a missing
@@ -63,6 +78,18 @@ class AgentInvocation:
     env: dict[str, str] = field(default_factory=dict)
     # Model name actually used, for run-completion reporting.
     model: str = ""
+
+    def without_thinking(self) -> AgentInvocation:
+        """A copy whose CLI run has thinking mode turned off.
+
+        The fallback for `is_thinking_replay_rejection`: the gateway dropped a
+        historical thinking block and its upstream refuses the transcript, so
+        re-running the same conversation with thinking on reproduces the
+        failure. Disabling thinking strips it from the request body and the
+        class of error cannot occur. Only the deepseek/claude paths read this
+        env var; it never touches the command line.
+        """
+        return replace(self, env={**self.env, "CLAUDE_CODE_DISABLE_THINKING": "1"})
 
 
 def parse_claude_token_usage(stdout: str) -> tuple[int, int, int]:
@@ -284,6 +311,27 @@ def is_transient_agent_failure(stdout: str | None) -> bool:
     return _TRANSIENT_AGENT_FAILURE_RE.search(error) is not None
 
 
+def is_thinking_replay_rejection(stdout: str | None) -> bool:
+    """True when the gateway refused the run for a dropped thinking block.
+
+    DeepSeek's thinking mode requires every historical assistant turn's
+    thinking to be echoed back; when the gateway loses one the upstream rejects
+    the whole transcript. Unlike the other 400 in this module, the body *is*
+    diagnostic — but it names the gateway's payload, not anything this run
+    asked for, and the identical transcript answers 200 on a replay. A fresh
+    attempt with thinking on reproduces it (#7119: four in a row across three
+    runners), so the caller must retry with `AgentInvocation.without_thinking`
+    rather than plainly re-running.
+
+    Only the agent's own fatal `result` event is classified, so an issue body
+    quoting this message cannot trigger the fallback.
+    """
+    error = agent_error_from_stdout(stdout)
+    if not error:
+        return False
+    return _THINKING_REPLAY_REJECTION_RE.search(error) is not None
+
+
 def is_bare_gateway_rejection(error: str) -> bool:
     """True for a 400 whose body is only the echoed model name.
 
@@ -396,6 +444,7 @@ def build_triage_agent_invocation(
     output_path: Path,
     context_path: Path | None = None,
     workspace_dirs: Sequence[Path] = (),
+    disable_thinking: bool = False,
 ) -> AgentInvocation:
     provider = config.triage_agent.provider
     env: dict[str, str] = {}
@@ -439,6 +488,8 @@ def build_triage_agent_invocation(
             "ANTHROPIC_API_KEY": api_key,
             "ANTHROPIC_AUTH_TOKEN": api_key,
         }
+        if disable_thinking:
+            env["CLAUDE_CODE_DISABLE_THINKING"] = "1"
     else:
         raise ValueError(f"unsupported triage agent provider: {provider}")
     model = config.triage_agent.model
@@ -565,6 +616,7 @@ def build_fix_agent_invocation(
     output_path: Path,
     context_path: Path,
     workspace_dirs: Sequence[Path] = (),
+    disable_thinking: bool = False,
 ) -> AgentInvocation:
     """Build the agent command for an auto-fix run.
 
@@ -588,6 +640,8 @@ def build_fix_agent_invocation(
             "ANTHROPIC_API_KEY": api_key,
             "ANTHROPIC_AUTH_TOKEN": api_key,
         }
+        if disable_thinking:
+            env["CLAUDE_CODE_DISABLE_THINKING"] = "1"
         default_model = DEEPSEEK_DEFAULT_MODEL
     prompt = "\n".join(
         [

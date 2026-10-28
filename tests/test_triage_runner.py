@@ -117,6 +117,29 @@ class TriageRunnerTest(unittest.TestCase):
             self.assertIn("Follow-up comment", plan.context_path.read_text())
             self.assertIn("triage-context.md", plan.invocation.command[-1])
 
+    def test_prepare_triage_run_passes_disable_thinking_through(self) -> None:
+        # The retry lives in the caller (`_run_triage_attempts`), so the flag
+        # has to survive the whole prepare path down to the invocation env.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ", {"DEEPSEEK_API_KEY": "sk-test"}
+        ):
+            root = Path(tmp)
+            prd_root = root / config.prd.cache_path
+            prd_root.mkdir(parents=True)
+            (prd_root / "todo-list.md").write_text("# Todo List PRD\n")
+
+            plan = prepare_triage_run(
+                config=config,
+                issue_number=7119,
+                repo_path=root,
+                output_dir=root / "run",
+                github=FakeGithub(),  # type: ignore[arg-type]
+                disable_thinking=True,
+            )
+
+        self.assertEqual(plan.invocation.env["CLAUDE_CODE_DISABLE_THINKING"], "1")
+
     def test_prepare_triage_run_surfaces_openspec_owner_without_whitelisting(self) -> None:
         config = load_project_config(Path("projects/todo-sandbox.toml"))
         # The shipped config's provider is deepseek, which refuses to build an
@@ -505,6 +528,91 @@ class TriageRunnerTest(unittest.TestCase):
         # Not wedged: no Failed status, no failure comment, no Lark ping.
         self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Running"})
         self.assertNotIn("BugPatrol triage failed", "".join(github.comments))
+
+    def test_execute_triage_run_returns_thinking_replay_before_final_attempt(self) -> None:
+        # DeepSeek's thinking mode refuses a transcript the gateway dropped a
+        # historical thinking block from, and the same context reproduces it
+        # (#7119 died four times across three runners). The caller retries with
+        # thinking off, so this path must not burn the issue as Failed.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        stdout = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": True,
+                "result": (
+                    "API Error: 400 Upstream request failed: [invalid_request_error] "
+                    "The `content[].thinking` in the thinking mode must be passed "
+                    "back to the API."
+                ),
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=root / "output.json",
+                invocation=AgentInvocation(provider="deepseek", command=["claude"]),
+                context_comment_ids=("1",),
+            )
+
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["claude"], 1, stdout, "")
+                status = execute_triage_run(
+                    config=config,
+                    issue_number=7119,
+                    plan=plan,
+                    github=github,  # type: ignore[arg-type]
+                    issue_fields=issue_fields,  # type: ignore[arg-type]
+                    final_attempt=False,
+                )
+
+        self.assertEqual(status, "agent_thinking_replay")
+        self.assertEqual(issue_fields.writes[-1]["values"], {"Triage status": "Running"})
+        self.assertNotIn("BugPatrol triage failed", "".join(github.comments))
+
+    def test_execute_triage_run_marks_failed_on_thinking_replay_final_attempt(self) -> None:
+        # The thinking-off retry is one shot: if it also fails, say so.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        stdout = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": True,
+                "result": (
+                    "API Error: 400 Upstream request failed: The `content[].thinking` "
+                    "in the thinking mode must be passed back to the API."
+                ),
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=root / "output.json",
+                invocation=AgentInvocation(provider="deepseek", command=["claude"]),
+                context_comment_ids=("1",),
+            )
+
+            with patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["claude"], 1, stdout, "")
+                with self.assertRaisesRegex(RuntimeError, "exit 1"):
+                    execute_triage_run(
+                        config=config,
+                        issue_number=7119,
+                        plan=plan,
+                        github=github,  # type: ignore[arg-type]
+                        issue_fields=issue_fields,  # type: ignore[arg-type]
+                        final_attempt=True,
+                    )
+
+        self.assertIn("BugPatrol triage failed", github.comments[-1])
 
     def test_execute_triage_run_marks_failed_on_transient_crash_final_attempt(self) -> None:
         # The retry is bounded: when every attempt drops, the operator still

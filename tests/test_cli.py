@@ -5,11 +5,13 @@ import io
 import json
 import unittest
 from pathlib import Path
+from unittest import mock
 from unittest.mock import patch
 
 from bugpatrol.__main__ import _parse_reference_repo_args, main
 from bugpatrol.clients import GitHubIssue
 from bugpatrol.config import load_project_config
+from bugpatrol.worktree import BranchResolution
 
 
 class FakeGithub:
@@ -314,6 +316,66 @@ class CliTest(unittest.TestCase):
 
         # No open PR -> no redirect, normal triage path reached.
         self.assertEqual(dispatched, [])
+
+    def test_run_triage_retries_with_thinking_disabled_after_the_400(self) -> None:
+        # The whole point of the new status: attempt 1 keeps thinking on, and
+        # only the retry asks for it off. Without this wiring the detector in
+        # agents.py would never change anything about the second request.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        statuses = ["agent_thinking_replay", "applied"]
+        prepared: list[bool] = []
+
+        def fake_prepare(**kwargs):
+            prepared.append(kwargs["disable_thinking"])
+            return mock.MagicMock(
+                context_path=Path("/tmp/out/triage-context.md"),
+                schema_path=Path("/tmp/out/triage.schema.json"),
+                output_path=Path("/tmp/out/triage-output.json"),
+                invocation=mock.MagicMock(provider="deepseek", command=["claude"]),
+            )
+
+        def fake_execute(**kwargs):
+            return statuses.pop(0)
+
+        resolution = BranchResolution(
+            analyzed_branch="main",
+            declared_branch="main",
+            ref="main",
+            note="",
+            status="main",
+        )
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+            io.StringIO()
+        ):
+            with patch("bugpatrol.__main__.load_project_config", return_value=config):
+                with patch("bugpatrol.__main__.GitHubCliIssuesClient", return_value=FakeGithub()):
+                    with patch("bugpatrol.__main__.GitHubIssueFieldsClient", return_value=object()):
+                        with patch(
+                            "bugpatrol.__main__.resolve_issue_branch",
+                            return_value=resolution,
+                        ):
+                            with patch(
+                                "bugpatrol.__main__.prepare_triage_run",
+                                side_effect=fake_prepare,
+                            ):
+                                with patch(
+                                    "bugpatrol.__main__.execute_triage_run",
+                                    side_effect=fake_execute,
+                                ):
+                                    main(
+                                        [
+                                            "run-triage",
+                                            "projects/todo-sandbox.toml",
+                                            "--issue",
+                                            "7119",
+                                            "--repo-path",
+                                            str(Path("/tmp/repo")),
+                                            "--execute",
+                                        ]
+                                    )
+
+        self.assertEqual(prepared, [False, True])
+        self.assertEqual(statuses, [])
 
 
 if __name__ == "__main__":

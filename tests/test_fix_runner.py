@@ -622,6 +622,71 @@ class RunFixReviseGuardsTest(unittest.TestCase):
 
 
 class RunFixAgentTimeoutTest(unittest.TestCase):
+    def test_retries_once_with_thinking_disabled_on_thinking_replay(self) -> None:
+        # Same 400 as triage (fived #7119): the gateway drops a historical
+        # thinking block and the upstream then refuses the transcript every
+        # time. A blind re-run cannot help, so the retry turns thinking off.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = FixRunPlan(
+                context_path=root / "fix-context.md",
+                schema_path=root / "fix.schema.json",
+                output_path=root / "fix-output.json",
+                invocation=AgentInvocation(
+                    provider="deepseek",
+                    command=["claude"],
+                    env={"ANTHROPIC_API_KEY": "sk-test"},
+                    model="m",
+                ),
+                agent_cwd=root,
+                verdict="代码 Bug",
+                base_branch="main",
+                head_branch="bugpatrol/fix-issue-7",
+                reviewer="dev1",
+                reviewer_open_id="",
+                branch_note="",
+            )
+            rejection = json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": True,
+                    "result": (
+                        "API Error: 400 Upstream request failed: The "
+                        "`content[].thinking` in the thinking mode must be passed "
+                        "back to the API."
+                    ),
+                }
+            )
+            failed = subprocess.CompletedProcess(["claude"], 1, rejection, "")
+            succeeded = subprocess.CompletedProcess(
+                ["claude"],
+                0,
+                json.dumps(
+                    {"type": "result", "subtype": "success", "is_error": False, "result": "ok"}
+                ),
+                "",
+            )
+            with patch(
+                "bugpatrol.fix_runner.subprocess.run",
+                side_effect=[failed, succeeded],
+            ) as run:
+                stats = _run_fix_agent(plan)
+
+                # The failed attempt stays available for diagnosis.
+                self.assertEqual(
+                    (root / "agent-turns.previous.jsonl").read_text(), rejection
+                )
+
+        self.assertEqual(stats.model, "m")
+        self.assertEqual(run.call_count, 2)
+        first_env = run.call_args_list[0].kwargs["env"]
+        second_env = run.call_args_list[1].kwargs["env"]
+        self.assertNotIn("CLAUDE_CODE_DISABLE_THINKING", first_env)
+        self.assertEqual(second_env["CLAUDE_CODE_DISABLE_THINKING"], "1")
+        # The key must survive the retry's env rebuild.
+        self.assertEqual(second_env["ANTHROPIC_API_KEY"], "sk-test")
+
     def test_run_fix_agent_fails_fast_when_llm_call_hangs(self) -> None:
         # Same latent gap as the triage agent (#4938): a hung provider call used
         # to burn the whole fix workflow job timeout silently. The subprocess

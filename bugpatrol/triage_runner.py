@@ -20,6 +20,7 @@ from bugpatrol.agents import (
     build_triage_agent_invocation,
     detect_sandbox_denial,
     is_retryable_agent_failure,
+    is_thinking_replay_rejection,
     load_agent_json,
     parse_claude_token_usage,
 )
@@ -108,6 +109,7 @@ def prepare_triage_run(
     prompt_path: Path = Path("prompts/triage.zh.md"),
     branch_note: str = "",
     reference_repos: Sequence[ReferenceRepoContext] = (),
+    disable_thinking: bool = False,
 ) -> TriageRunPlan:
     issue = github.get_issue(repo=config.github_repo, issue_number=issue_number)
     require_bugpatrol_managed_issue(issue)
@@ -189,6 +191,7 @@ def prepare_triage_run(
             output_dir,
             *(Path(ref.path) for ref in resolved_refs),
         ),
+        disable_thinking=disable_thinking,
     )
     return TriageRunPlan(
         context_path=context_path,
@@ -410,10 +413,16 @@ def execute_triage_run(
         # failing on the spot. A bare gateway 400 (`{"model": ...}`, no
         # diagnostic) is settled with a one-token probe: the model answering
         # means the run died to a hiccup and should retry.
-        if not final_attempt and is_retryable_agent_failure(
-            completed.stdout, plan.invocation
-        ):
-            return "agent_crashed"
+        #
+        # Checked before the retryable-failure allowlist on purpose: this 400 is
+        # a structured body, so nothing about it depends on the allowlist today,
+        # but it needs a *different* retry (thinking off) than the plain
+        # crash-and-rerun the allowlist implies.
+        if not final_attempt:
+            if is_thinking_replay_rejection(completed.stdout):
+                return "agent_thinking_replay"
+            if is_retryable_agent_failure(completed.stdout, plan.invocation):
+                return "agent_crashed"
         mark_triage_failed(
             config=config,
             issue_number=issue_number,

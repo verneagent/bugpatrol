@@ -16,6 +16,7 @@ from bugpatrol.agents import (
     detect_sandbox_denial,
     is_bare_gateway_rejection,
     is_retryable_agent_failure,
+    is_thinking_replay_rejection,
     is_transient_agent_failure,
     load_agent_json,
     parse_claude_token_usage,
@@ -227,6 +228,39 @@ class AgentsTest(unittest.TestCase):
 
         self.assertEqual(invocation.env, {})
 
+    def test_deepseek_disable_thinking_sets_env_not_argv(self) -> None:
+        config = _config_with_provider("deepseek")
+
+        with mock.patch.dict("os.environ", {"DEEPSEEK_API_KEY": "sk-test"}):
+            invocation = build_triage_agent_invocation(
+                config,
+                issue_number=7,
+                prompt_path=Path("prompts/triage.zh.md"),
+                schema_path=Path("triage.schema.json"),
+                output_path=Path("triage-output.json"),
+                context_path=None,
+                disable_thinking=True,
+            )
+
+        # The CLI strips the request's `thinking` field when this is set, which
+        # retires the whole thinking-replay 400 class (see agents.py).
+        self.assertEqual(invocation.env["CLAUDE_CODE_DISABLE_THINKING"], "1")
+        self.assertNotIn("CLAUDE_CODE_DISABLE_THINKING", " ".join(invocation.command))
+
+    def test_non_deepseek_providers_ignore_disable_thinking(self) -> None:
+        config = load_project_config(Path("projects/example.toml"))
+        invocation = build_triage_agent_invocation(
+            config,
+            issue_number=1,
+            prompt_path=Path("prompts/triage.zh.md"),
+            schema_path=Path("triage.schema.json"),
+            output_path=Path("triage-output.json"),
+            context_path=None,
+            disable_thinking=True,
+        )
+
+        self.assertEqual(invocation.env, {})
+
 
 class ParseClaudeTokenUsageTest(unittest.TestCase):
     def test_splits_real_input_from_cache(self) -> None:
@@ -388,6 +422,108 @@ class BareGatewayRejectionTest(unittest.TestCase):
 
     def test_does_not_match_other_statuses(self) -> None:
         self.assertFalse(is_bare_gateway_rejection('API Error: 503 {"model":"x"}'))
+
+
+class ThinkingReplayRejectionTest(unittest.TestCase):
+    """DeepSeek's thinking mode refuses a transcript missing a thinking block.
+
+    The OpenCode Go gateway drops one now and then, and the SAME context then
+    fails every time (#7119 died four times across three runners), so this needs
+    its own retry — with thinking off — rather than the generic re-run.
+    """
+
+    def test_matches_the_raw_text_body(self) -> None:
+        # Shape the user reported (fived #7119).
+        self.assertTrue(
+            is_thinking_replay_rejection(
+                _result_event(
+                    "API Error: 400 Upstream request failed: [invalid_request_error] "
+                    "The `content[].thinking` in the thinking mode must be passed "
+                    "back to the API. (request_id: b3220f34-aba1-448e-9ab8-"
+                    "e318cb3535e3) (request id: 202610280901364671665698268d9d6gXVT485b)"
+                )
+            )
+        )
+
+    def test_matches_the_structured_error_body(self) -> None:
+        self.assertTrue(
+            is_thinking_replay_rejection(
+                _result_event(
+                    'API Error: 400 {"type":"error","error":{"type":"invalid_request_error",'
+                    '"message":"The `content[].thinking` in the thinking mode must be '
+                    'passed back to the API."}}'
+                )
+            )
+        )
+
+    def test_matches_a_multi_line_body(self) -> None:
+        self.assertTrue(
+            is_thinking_replay_rejection(
+                _result_event(
+                    "API Error: 400 Upstream request failed:\n"
+                    "The `content[].thinking` in the thinking mode must be passed "
+                    "back to the API."
+                )
+            )
+        )
+
+    def test_keeps_other_failures_out(self) -> None:
+        for message in (
+            # A bare gateway 400 is settled by a probe, not by thinking off.
+            'API Error: 400 {"model":"deepseek-v4.1-flash"}',
+            'API Error: 402 {"error":{"message":"Insufficient Balance","type":"unknown_error"}}',
+            "Failed to authenticate. API Error: 401 Insufficient balance.",
+            "API Error: 503 Service is too busy.",
+            "API Error: Connection closed mid-response.",
+        ):
+            with self.subTest(message=message):
+                self.assertFalse(
+                    is_thinking_replay_rejection(_result_event(message))
+                )
+
+    def test_ignores_the_phrase_outside_the_error_event(self) -> None:
+        # The issue body quotes this exact string; only the agent's own result
+        # event may drive the retry decision.
+        stdout = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": "the log said content[].thinking must be passed back"
+                        },
+                    }
+                ),
+                _result_event("API Error: 402 Insufficient Balance"),
+            ]
+        )
+        self.assertFalse(is_thinking_replay_rejection(stdout))
+
+    def test_is_false_without_any_error_event(self) -> None:
+        self.assertFalse(is_thinking_replay_rejection(""))
+        self.assertFalse(is_thinking_replay_rejection(None))
+
+
+class WithoutThinkingTest(unittest.TestCase):
+    def test_returns_a_copy_that_leaves_the_original_alone(self) -> None:
+        original = _deepseek_invocation()
+        stripped = original.without_thinking()
+
+        self.assertEqual(stripped.env["CLAUDE_CODE_DISABLE_THINKING"], "1")
+        self.assertNotIn("CLAUDE_CODE_DISABLE_THINKING", original.env)
+        # Everything else about the run is unchanged — including the credential
+        # env the CLI needs to reach the gateway.
+        self.assertEqual(stripped.command, original.command)
+        self.assertEqual(stripped.model, original.model)
+        self.assertEqual(stripped.provider, original.provider)
+        self.assertEqual(
+            stripped.env["ANTHROPIC_BASE_URL"], original.env["ANTHROPIC_BASE_URL"]
+        )
+
+    def test_keeps_an_already_disabled_invocation_disabled(self) -> None:
+        once = _deepseek_invocation().without_thinking()
+        twice = once.without_thinking()
+        self.assertEqual(twice.env["CLAUDE_CODE_DISABLE_THINKING"], "1")
 
 
 class IsRetryableAgentFailureTest(unittest.TestCase):

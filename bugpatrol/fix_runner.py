@@ -25,6 +25,7 @@ from bugpatrol.agents import (
     AgentInvocation,
     build_fix_agent_invocation,
     detect_sandbox_denial,
+    is_thinking_replay_rejection,
     load_agent_json,
     parse_claude_token_usage,
 )
@@ -1216,6 +1217,24 @@ def _render_ci_fix_start_message(
     return text
 
 
+def _spawn_fix_agent(
+    plan: FixRunPlan, invocation: AgentInvocation
+) -> subprocess.CompletedProcess:
+    agent_env = {**os.environ, **invocation.env} if invocation.env else None
+    return subprocess.run(
+        invocation.command,
+        check=False,
+        env=agent_env,
+        cwd=str(plan.agent_cwd),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        # Same guard as the triage agent: a hung LLM call must fail fast
+        # instead of burning the whole workflow job timeout silently.
+        timeout=AGENT_TIMEOUT_SECONDS,
+    )
+
+
 def _run_fix_agent(plan: FixRunPlan) -> TriageRunStats:
     """Run the fix/revise agent subprocess and return its run stats.
 
@@ -1223,26 +1242,34 @@ def _run_fix_agent(plan: FixRunPlan) -> TriageRunStats:
     handling, turn-log persistence, and hard stops on nonzero exit / sandbox
     denial.
     """
-    agent_env = {**os.environ, **plan.invocation.env} if plan.invocation.env else None
     started = time.monotonic()
     try:
-        completed = subprocess.run(
-            plan.invocation.command,
-            check=False,
-            env=agent_env,
-            cwd=str(plan.agent_cwd),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            # Same guard as the triage agent: a hung LLM call must fail fast
-            # instead of burning the whole workflow job timeout silently.
-            timeout=AGENT_TIMEOUT_SECONDS,
-        )
+        completed = _spawn_fix_agent(plan, plan.invocation)
     except subprocess.TimeoutExpired as error:
         _write_turn_log(plan.output_path.parent, error.stdout or "", error.stderr or "")
         raise RuntimeError(
             f"fix agent timed out after {AGENT_TIMEOUT_SECONDS}s"
         ) from error
+    if completed.returncode != 0 and is_thinking_replay_rejection(completed.stdout):
+        # DeepSeek's thinking mode rejects the transcript when the gateway drops
+        # a historical thinking block; re-running the same context reproduces
+        # it, so retry once with thinking off (CLAUDE_CODE_DISABLE_THINKING=1),
+        # which strips the field from the request entirely. The rejected
+        # transcript is archived as `.previous` when the retry writes its log.
+        _write_turn_log(plan.output_path.parent, completed.stdout, completed.stderr)
+        print(
+            "fix agent hit the thinking-replay rejection; retrying with thinking disabled",
+            file=sys.stderr,
+        )
+        try:
+            completed = _spawn_fix_agent(plan, plan.invocation.without_thinking())
+        except subprocess.TimeoutExpired as error:
+            _write_turn_log(
+                plan.output_path.parent, error.stdout or "", error.stderr or ""
+            )
+            raise RuntimeError(
+                f"fix agent timed out after {AGENT_TIMEOUT_SECONDS}s"
+            ) from error
     duration_seconds = time.monotonic() - started
     _write_turn_log(plan.output_path.parent, completed.stdout, completed.stderr)
     input_tokens, cached_input_tokens, output_tokens = parse_claude_token_usage(completed.stdout or "")
