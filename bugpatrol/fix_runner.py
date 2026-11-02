@@ -90,7 +90,7 @@ from bugpatrol.triage_result import (
     send_intake_topic_message,
     triage_runner_name,
 )
-from bugpatrol.triage_runner import AGENT_TIMEOUT_SECONDS, _write_turn_log, resolve_issue_branch
+from bugpatrol.triage_runner import _write_turn_log, resolve_issue_branch
 from bugpatrol.worktree import (
     fix_revise_worktree,
     fix_worktree,
@@ -103,6 +103,12 @@ from bugpatrol.worktree import (
     worktree_reset_to_head,
     worktree_unresolved_conflict_markers,
 )
+
+# The fix agent keeps its own budget, shorter than triage's: it re-spawns once
+# when the gateway rejects a thinking replay, so two full attempts still have to
+# fit inside the workflow job's 60-minute timeout. Triage has no such second
+# spawn and can afford the longer limit.
+FIX_AGENT_TIMEOUT_SECONDS = 1200
 
 
 @dataclass(frozen=True)
@@ -1231,7 +1237,7 @@ def _spawn_fix_agent(
         text=True,
         # Same guard as the triage agent: a hung LLM call must fail fast
         # instead of burning the whole workflow job timeout silently.
-        timeout=AGENT_TIMEOUT_SECONDS,
+        timeout=FIX_AGENT_TIMEOUT_SECONDS,
     )
 
 
@@ -1248,7 +1254,7 @@ def _run_fix_agent(plan: FixRunPlan) -> TriageRunStats:
     except subprocess.TimeoutExpired as error:
         _write_turn_log(plan.output_path.parent, error.stdout or "", error.stderr or "")
         raise RuntimeError(
-            f"fix agent timed out after {AGENT_TIMEOUT_SECONDS}s"
+            f"fix agent timed out after {FIX_AGENT_TIMEOUT_SECONDS}s"
         ) from error
     if completed.returncode != 0 and is_thinking_replay_rejection(completed.stdout):
         # DeepSeek's thinking mode rejects the transcript when the gateway drops
@@ -1268,7 +1274,7 @@ def _run_fix_agent(plan: FixRunPlan) -> TriageRunStats:
                 plan.output_path.parent, error.stdout or "", error.stderr or ""
             )
             raise RuntimeError(
-                f"fix agent timed out after {AGENT_TIMEOUT_SECONDS}s"
+                f"fix agent timed out after {FIX_AGENT_TIMEOUT_SECONDS}s"
             ) from error
     duration_seconds = time.monotonic() - started
     _write_turn_log(plan.output_path.parent, completed.stdout, completed.stderr)

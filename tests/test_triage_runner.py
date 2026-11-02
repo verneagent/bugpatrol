@@ -17,6 +17,8 @@ from bugpatrol.github_fields import IssueField
 from bugpatrol.intake import IntakeRecord, render_issue_body
 from bugpatrol.triage_context import ReferenceRepoContext
 from bugpatrol.triage_runner import (
+    AGENT_TIMEOUT_SECONDS,
+    AGENT_WRAP_UP_SECONDS,
     TRIAGE_FAILED_HEADER,
     TRIAGE_SKIPPED_HEADER,
     TriageRunPlan,
@@ -27,8 +29,10 @@ from bugpatrol.triage_runner import (
     execute_triage_run,
     list_known_assignees,
     prepare_triage_run,
+    render_run_budget,
     render_triage_failed_comment,
     report_workflow_failure,
+    summarize_agent_progress,
     triage_run_in_flight,
     _write_turn_log,
 )
@@ -443,7 +447,9 @@ class TriageRunnerTest(unittest.TestCase):
                 # exception; mirror that for the hand-built one.
                 timeout.stdout = b'{"partial": 1}'
                 run.side_effect = timeout
-                with self.assertRaisesRegex(RuntimeError, "timed out after 1200s"):
+                with self.assertRaisesRegex(
+                    RuntimeError, f"timed out after {AGENT_TIMEOUT_SECONDS}s"
+                ):
                     execute_triage_run(
                         config=config,
                         issue_number=7,
@@ -454,8 +460,61 @@ class TriageRunnerTest(unittest.TestCase):
 
         self.assertEqual(issue_fields.writes[0]["values"], {"Triage status": "Running"})
         self.assertEqual(issue_fields.writes[1]["values"], {"Triage status": "Failed"})
-        self.assertIn("no terminal output for 1200s", github.comments[-1])
+        # '{"partial": 1}' is not an assistant turn, so this is the "nothing came
+        # back at all" shape and must say so.
+        self.assertIn(f"no terminal output for {AGENT_TIMEOUT_SECONDS}s", github.comments[-1])
         self.assertIn("## BugPatrol triage failed", github.comments[-1])
+
+    def test_timeout_reports_work_in_progress_instead_of_blaming_the_endpoint(self) -> None:
+        # The old message said "endpoint likely hung" for every timeout, but the
+        # 2026-11-02 turn logs showed 70-80 assistant turns with no gap over a
+        # minute — the agent was working and simply ran out of wall clock.
+        # On-call must be able to tell those apart without opening the log.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        issue_fields = FakeIssueFields()
+        progress = "\n".join(
+            [
+                '{"type": "system", "subtype": "init"}',
+                '{"type": "assistant", "message": {"content": ['
+                '{"type": "thinking", "thinking": "..."}, '
+                '{"type": "tool_use", "name": "Bash", "input": {}}]}}',
+                '{"type": "user", "message": {"content": '
+                '[{"type": "tool_result", "content": "ok"}]}}',
+                '{"type": "assistant", "message": {"content": '
+                '[{"type": "tool_use", "name": "Read", "input": {}}]}}',
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = TriageRunPlan(
+                context_path=root / "context.md",
+                schema_path=root / "schema.json",
+                output_path=root / "output.json",
+                invocation=AgentInvocation(provider="codex", command=["claude"]),
+            )
+            with patch("subprocess.run") as run:
+                timeout = subprocess.TimeoutExpired(
+                    cmd=["claude"], timeout=AGENT_TIMEOUT_SECONDS
+                )
+                timeout.stdout = progress.encode()
+                timeout.stderr = b""
+                run.side_effect = timeout
+                with self.assertRaises(RuntimeError):
+                    execute_triage_run(
+                        config=config,
+                        issue_number=8,
+                        plan=plan,
+                        github=github,  # type: ignore[arg-type]
+                        issue_fields=issue_fields,  # type: ignore[arg-type]
+                    )
+
+        comment = github.comments[-1]
+        self.assertIn("was killed while still working", comment)
+        self.assertIn("2 assistant turns, 2 tool calls", comment)
+        self.assertIn("The endpoint did not hang", comment)
+        self.assertNotIn("never answered", comment)
+        self.assertNotIn("no terminal output", comment)
 
     def test_write_turn_log_accepts_bytes_like_timeoutexpired(self) -> None:
         # #5038: a timed-out `claude -p` carried bytes in .stdout even under
@@ -1459,6 +1518,60 @@ def managed_issue_body() -> str:
     )
 
 
+class RunBudgetTest(unittest.TestCase):
+    def test_budget_block_carries_deadline_and_wrap_up(self) -> None:
+        started = datetime(2026, 11, 2, 3, 1, 18, tzinfo=timezone.utc)
+        block = render_run_budget(
+            started_at=started, timeout_seconds=1800, python_path="/venv/bin/python"
+        )
+        self.assertIn("本次运行开始于 2026-11-02 03:01:18 UTC", block)
+        self.assertIn("2026-11-02 03:31:18 UTC", block)  # hard kill
+        self.assertIn("2026-11-02 03:26:18 UTC", block)  # must start writing
+        self.assertIn("`/venv/bin/python`", block)
+        self.assertIn("date -u", block)
+        self.assertEqual(
+            (AGENT_TIMEOUT_SECONDS, AGENT_WRAP_UP_SECONDS), (1800, 300)
+        )
+
+    def test_prepared_context_tells_the_agent_its_deadline(self) -> None:
+        # The block is only useful if it actually reaches the file the agent
+        # reads — a helper nobody calls would pass the unit test above.
+        config = load_project_config(Path("projects/todo-sandbox.toml"))
+        github = FakeGithub()
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ", {"DEEPSEEK_API_KEY": "sk-test"}
+        ):
+            root = Path(tmp)
+            plan = prepare_triage_run(
+                config=config,
+                issue_number=7,
+                repo_path=root,
+                output_dir=root / "out",
+                github=github,  # type: ignore[arg-type]
+            )
+            context = plan.context_path.read_text(encoding="utf-8")
+        self.assertIn("## 运行时间预算", context)
+        self.assertIn("必须停止调查", context)
+
+    def test_summarize_agent_progress_counts_turns_and_tools(self) -> None:
+        stdout = "\n".join(
+            [
+                "not json at all",
+                '{"type": "system", "subtype": "init"}',
+                '{"type": "assistant", "message": {"content": ['
+                '{"type": "thinking", "thinking": "x"}, '
+                '{"type": "tool_use", "name": "Bash", "input": {}}, '
+                '{"type": "tool_use", "name": "Read", "input": {}}]}}',
+                '{"type": "user", "message": {"content": []}}',
+                '{"type": "assistant", "message": {"content": '
+                '[{"type": "text", "text": "done"}]}}',
+            ]
+        )
+        self.assertEqual(summarize_agent_progress(stdout), (2, 2, "assistant"))
+        self.assertEqual(summarize_agent_progress(""), (0, 0, ""))
+        self.assertEqual(summarize_agent_progress(None), (0, 0, ""))
+
+
 class TriageWorkflowTemplateTest(unittest.TestCase):
     def test_example_workflow_reports_job_failures(self) -> None:
         # A triage job that dies during provisioning reports nothing on its own,
@@ -1470,6 +1583,14 @@ class TriageWorkflowTemplateTest(unittest.TestCase):
 
 
 class TriagePromptRubricTest(unittest.TestCase):
+    def test_prompt_sends_the_agent_to_its_time_budget(self) -> None:
+        # The budget only reaches the agent through the context file's last
+        # section; the prompt has to point at it, or a slow run burns to the
+        # hard kill with nothing to show (fived #7198/#7199/#7200/#7202).
+        prompt = Path("prompts/triage.zh.md").read_text(encoding="utf-8")
+        self.assertIn("运行时间预算", prompt)
+        self.assertIn("date -u", prompt)
+
     def test_prompt_carries_priority_rubric(self) -> None:
         # Without an explicit rubric the agent guesses priority from the bare
         # enum and mislabels functional failures as Low. Guard that every

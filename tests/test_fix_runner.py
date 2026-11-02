@@ -19,6 +19,7 @@ from bugpatrol.clients import (
 )
 from bugpatrol.config import load_project_config
 from bugpatrol.fix_runner import (
+    FIX_AGENT_TIMEOUT_SECONDS,
     FixRunPlan,
     _closing_issue_candidates,
     _run_fix_agent,
@@ -711,7 +712,9 @@ class RunFixAgentTimeoutTest(unittest.TestCase):
             timeout = subprocess.TimeoutExpired(cmd=["claude"], timeout=1200, output=b"partial", stderr=b"")
             timeout.stdout = b"partial"
             with patch("bugpatrol.fix_runner.subprocess.run", side_effect=timeout):
-                with self.assertRaisesRegex(RuntimeError, "fix agent timed out after 1200s"):
+                with self.assertRaisesRegex(
+                    RuntimeError, f"fix agent timed out after {FIX_AGENT_TIMEOUT_SECONDS}s"
+                ):
                     _run_fix_agent(plan)
 
 

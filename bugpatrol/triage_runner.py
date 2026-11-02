@@ -76,10 +76,16 @@ TRIAGE_RUN_STALE_AFTER = timedelta(minutes=60)
 
 # A hung LLM call used to burn the whole 60-minute triage job timeout with no
 # output, wasting a runner slot and ending in a silent cancel (run 32022343306
-# on #4938) rather than a visible failure. Normal triage is ~8 minutes; 20
-# minutes fails fast while leaving room for slow runs and the workflow's own
-# retries.
-AGENT_TIMEOUT_SECONDS = 1200
+# on #4938) rather than a visible failure. Normal triage is ~8 minutes; 30
+# minutes leaves room for the genuinely slow investigations that were being
+# killed mid-work at 20 (fived #7198/#7199/#7200/#7202 were still producing
+# output after 70-80 assistant turns at the old 1200s mark) while staying
+# inside the workflow job's own 60-minute cap.
+AGENT_TIMEOUT_SECONDS = 1800
+# How long before the hard kill the agent is told to stop investigating and
+# start writing its conclusion. Without that instruction an overrun produces
+# nothing at all, and the issue then costs another full run to retry.
+AGENT_WRAP_UP_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -97,6 +103,44 @@ class TriageRunPlan:
     # Human-facing note about which branch was analyzed (empty for main), shown
     # in the triage comment header and the Lark notify.
     branch_note: str = ""
+
+
+def render_run_budget(
+    *,
+    started_at: datetime,
+    timeout_seconds: int = AGENT_TIMEOUT_SECONDS,
+    wrap_up_seconds: int = AGENT_WRAP_UP_SECONDS,
+    python_path: str = sys.executable,
+) -> str:
+    """The run-budget block appended to the triage context.
+
+    The harness kills the agent at `timeout_seconds` regardless of what it is
+    doing, and a killed run produces no triage at all. The agent can only avoid
+    that if it knows the deadline and can read the clock — it has Bash, so
+    `date -u` is the anchor — so both are handed to it explicitly.
+
+    `python_path` is the interpreter bugpatrol itself runs under, which on the
+    CI runners is the tool venv with Pillow installed. The agent's bare
+    `python3` is the system one and has no third-party packages, which is how
+    fived #7202 burned turns on `sips` + hand-rolled PNG parsing.
+    """
+    deadline = started_at + timedelta(seconds=timeout_seconds)
+    wrap_up = deadline - timedelta(seconds=wrap_up_seconds)
+
+    def _fmt(moment: datetime) -> str:
+        return moment.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    return (
+        "\n## 运行时间预算\n\n"
+        f"- 本次运行开始于 {_fmt(started_at)}；进程会在 {_fmt(deadline)} 被硬性杀掉"
+        f"（约 {timeout_seconds // 60} 分钟）。**超时 = 本次分诊没有任何结论**，"
+        "前面所有调查一并作废。\n"
+        f"- 到 **{_fmt(wrap_up)}** 必须停止调查、开始把已有证据写成最终 JSON。"
+        "即使没查完也要按已掌握的信息下结论，并在分析里注明哪些部分未能核实。\n"
+        "- 用 `date -u` 查当前时间，据此安排剩余工作；不要等到被超时杀掉。\n"
+        f"- 需要用 Python 处理图片/数据时用 `{python_path}`（已装 Pillow），"
+        "系统 `python3` 可能缺第三方库。\n"
+    )
 
 
 def prepare_triage_run(
@@ -168,7 +212,12 @@ def prepare_triage_run(
     context_path = output_dir / "triage-context.md"
     schema_path = output_dir / "triage.schema.json"
     output_path = output_dir / "triage-output.json"
-    context_path.write_text(render_triage_context_markdown(context))
+    # Each attempt prepares its own context, so the budget reflects the attempt
+    # that is about to run instead of accumulating one block per retry.
+    context_path.write_text(
+        render_triage_context_markdown(context)
+        + render_run_budget(started_at=datetime.now(timezone.utc))
+    )
     schema_path.write_text(
         json.dumps(
             triage_output_schema(known_assignees=known_assignees),
@@ -369,6 +418,23 @@ def execute_triage_run(
         stdout = _coerce_text(error.stdout)
         stderr = _coerce_text(error.stderr)
         _write_turn_log(plan.output_path.parent, stdout, stderr)
+        turns, tool_calls, last_event = summarize_agent_progress(stdout)
+        if turns:
+            # The overwhelming majority of these are not hangs at all: the turn
+            # log shows steady output right up to the kill, and the run simply
+            # needed more than the budget. Saying "the endpoint hung" sent the
+            # last investigation down the wrong path for a whole round.
+            headline = (
+                f"The triage agent hit the {AGENT_TIMEOUT_SECONDS}s wall-clock limit and "
+                f"was killed while still working ({turns} assistant turns, {tool_calls} "
+                f"tool calls, last event `{last_event}`). The endpoint did not hang — the "
+                "investigation did not fit in the budget, so no conclusion was produced."
+            )
+        else:
+            headline = (
+                f"The triage agent produced no terminal output for {AGENT_TIMEOUT_SECONDS}s "
+                "and was killed; the LLM endpoint never answered."
+            )
         mark_triage_failed(
             config=config,
             issue_number=issue_number,
@@ -377,8 +443,7 @@ def execute_triage_run(
             issue_fields=issue_fields,
             lark=lark,
             reason=agent_failure_reason(
-                f"The triage agent produced no terminal output for {AGENT_TIMEOUT_SECONDS}s "
-                "and was killed (the LLM endpoint likely hung).",
+                headline,
                 stderr=stderr,
                 stdout=stdout,
             ),
@@ -1016,6 +1081,43 @@ def _bounded_log_tail(text: str | None, *, max_lines: int = 25, max_chars: int =
     if len(tail) > max_chars:
         tail = tail[-max_chars:]
     return tail
+
+
+def summarize_agent_progress(stdout: str | None) -> tuple[int, int, str]:
+    """(assistant turns, tool calls, last event type) from a stream-json log.
+
+    Used to tell a killed-mid-work run apart from one where the endpoint never
+    answered: the former has turns on stdout, the latter has none. Counting
+    turns rather than bytes keeps the failure comment readable.
+    """
+    turns = 0
+    tool_calls = 0
+    last_event = ""
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        event_type = event.get("type")
+        if isinstance(event_type, str) and event_type:
+            last_event = event_type
+        if event_type != "assistant":
+            continue
+        turns += 1
+        message = event.get("message")
+        blocks = message.get("content") if isinstance(message, dict) else None
+        if isinstance(blocks, list):
+            tool_calls += sum(
+                1
+                for block in blocks
+                if isinstance(block, dict) and block.get("type") == "tool_use"
+            )
+    return turns, tool_calls, last_event
 
 
 def agent_failure_reason(
