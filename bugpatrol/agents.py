@@ -21,6 +21,12 @@ from bugpatrol.config import ProjectConfig
 # once that subscription lapses it answers 403 "An active OpenCode Go
 # subscription is required", so per-token billing must go through this one.
 # Same `oc_sk_` key works on both — only the endpoint moved.
+#
+# This adapter rejects `cache_control` on content blocks ("Extra inputs are not
+# permitted"), which the claude CLI adds once a prompt crosses the caching
+# threshold — i.e. on every real triage/fix prompt. Callers must therefore set
+# DISABLE_PROMPT_CACHING=1; a 1-token probe does NOT catch this, because a
+# small request never carries cache_control.
 DEEPSEEK_ANTHROPIC_BASE_URL = "https://opencode.ai/inference/anthropic"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-v4.1-flash"
 
@@ -491,6 +497,9 @@ def build_triage_agent_invocation(
             "ANTHROPIC_BASE_URL": DEEPSEEK_ANTHROPIC_BASE_URL,
             "ANTHROPIC_API_KEY": api_key,
             "ANTHROPIC_AUTH_TOKEN": api_key,
+            # The pay-as-you-go adapter rejects cache_control; see the base-URL
+            # comment above. Without this, every real-sized prompt 400s.
+            "DISABLE_PROMPT_CACHING": "1",
         }
         if disable_thinking:
             env["CLAUDE_CODE_DISABLE_THINKING"] = "1"
@@ -643,6 +652,9 @@ def build_fix_agent_invocation(
             "ANTHROPIC_BASE_URL": DEEPSEEK_ANTHROPIC_BASE_URL,
             "ANTHROPIC_API_KEY": api_key,
             "ANTHROPIC_AUTH_TOKEN": api_key,
+            # The pay-as-you-go adapter rejects cache_control; see the base-URL
+            # comment above. Without this, every real-sized prompt 400s.
+            "DISABLE_PROMPT_CACHING": "1",
         }
         if disable_thinking:
             env["CLAUDE_CODE_DISABLE_THINKING"] = "1"

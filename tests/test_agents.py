@@ -180,6 +180,10 @@ class AgentsTest(unittest.TestCase):
         self.assertEqual(invocation.env["ANTHROPIC_BASE_URL"], DEEPSEEK_ANTHROPIC_BASE_URL)
         self.assertEqual(invocation.env["ANTHROPIC_API_KEY"], "sk-test")
         self.assertEqual(invocation.env["ANTHROPIC_AUTH_TOKEN"], "sk-test")
+        # The pay-as-you-go adapter rejects cache_control, and the CLI only
+        # emits it above a size threshold — so this must stay on or every
+        # real triage prompt 400s while small probes stay green.
+        self.assertEqual(invocation.env["DISABLE_PROMPT_CACHING"], "1")
         # The key must never leak into argv (visible in ps / run logs).
         self.assertNotIn("sk-test", " ".join(invocation.command))
 

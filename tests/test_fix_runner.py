@@ -687,6 +687,8 @@ class RunFixAgentTimeoutTest(unittest.TestCase):
         self.assertEqual(second_env["CLAUDE_CODE_DISABLE_THINKING"], "1")
         # The key must survive the retry's env rebuild.
         self.assertEqual(second_env["ANTHROPIC_API_KEY"], "sk-test")
+        # Required by the pay-as-you-go adapter: it rejects cache_control.
+        self.assertEqual(second_env["DISABLE_PROMPT_CACHING"], "1")
 
     def test_run_fix_agent_fails_fast_when_llm_call_hangs(self) -> None:
         # Same latent gap as the triage agent (#4938): a hung provider call used
