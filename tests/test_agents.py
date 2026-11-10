@@ -427,7 +427,7 @@ class BareGatewayRejectionTest(unittest.TestCase):
 class ThinkingReplayRejectionTest(unittest.TestCase):
     """DeepSeek's thinking mode refuses a transcript missing a thinking block.
 
-    The OpenCode Go gateway drops one now and then, and the SAME context then
+    The OpenCode gateway drops one now and then, and the SAME context then
     fails every time (#7119 died four times across three runners), so this needs
     its own retry — with thinking off — rather than the generic re-run.
     """

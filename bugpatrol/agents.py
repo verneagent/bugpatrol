@@ -15,9 +15,13 @@ from typing import Sequence
 
 from bugpatrol.config import ProjectConfig
 
-# DeepSeek via the OpenCode Go subscription gateway (Anthropic-compatible
+# DeepSeek via the OpenCode Zen pay-as-you-go gateway (Anthropic-compatible
 # endpoint). Host root WITHOUT /v1: the claude CLI appends /v1/messages itself.
-DEEPSEEK_ANTHROPIC_BASE_URL = "https://opencode.ai/zen/go"
+# The Go *subscription* lives at a different base (https://opencode.ai/zen/go);
+# once that subscription lapses it answers 403 "An active OpenCode Go
+# subscription is required", so per-token billing must go through this one.
+# Same `oc_sk_` key works on both — only the endpoint moved.
+DEEPSEEK_ANTHROPIC_BASE_URL = "https://opencode.ai/inference/anthropic"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-v4.1-flash"
 
 # Fatal agent errors a fresh attempt usually clears: an in-flight response
@@ -41,7 +45,7 @@ _TRANSIENT_AGENT_FAILURE_RE = re.compile(r"API Error: 5\d\d")
 
 # A 400 that is not about this run's request at all: DeepSeek's thinking mode
 # requires every historical assistant turn's thinking to be echoed back
-# verbatim, and the OpenCode Go gateway drops one now and then on the way to
+# verbatim, and the OpenCode gateway drops one now and then on the way to
 # its upstream. The same transcript then answers 200 on a direct replay
 # (verified on #7119: 8/8 replays and a full CLI re-run), yet triage died four
 # times in a row on it — so a blind retry does not help, and a probe would say
